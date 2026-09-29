@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/proto",
+    "crates/sync",
+    "crates/daemon",
+]
+default-members = ["crates/daemon"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[profile.release]
+# Size budget for the phase 0 binary. Symbols stay in the cargo output so
+# BENCHMARKS.md can report both this file and a separately stripped copy.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = false
