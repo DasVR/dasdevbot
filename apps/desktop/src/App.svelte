@@ -1,7 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
-  import { decide, emitPush, formatUsd, getSnapshot, type Decision, type Snapshot } from "./lib/api";
+  import {
+    decide,
+    emitPush,
+    formatUsd,
+    getSnapshot,
+    isTextEntry,
+    undo,
+    type Approval,
+    type Decision,
+    type Snapshot,
+  } from "./lib/api";
 
   let snapshot = $state<Snapshot | null>(null);
   let error = $state<string | null>(null);
@@ -9,8 +19,43 @@
   let deciding = $state(false);
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
-  const pending = $derived(snapshot?.approvals.find((approval) => approval.status === "pending") ?? null);
-  const history = $derived(snapshot?.approvals.filter((approval) => approval.status !== "pending") ?? []);
+  const oldestPending = $derived.by(() => {
+    const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
+    return rows.reduce<Approval | null>((oldest, approval) => {
+      if (!oldest || approval.created_at < oldest.created_at) {
+        return approval;
+      }
+      return oldest;
+    }, null);
+  });
+  const latestSettled = $derived.by(() => {
+    const rows = snapshot?.approvals.filter((approval) => approval.status !== "pending") ?? [];
+    return rows.reduce<Approval | null>((latest, approval) => {
+      if (!latest || approval.created_at > latest.created_at) {
+        return approval;
+      }
+      return latest;
+    }, null);
+  });
+  const shown = $derived(oldestPending ?? latestSettled);
+  const undoable = $derived.by(() => {
+    const now = Date.now();
+    const rows =
+      snapshot?.approvals.filter((approval) => {
+        return (
+          (approval.status === "approved" || approval.status === "denied") &&
+          !approval.committed &&
+          approval.undo_until != null &&
+          approval.undo_until > now
+        );
+      }) ?? [];
+    return rows.reduce<Approval | null>((latest, approval) => {
+      if (!latest || (approval.decided_at ?? 0) > (latest.decided_at ?? 0)) {
+        return approval;
+      }
+      return latest;
+    }, null);
+  });
 
   async function refresh(): Promise<void> {
     try {
@@ -33,16 +78,53 @@
     }
   }
 
-  async function ondecide(id: string, decision: Decision): Promise<void> {
+  async function ondecide(id: string, decision: Decision, reason?: string): Promise<boolean> {
     deciding = true;
     try {
-      await decide(id, decision);
+      await decide(id, decision, reason);
       await refresh();
+      return true;
     } catch (err) {
       error = err instanceof Error ? err.message : "The decision was not recorded.";
+      return false;
     } finally {
       deciding = false;
     }
+  }
+
+  async function onundo(id: string): Promise<boolean> {
+    deciding = true;
+    try {
+      await undo(id);
+      await refresh();
+      return true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "The decision could not be undone.";
+      return false;
+    } finally {
+      deciding = false;
+    }
+  }
+
+  function onWindowKey(event: KeyboardEvent): void {
+    if (event.repeat || isTextEntry(event.target)) {
+      return;
+    }
+    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
+      return;
+    }
+    if (event.key !== "z" && event.key !== "Z") {
+      return;
+    }
+    const target = undoable;
+    if (!target || target.undo_until == null || target.undo_until <= Date.now()) {
+      return;
+    }
+    event.preventDefault();
+    if (shown?.id === target.id) {
+      return;
+    }
+    void onundo(target.id);
   }
 
   onMount(() => {
@@ -53,6 +135,8 @@
     return () => clearInterval(timer);
   });
 </script>
+
+<svelte:window onkeydown={onWindowKey} />
 
 <div class="well">
   <div class="shell">
@@ -102,10 +186,16 @@
 
       <main>
         <p class="section">Approval</p>
-        {#if pending}
-          <ApprovalCard approval={pending} busy={deciding} ondecide={(decision) => void ondecide(pending.id, decision)} />
-        {:else if history.length > 0}
-          <ApprovalCard approval={history[0]} />
+        {#if shown}
+          {#key shown.id}
+            <ApprovalCard
+              approval={shown}
+              busy={deciding}
+              shortcutTarget={shown.status === "pending"}
+              ondecide={(decision, reason) => ondecide(shown.id, decision, reason)}
+              onundo={() => onundo(shown.id)}
+            />
+          {/key}
         {:else}
           <div class="empty">
             <h2>Nothing is waiting.</h2>
@@ -146,19 +236,16 @@
   .well {
     min-height: 100%;
     padding: var(--s-5);
-    background:
-      var(--well-depth),
-      var(--nil-void);
+    background: var(--paper-base);
   }
 
   .shell {
     max-width: 1120px;
     margin: 0 auto;
-    background-color: var(--nil-panel);
-    background-image: var(--panel-depth);
-    border: 1px solid var(--nil-line);
-    border-radius: var(--r-window);
-    box-shadow: var(--lift-2);
+    background: var(--paper-raised);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-2xl);
+    box-shadow: var(--shadow-float);
     overflow: hidden;
   }
 
@@ -168,14 +255,14 @@
     gap: var(--s-4);
     align-items: center;
     padding: var(--s-3) var(--s-4);
-    border-bottom: 1px solid var(--nil-line);
+    border-bottom: 1px solid var(--hairline);
   }
 
   .wordmark {
     display: flex;
     align-items: center;
     gap: var(--s-3);
-    font-weight: 600;
+    font-weight: var(--w-semibold);
     letter-spacing: var(--track-tight);
   }
 
@@ -183,9 +270,9 @@
     width: 42px;
     height: 10px;
     background:
-      radial-gradient(circle at 5px 5px, var(--nil-ink-4) 4px, transparent 4.5px),
-      radial-gradient(circle at 21px 5px, var(--nil-ink-4) 4px, transparent 4.5px),
-      radial-gradient(circle at 37px 5px, var(--nil-ink-4) 4px, transparent 4.5px);
+      radial-gradient(circle at 5px 5px, var(--ink-3) 4px, transparent 4.5px),
+      radial-gradient(circle at 21px 5px, var(--ink-3) 4px, transparent 4.5px),
+      radial-gradient(circle at 37px 5px, var(--ink-3) 4px, transparent 4.5px);
   }
 
   .status,
@@ -197,7 +284,7 @@
   }
 
   .status {
-    color: var(--nil-ink-3);
+    color: var(--ink-2);
     font-size: var(--t-micro);
     text-align: right;
   }
@@ -205,10 +292,9 @@
   .banner {
     margin: var(--s-3) var(--s-4) 0;
     padding: var(--s-2) var(--s-3);
-    border-radius: var(--r-field);
-    color: var(--sev-critical);
-    background: var(--sev-critical-bg);
-    border: 1px solid color-mix(in oklab, var(--sev-critical) 35%, transparent);
+    border-radius: var(--r-sm);
+    color: var(--danger);
+    background: var(--danger-bg);
   }
 
   .body {
@@ -219,18 +305,19 @@
 
   aside {
     padding: var(--s-4);
-    border-right: 1px solid var(--nil-line);
+    border-right: 1px solid var(--hairline);
   }
 
   main {
     padding: var(--s-4);
+    background: var(--paper-base);
   }
 
   .section {
-    color: var(--nil-ink-3);
-    font-size: var(--t-micro);
-    letter-spacing: var(--track-tick);
-    text-transform: uppercase;
+    color: var(--ink-2);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+    font-weight: var(--w-semibold);
     margin-bottom: var(--s-3);
   }
 
@@ -238,9 +325,10 @@
     position: relative;
     overflow: hidden;
     padding: var(--s-3);
-    border: 1px solid var(--nil-line);
-    border-radius: var(--r-card);
-    background: var(--nil-void);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-lg);
+    background: var(--paper-raised);
+    box-shadow: var(--shadow-puff);
   }
 
   .agent-row {
@@ -252,7 +340,9 @@
 
   h2 {
     font-size: var(--t-lead);
-    font-weight: 600;
+    line-height: var(--lh-lead);
+    font-weight: var(--w-semibold);
+    letter-spacing: var(--track-tight);
   }
 
   .agent-status,
@@ -261,7 +351,7 @@
   .hint,
   .muted,
   .persona {
-    color: var(--nil-ink-3);
+    color: var(--ink-2);
     font-size: var(--t-meta);
   }
 
@@ -269,20 +359,21 @@
     margin-top: var(--s-2);
     display: -webkit-box;
     -webkit-line-clamp: 4;
+    line-clamp: 4;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
 
   .budget {
     margin-top: var(--s-2);
-    color: var(--nil-ink-2);
+    color: var(--ink-1);
   }
 
   .scan {
     margin-top: var(--s-3);
     height: 2px;
     overflow: hidden;
-    background: var(--nil-line);
+    background: var(--hairline);
   }
 
   .scan::after {
@@ -290,19 +381,20 @@
     display: block;
     height: 100%;
     width: 35%;
-    background: var(--nil-ink);
+    background: var(--ink-1);
     animation: scan 1.1s linear infinite;
   }
 
   .simulate {
     width: 100%;
     margin-top: var(--s-4);
-    height: 32px;
-    border-radius: var(--r-field);
-    border: 1px solid var(--nil-line-hot);
-    background: var(--nil-raised);
-    color: var(--nil-ink);
-    font: 500 var(--t-meta) / 1 var(--font-ui);
+    height: 40px;
+    border-radius: var(--r-md);
+    border: 1.5px solid var(--ink-1);
+    background: var(--paper-raised);
+    color: var(--ink-1);
+    font-size: var(--t-meta);
+    font-weight: var(--w-semibold);
     cursor: pointer;
   }
 
@@ -311,25 +403,36 @@
     cursor: not-allowed;
   }
 
+  .simulate:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
   .hint {
     margin-top: var(--s-2);
   }
 
   .empty {
     padding: var(--s-5);
-    border: 1px solid var(--nil-line);
-    border-radius: var(--r-card);
-    background: var(--nil-raised);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-lg);
+    background: var(--paper-raised);
+    box-shadow: var(--shadow-puff);
+  }
+
+  .empty h2 {
+    font-size: var(--t-display);
+    line-height: var(--lh-display);
   }
 
   .empty p,
   .muted {
     margin-top: var(--s-2);
-    color: var(--nil-ink-2);
+    color: var(--ink-2);
   }
 
   .ledger-head {
-    margin-top: var(--s-5);
+    margin-top: var(--s-6);
   }
 
   .ledger {
@@ -340,13 +443,13 @@
 
   .ledger li {
     font-size: var(--t-meta);
-    color: var(--nil-ink);
+    color: var(--ink-1);
   }
 
   .ledger span,
   .log {
     display: block;
-    color: var(--nil-ink-3);
+    color: var(--ink-2);
     font-size: var(--t-micro);
   }
 
@@ -366,7 +469,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--nil-ink-2);
+    color: var(--ink-2);
     font-size: var(--t-micro);
   }
 
@@ -381,7 +484,7 @@
 
     aside {
       border-right: 0;
-      border-bottom: 1px solid var(--nil-line);
+      border-bottom: 1px solid var(--hairline);
     }
 
     .titlebar {

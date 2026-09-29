@@ -18,6 +18,9 @@ pub mod kind {
     pub const REPO_PUSH: &str = "repo.push";
     pub const APPROVAL_REQUESTED: &str = "approval.requested";
     pub const APPROVAL_DECIDED: &str = "approval.decided";
+    pub const APPROVAL_UNDONE: &str = "approval.undone";
+    pub const APPROVAL_COMMITTED: &str = "approval.committed";
+    pub const APPROVAL_EXPIRED: &str = "approval.expired";
     pub const LEDGER_POSTED: &str = "ledger.posted";
     pub const BUDGET_DENIED: &str = "budget.denied";
     pub const JOB_FAILED: &str = "job.failed";
