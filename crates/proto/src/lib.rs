@@ -42,6 +42,8 @@ pub struct EmitResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionRequest {
     pub decision: String,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +53,30 @@ pub struct DecisionResponse {
     pub status: String,
     pub event_id: String,
     pub executed: bool,
+    pub committed: bool,
+    /// Epoch milliseconds when the undo window closes. Absent once the decision is final.
+    #[serde(default)]
+    pub undo_until: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoResponse {
+    pub protocol: u32,
+    pub approval_id: String,
+    pub status: String,
+    pub event_id: String,
+}
+
+/// Structured evidence for the approval card. `evidence_text` on the approval
+/// keeps the older free-text line for clients that still read it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceView {
+    pub repo: String,
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    pub event_id: String,
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +101,9 @@ pub struct ApprovalView {
     pub action: String,
     pub purpose: String,
     pub draft: String,
-    pub evidence: String,
+    pub evidence: EvidenceView,
+    /// Legacy free-text evidence. Structured fields live on `evidence`.
+    pub evidence_text: String,
     pub status: String,
     pub provider: String,
     pub model: String,
@@ -83,6 +111,23 @@ pub struct ApprovalView {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub micro_usd: i64,
+    /// Epoch milliseconds the approval was created.
+    pub created_at: u64,
+    /// Epoch milliseconds the pending approval expires. Null once it is no longer pending.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    /// Epoch milliseconds the decision was recorded. Null while pending.
+    #[serde(default)]
+    pub decided_at: Option<u64>,
+    #[serde(default)]
+    pub decision_event_id: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// False while the decision is still inside the undo window.
+    pub committed: bool,
+    /// Epoch milliseconds when the undo window closes.
+    #[serde(default)]
+    pub undo_until: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

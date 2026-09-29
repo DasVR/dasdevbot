@@ -1,7 +1,18 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
-  import { decide, emitPush, formatUsd, getSnapshot, type Decision, type Snapshot } from "./lib/api";
+  import {
+    decide,
+    emitPush,
+    formatUsd,
+    getSnapshot,
+    isTextEntry,
+    shortEventId,
+    undo,
+    type Approval,
+    type Decision,
+    type Snapshot,
+  } from "./lib/api";
 
   let snapshot = $state<Snapshot | null>(null);
   let error = $state<string | null>(null);
@@ -9,8 +20,58 @@
   let deciding = $state(false);
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
-  const pending = $derived(snapshot?.approvals.find((approval) => approval.status === "pending") ?? null);
-  const history = $derived(snapshot?.approvals.filter((approval) => approval.status !== "pending") ?? []);
+  const oldestPending = $derived.by(() => {
+    const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
+    return rows.reduce<Approval | null>((oldest, approval) => {
+      if (!oldest || approval.created_at < oldest.created_at) {
+        return approval;
+      }
+      return oldest;
+    }, null);
+  });
+  const latestSettled = $derived.by(() => {
+    const rows = snapshot?.approvals.filter((approval) => approval.status !== "pending") ?? [];
+    return rows.reduce<Approval | null>((latest, approval) => {
+      if (!latest || approval.created_at > latest.created_at) {
+        return approval;
+      }
+      return latest;
+    }, null);
+  });
+  const shown = $derived(oldestPending ?? latestSettled);
+  const stream = $derived.by(() => {
+    const events = snapshot?.events ?? [];
+    const requestKey = shown ? `approval-requested:${shown.id}` : "";
+    return [...events].reverse().map((event) => {
+      const source = event.source.trim();
+      return {
+        id: event.id,
+        mark: source.charAt(0).toUpperCase() || "·",
+        who: source ? `${source} · ${event.kind}` : event.kind,
+        body: `${event.hlc} · ${shortEventId(event.id)}`,
+        request: requestKey !== "" && event.idempotency_key === requestKey,
+      };
+    });
+  });
+  const anchored = $derived(stream.some((row) => row.request));
+  const undoable = $derived.by(() => {
+    const now = Date.now();
+    const rows =
+      snapshot?.approvals.filter((approval) => {
+        return (
+          (approval.status === "approved" || approval.status === "denied") &&
+          !approval.committed &&
+          approval.undo_until != null &&
+          approval.undo_until > now
+        );
+      }) ?? [];
+    return rows.reduce<Approval | null>((latest, approval) => {
+      if (!latest || (approval.decided_at ?? 0) > (latest.decided_at ?? 0)) {
+        return approval;
+      }
+      return latest;
+    }, null);
+  });
 
   async function refresh(): Promise<void> {
     try {
@@ -33,16 +94,142 @@
     }
   }
 
-  async function ondecide(id: string, decision: Decision): Promise<void> {
+  async function ondecide(id: string, decision: Decision, reason?: string): Promise<boolean> {
     deciding = true;
     try {
-      await decide(id, decision);
+      await decide(id, decision, reason);
       await refresh();
+      return true;
     } catch (err) {
       error = err instanceof Error ? err.message : "The decision was not recorded.";
+      return false;
     } finally {
       deciding = false;
     }
+  }
+
+  async function onundo(id: string): Promise<boolean> {
+    deciding = true;
+    try {
+      await undo(id);
+      await refresh();
+      return true;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "The decision could not be undone.";
+      return false;
+    } finally {
+      deciding = false;
+    }
+  }
+
+  function onWindowKey(event: KeyboardEvent): void {
+    if (event.repeat || isTextEntry(event.target)) {
+      return;
+    }
+    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
+      return;
+    }
+    if (event.key !== "z" && event.key !== "Z") {
+      return;
+    }
+    const target = undoable;
+    if (!target || target.undo_until == null || target.undo_until <= Date.now()) {
+      return;
+    }
+    event.preventDefault();
+    if (shown?.id === target.id) {
+      return;
+    }
+    void onundo(target.id);
+  }
+
+  function pinOverlay(stage: HTMLElement): () => void {
+    const column = stage.closest("main");
+    if (!column) {
+      return () => {};
+    }
+    const place = () => {
+      const box = column.getBoundingClientRect();
+      stage.style.setProperty("--overlay-left", `${box.left}px`);
+      stage.style.setProperty("--overlay-width", `${box.width}px`);
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(column);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, { passive: true });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place);
+    };
+  }
+
+  function flipSlot(node: HTMLElement): () => void {
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let first = node.getBoundingClientRect();
+    let over = node.classList.contains("over");
+    let flying = false;
+    const remember = () => {
+      if (flying) {
+        return;
+      }
+      first = node.getBoundingClientRect();
+    };
+    const observer = new ResizeObserver(remember);
+    observer.observe(node);
+    const classes = new MutationObserver(() => {
+      const nextOver = node.classList.contains("over");
+      if (nextOver === over) {
+        return;
+      }
+      const origin = first;
+      over = nextOver;
+      const last = node.getBoundingClientRect();
+      const dx = origin.left - last.left;
+      const dy = origin.top - last.top;
+      if (motion.matches || (Math.abs(dx) < 1 && Math.abs(dy) < 1)) {
+        first = last;
+        if (!over) {
+          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
+        }
+        return;
+      }
+      flying = true;
+      if (!nextOver) {
+        node.style.zIndex = "4";
+        node.style.position = "relative";
+      }
+      node.style.transition = "none";
+      node.style.transform = `translate(${dx}px, ${dy}px)`;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          node.style.transition = "transform var(--dur-stage) var(--ease-out)";
+          node.style.transform = "translate(0px, 0px)";
+        });
+      });
+      const done = (event: TransitionEvent) => {
+        if (event.propertyName !== "transform") {
+          return;
+        }
+        node.removeEventListener("transitionend", done);
+        node.style.transition = "";
+        node.style.transform = "";
+        node.style.zIndex = "";
+        node.style.position = "";
+        flying = false;
+        if (!over) {
+          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
+        }
+        first = node.getBoundingClientRect();
+      };
+      node.addEventListener("transitionend", done);
+    });
+    classes.observe(node, { attributes: true, attributeFilter: ["class"] });
+    return () => {
+      observer.disconnect();
+      classes.disconnect();
+    };
   }
 
   onMount(() => {
@@ -53,6 +240,29 @@
     return () => clearInterval(timer);
   });
 </script>
+
+<svelte:window onkeydown={onWindowKey} />
+
+{#snippet approvalSlot()}
+  <div class={["slot", shown?.status === "pending" && "over"]} {@attach flipSlot}>
+    {#if shown}
+      {#key shown.id}
+        <ApprovalCard
+          approval={shown}
+          busy={deciding}
+          shortcutTarget={shown.status === "pending"}
+          ondecide={(decision, reason) => ondecide(shown.id, decision, reason)}
+          onundo={() => onundo(shown.id)}
+        />
+      {/key}
+    {:else}
+      <div class="empty">
+        <h2>Nothing is waiting.</h2>
+        <p>A push wakes Reviewer. The turn drafts a comment and asks before any external effect. Approving records the decision and does not post it.</p>
+      </div>
+    {/if}
+  </div>
+{/snippet}
 
 <div class="well">
   <div class="shell">
@@ -101,17 +311,28 @@
       </aside>
 
       <main>
-        <p class="section">Approval</p>
-        {#if pending}
-          <ApprovalCard approval={pending} busy={deciding} ondecide={(decision) => void ondecide(pending.id, decision)} />
-        {:else if history.length > 0}
-          <ApprovalCard approval={history[0]} />
-        {:else}
-          <div class="empty">
-            <h2>Nothing is waiting.</h2>
-            <p>A push wakes Reviewer. The turn drafts a comment and asks before any external effect. Approving records the decision and does not post it.</p>
-          </div>
-        {/if}
+        <p class="section">Stream</p>
+        <div class="stage" {@attach pinOverlay}>
+          <ol class="stream">
+            {#each stream as row (row.id)}
+              <li class={row.request && shown && shown.status !== "pending" ? "slot-row" : "ev"}>
+                {#if !(row.request && shown && shown.status !== "pending")}
+                  <span class="disc" aria-hidden="true">{row.mark}</span>
+                  <div class="bubble">
+                    <p class="who">{row.who}</p>
+                    <p class="ev-body">{row.body}</p>
+                  </div>
+                {/if}
+                {#if row.request && shown}
+                  {@render approvalSlot()}
+                {/if}
+              </li>
+            {/each}
+          </ol>
+          {#if !anchored}
+            {@render approvalSlot()}
+          {/if}
+        </div>
 
         <p class="section ledger-head">Ledger</p>
         {#if snapshot && snapshot.ledger.length > 0}
@@ -127,16 +348,6 @@
           <p class="muted">No spend yet. Idle agents do not call a provider.</p>
         {/if}
 
-        <p class="section ledger-head">Event log</p>
-        <ol class="log">
-          {#each snapshot?.events ?? [] as event (event.id)}
-            <li>
-              <span>{event.hlc}</span>
-              <span>{event.kind}</span>
-              <span>{event.id}</span>
-            </li>
-          {/each}
-        </ol>
       </main>
     </div>
   </div>
@@ -146,19 +357,16 @@
   .well {
     min-height: 100%;
     padding: var(--s-5);
-    background:
-      var(--well-depth),
-      var(--nil-void);
+    background: var(--paper-base);
   }
 
   .shell {
     max-width: 1120px;
     margin: 0 auto;
-    background-color: var(--nil-panel);
-    background-image: var(--panel-depth);
-    border: 1px solid var(--nil-line);
-    border-radius: var(--r-window);
-    box-shadow: var(--lift-2);
+    background: var(--paper-raised);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-2xl);
+    box-shadow: var(--shadow-float);
     overflow: hidden;
   }
 
@@ -168,14 +376,14 @@
     gap: var(--s-4);
     align-items: center;
     padding: var(--s-3) var(--s-4);
-    border-bottom: 1px solid var(--nil-line);
+    border-bottom: 1px solid var(--hairline);
   }
 
   .wordmark {
     display: flex;
     align-items: center;
     gap: var(--s-3);
-    font-weight: 600;
+    font-weight: var(--w-semibold);
     letter-spacing: var(--track-tight);
   }
 
@@ -183,21 +391,21 @@
     width: 42px;
     height: 10px;
     background:
-      radial-gradient(circle at 5px 5px, var(--nil-ink-4) 4px, transparent 4.5px),
-      radial-gradient(circle at 21px 5px, var(--nil-ink-4) 4px, transparent 4.5px),
-      radial-gradient(circle at 37px 5px, var(--nil-ink-4) 4px, transparent 4.5px);
+      radial-gradient(circle at 5px 5px, var(--ink-3) 4px, transparent 4.5px),
+      radial-gradient(circle at 21px 5px, var(--ink-3) 4px, transparent 4.5px),
+      radial-gradient(circle at 37px 5px, var(--ink-3) 4px, transparent 4.5px);
   }
 
   .status,
   .budget,
-  .log,
   .ledger,
-  .project {
+  .project,
+  .ev-body {
     font-family: var(--font-machine);
   }
 
   .status {
-    color: var(--nil-ink-3);
+    color: var(--ink-2);
     font-size: var(--t-micro);
     text-align: right;
   }
@@ -205,10 +413,9 @@
   .banner {
     margin: var(--s-3) var(--s-4) 0;
     padding: var(--s-2) var(--s-3);
-    border-radius: var(--r-field);
-    color: var(--sev-critical);
-    background: var(--sev-critical-bg);
-    border: 1px solid color-mix(in oklab, var(--sev-critical) 35%, transparent);
+    border-radius: var(--r-sm);
+    color: var(--ink-1);
+    background: var(--paper-sunken);
   }
 
   .body {
@@ -219,18 +426,19 @@
 
   aside {
     padding: var(--s-4);
-    border-right: 1px solid var(--nil-line);
+    border-right: 1px solid var(--hairline);
   }
 
   main {
     padding: var(--s-4);
+    background: var(--paper-base);
   }
 
   .section {
-    color: var(--nil-ink-3);
-    font-size: var(--t-micro);
-    letter-spacing: var(--track-tick);
-    text-transform: uppercase;
+    color: var(--ink-2);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+    font-weight: var(--w-semibold);
     margin-bottom: var(--s-3);
   }
 
@@ -238,9 +446,10 @@
     position: relative;
     overflow: hidden;
     padding: var(--s-3);
-    border: 1px solid var(--nil-line);
-    border-radius: var(--r-card);
-    background: var(--nil-void);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-lg);
+    background: var(--paper-raised);
+    box-shadow: var(--shadow-puff);
   }
 
   .agent-row {
@@ -252,7 +461,9 @@
 
   h2 {
     font-size: var(--t-lead);
-    font-weight: 600;
+    line-height: var(--lh-lead);
+    font-weight: var(--w-semibold);
+    letter-spacing: var(--track-tight);
   }
 
   .agent-status,
@@ -261,7 +472,7 @@
   .hint,
   .muted,
   .persona {
-    color: var(--nil-ink-3);
+    color: var(--ink-2);
     font-size: var(--t-meta);
   }
 
@@ -269,20 +480,21 @@
     margin-top: var(--s-2);
     display: -webkit-box;
     -webkit-line-clamp: 4;
+    line-clamp: 4;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
 
   .budget {
     margin-top: var(--s-2);
-    color: var(--nil-ink-2);
+    color: var(--ink-1);
   }
 
   .scan {
     margin-top: var(--s-3);
     height: 2px;
     overflow: hidden;
-    background: var(--nil-line);
+    background: var(--hairline);
   }
 
   .scan::after {
@@ -290,19 +502,26 @@
     display: block;
     height: 100%;
     width: 35%;
-    background: var(--nil-ink);
+    background: var(--ink-1);
     animation: scan 1.1s linear infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .scan::after {
+      animation: none;
+    }
   }
 
   .simulate {
     width: 100%;
     margin-top: var(--s-4);
-    height: 32px;
-    border-radius: var(--r-field);
-    border: 1px solid var(--nil-line-hot);
-    background: var(--nil-raised);
-    color: var(--nil-ink);
-    font: 500 var(--t-meta) / 1 var(--font-ui);
+    height: 40px;
+    border-radius: var(--r-md);
+    border: 1.5px solid var(--ink-1);
+    background: var(--paper-raised);
+    color: var(--ink-1);
+    font-size: var(--t-meta);
+    font-weight: var(--w-semibold);
     cursor: pointer;
   }
 
@@ -311,25 +530,118 @@
     cursor: not-allowed;
   }
 
+  .simulate:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
   .hint {
     margin-top: var(--s-2);
   }
 
+  .stage {
+    position: relative;
+  }
+
+  .stream {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+  }
+
+  .ev {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .disc {
+    width: 28px;
+    height: 28px;
+    flex: none;
+    border-radius: var(--r-pill);
+    background: var(--paper-sunken);
+    box-shadow: 0 0 0 1px var(--hairline);
+    display: grid;
+    place-items: center;
+    color: var(--ink-2);
+    font-size: 12px;
+    line-height: 1;
+    font-weight: var(--w-semibold);
+  }
+
+  .bubble {
+    flex: 1;
+    min-width: 0;
+    background: var(--convex), var(--paper-raised);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-lg);
+    padding: 12px 16px;
+    box-shadow: var(--shadow-puff);
+  }
+
+  .who {
+    color: var(--ink-3);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+  }
+
+  .ev-body {
+    margin-top: 4px;
+    color: var(--ink-1);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .slot {
+    margin-top: 14px;
+    scroll-margin-bottom: 16px;
+  }
+
+  .slot.over {
+    position: fixed;
+    z-index: 4;
+    left: var(--overlay-left, 0px);
+    width: var(--overlay-width, 100%);
+    bottom: 16px;
+    display: flex;
+    justify-content: center;
+    margin-top: 0;
+    padding: 0 28px;
+    pointer-events: none;
+    box-sizing: border-box;
+  }
+
+  .slot.over :global(article.card) {
+    width: min(520px, 100%);
+    pointer-events: auto;
+  }
+
   .empty {
     padding: var(--s-5);
-    border: 1px solid var(--nil-line);
-    border-radius: var(--r-card);
-    background: var(--nil-raised);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-lg);
+    background: var(--paper-raised);
+    box-shadow: var(--shadow-puff);
+  }
+
+  .empty h2 {
+    font-size: var(--t-display);
+    line-height: var(--lh-display);
   }
 
   .empty p,
   .muted {
     margin-top: var(--s-2);
-    color: var(--nil-ink-2);
+    color: var(--ink-2);
   }
 
   .ledger-head {
-    margin-top: var(--s-5);
+    margin-top: var(--s-6);
   }
 
   .ledger {
@@ -340,33 +652,12 @@
 
   .ledger li {
     font-size: var(--t-meta);
-    color: var(--nil-ink);
+    color: var(--ink-1);
   }
 
-  .ledger span,
-  .log {
+  .ledger span {
     display: block;
-    color: var(--nil-ink-3);
-    font-size: var(--t-micro);
-  }
-
-  .log {
-    list-style: none;
-    display: grid;
-    gap: 4px;
-  }
-
-  .log li {
-    display: grid;
-    grid-template-columns: minmax(0, 1.4fr) 0.8fr minmax(0, 1.2fr);
-    gap: var(--s-3);
-  }
-
-  .log span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--nil-ink-2);
+    color: var(--ink-2);
     font-size: var(--t-micro);
   }
 
@@ -381,7 +672,7 @@
 
     aside {
       border-right: 0;
-      border-bottom: 1px solid var(--nil-line);
+      border-bottom: 1px solid var(--hairline);
     }
 
     .titlebar {
@@ -391,10 +682,6 @@
 
     .status {
       text-align: left;
-    }
-
-    .log li {
-      grid-template-columns: 1fr;
     }
   }
 </style>

@@ -6,6 +6,13 @@ use uuid::Uuid;
 
 use crate::{Error, Result};
 
+/// How long a recorded decision stays undoable before it is final.
+pub const UNDO_WINDOW_MS: u64 = 6_000;
+
+/// How long a pending approval waits before it expires.
+/// The spec requires a TTL and does not set the length; 15 minutes is the phase-0 value.
+pub const APPROVAL_TTL_MS: u64 = 15 * 60 * 1000;
+
 const REVIEWER_PERSONA: &str = "\
 You are Reviewer, a teammate for the DasVR/NIL repository.
 When woken, draft a short review of the push in the user message.
@@ -72,6 +79,10 @@ pub struct ApprovalRow {
     pub purpose: String,
     pub draft: String,
     pub evidence: String,
+    pub evidence_repo: String,
+    pub evidence_ref: String,
+    pub evidence_event_id: String,
+    pub evidence_kind: String,
     pub status: String,
     pub provider: String,
     pub model: String,
@@ -79,6 +90,13 @@ pub struct ApprovalRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub micro_usd: i64,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub decided_at: Option<i64>,
+    pub decision_event_id: Option<String>,
+    pub reason: Option<String>,
+    pub commit_due_ms: Option<i64>,
+    pub committed: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +123,10 @@ pub struct NewApproval {
     pub purpose: String,
     pub draft: String,
     pub evidence: String,
+    pub evidence_repo: String,
+    pub evidence_ref: String,
+    pub evidence_event_id: String,
+    pub evidence_kind: String,
     pub provider: String,
     pub model: String,
     pub usage_kind: String,
@@ -199,6 +221,19 @@ impl Store {
             idempotency_key: idempotency_key.to_string(),
             thread_id: thread,
         }))
+    }
+
+    pub fn event_by_id(&self, id: &str) -> Result<Option<StoredEvent>> {
+        self.conn
+            .query_row(
+                "SELECT id, version, hlc_millis, hlc_counter, hlc_node, source, kind,
+                        payload, idempotency_key, thread_id
+                 FROM events WHERE id = ?1",
+                [id],
+                map_event,
+            )
+            .optional()
+            .map_err(Error::from)
     }
 
     pub fn event_by_key(&self, key: &str) -> Result<Option<StoredEvent>> {
@@ -519,11 +554,19 @@ impl Store {
                 wall_ms,
             },
         )?;
+        let expires_at = wall_ms.saturating_add(APPROVAL_TTL_MS) as i64;
         tx.execute(
             "INSERT INTO approvals (
                 id, job_id, agent_id, thread_id, effect_class, action, purpose, draft, evidence,
-                status, provider, model, usage_kind, input_tokens, output_tokens, micro_usd, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                evidence_repo, evidence_ref, evidence_event_id, evidence_kind,
+                status, provider, model, usage_kind, input_tokens, output_tokens, micro_usd,
+                created_at, expires_at, committed
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13,
+                'pending', ?14, ?15, ?16, ?17, ?18, ?19,
+                ?20, ?21, 0
+             )",
             params![
                 approval_id,
                 approval.job_id,
@@ -534,6 +577,10 @@ impl Store {
                 approval.purpose,
                 approval.draft,
                 approval.evidence,
+                approval.evidence_repo,
+                approval.evidence_ref,
+                approval.evidence_event_id,
+                approval.evidence_kind,
                 approval.provider,
                 approval.model,
                 approval.usage_kind,
@@ -541,6 +588,7 @@ impl Store {
                 approval.output_tokens,
                 approval.micro_usd,
                 wall_ms as i64,
+                expires_at,
             ],
         )?;
         tx.execute(
@@ -589,7 +637,10 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT a.id, a.job_id, a.agent_id, agents.name, a.thread_id, a.effect_class, a.action,
                     a.purpose, a.draft, a.evidence, a.status, a.provider, a.model, a.usage_kind,
-                    a.input_tokens, a.output_tokens, a.micro_usd
+                    a.input_tokens, a.output_tokens, a.micro_usd,
+                    a.evidence_repo, a.evidence_ref, a.evidence_event_id, a.evidence_kind,
+                    a.decided_at, a.decision_event_id, a.reason, a.commit_due_ms, a.committed,
+                    a.expires_at, a.created_at
              FROM approvals a
              JOIN agents ON agents.id = a.agent_id
              ORDER BY a.created_at DESC",
@@ -618,54 +669,52 @@ impl Store {
         Ok(out)
     }
 
-    /// Record approve or deny. The external effect is not executed.
+    /// Record approve or deny as pending-commit. The external effect waits for [`Self::commit_due`].
     pub fn decide_approval(
         &mut self,
         approval_id: &str,
         decision: &str,
+        reason: Option<&str>,
         wall_ms: u64,
-    ) -> Result<(String, String)> {
+    ) -> Result<DecisionRecord> {
         if decision != "approve" && decision != "deny" {
             return Err(Error::BadRequest("decision must be approve or deny".into()));
         }
+        let reason = clean_reason(reason);
         let status = if decision == "approve" {
             "approved"
         } else {
             "denied"
         };
+        let current = self.approval_decision_row(approval_id)?;
+        if current.status != "pending" {
+            if current.status == "expired" {
+                return Err(Error::BadRequest(
+                    "approval expired before a decision".into(),
+                ));
+            }
+            return Ok(DecisionRecord {
+                status: current.status,
+                event_id: current.decision_event_id.unwrap_or_default(),
+                executed: false,
+                committed: current.committed != 0,
+                undo_until: undo_until_ms(current.committed, current.commit_due_ms),
+            });
+        }
+        let commit_due = wall_ms.saturating_add(UNDO_WINDOW_MS);
         let hlc = self.clock.tick(wall_ms);
         let event_id = Uuid::new_v4().to_string();
-        let tx = self.conn.transaction()?;
-        let (current, job_id, thread_id, agent_id): (String, String, String, String) = tx
-            .query_row(
-                "SELECT status, job_id, thread_id, agent_id FROM approvals WHERE id = ?1",
-                [approval_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(|err| match err {
-                rusqlite::Error::QueryReturnedNoRows => {
-                    Error::NotFound(format!("approval {approval_id}"))
-                }
-                other => Error::Sqlite(other),
-            })?;
-        if current != "pending" {
-            let existing = tx
-                .query_row(
-                    "SELECT id FROM events WHERE idempotency_key = ?1",
-                    [format!("approval-decided:{approval_id}")],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap_or_else(|_| String::new());
-            return Ok((current, existing));
-        }
         let payload = serde_json::json!({
             "approval_id": approval_id,
             "decision": decision,
+            "reason": reason,
             "executed": false,
-            "reason": "phase 0 records the decision and does not perform the external effect",
+            "pending_commit": true,
+            "commit_due_ms": commit_due,
         })
         .to_string();
-        let decision_key = format!("approval-decided:{approval_id}");
+        let decision_key = format!("approval-decided:{approval_id}:{event_id}");
+        let tx = self.conn.transaction()?;
         insert_event(
             &tx,
             EventInsert {
@@ -675,23 +724,291 @@ impl Store {
                 kind: dasdevbot_core::kind::APPROVAL_DECIDED,
                 payload: &payload,
                 idempotency_key: &decision_key,
-                thread_id: &thread_id,
+                thread_id: &current.thread_id,
                 wall_ms,
             },
         )?;
-        tx.execute(
-            "UPDATE approvals SET status = ?1 WHERE id = ?2 AND status = 'pending'",
-            params![status, approval_id],
+        let changed = tx.execute(
+            "UPDATE approvals
+             SET status = ?1, decided_at = ?2, decision_event_id = ?3, reason = ?4,
+                 commit_due_ms = ?5, committed = 0
+             WHERE id = ?6 AND status = 'pending'",
+            params![
+                status,
+                wall_ms as i64,
+                event_id,
+                reason,
+                commit_due as i64,
+                approval_id,
+            ],
         )?;
-        tx.execute(
-            "UPDATE jobs SET status = 'done', lease_owner = NULL, lease_until_ms = NULL
-             WHERE id = ?1 AND status = 'waiting_approval'",
-            params![job_id],
-        )?;
-        let _ = agent_id;
+        if changed != 1 {
+            return Err(Error::BadRequest("approval was no longer pending".into()));
+        }
         tx.commit()?;
-        Ok((status.to_string(), event_id))
+        Ok(DecisionRecord {
+            status: status.to_string(),
+            event_id,
+            executed: false,
+            committed: false,
+            undo_until: Some(commit_due),
+        })
     }
+
+    /// Revert a pending-commit decision. Outside the window the decision is committed instead.
+    pub fn undo_approval(&mut self, approval_id: &str, wall_ms: u64) -> Result<DecisionRecord> {
+        self.commit_due(wall_ms)?;
+        let current = self.approval_decision_row(approval_id)?;
+        if current.status != "approved" && current.status != "denied" {
+            return Err(Error::BadRequest("approval is not awaiting commit".into()));
+        }
+        if current.committed != 0 {
+            return Err(Error::BadRequest("undo window has closed".into()));
+        }
+        let due = current.commit_due_ms.unwrap_or(0);
+        if due <= wall_ms as i64 {
+            return Err(Error::BadRequest("undo window has closed".into()));
+        }
+        let hlc = self.clock.tick(wall_ms);
+        let event_id = Uuid::new_v4().to_string();
+        let payload = serde_json::json!({
+            "approval_id": approval_id,
+            "reverted_decision": current.status,
+            "reverted_event_id": current.decision_event_id,
+        })
+        .to_string();
+        let key = format!("approval-undone:{approval_id}:{event_id}");
+        let tx = self.conn.transaction()?;
+        insert_event(
+            &tx,
+            EventInsert {
+                id: &event_id,
+                hlc: &hlc,
+                source: "human",
+                kind: dasdevbot_core::kind::APPROVAL_UNDONE,
+                payload: &payload,
+                idempotency_key: &key,
+                thread_id: &current.thread_id,
+                wall_ms,
+            },
+        )?;
+        let changed = tx.execute(
+            "UPDATE approvals
+             SET status = 'pending', decided_at = NULL, decision_event_id = NULL,
+                 reason = NULL, commit_due_ms = NULL, committed = 0
+             WHERE id = ?1 AND committed = 0 AND status IN ('approved', 'denied')",
+            params![approval_id],
+        )?;
+        if changed != 1 {
+            return Err(Error::BadRequest("undo window has closed".into()));
+        }
+        tx.commit()?;
+        Ok(DecisionRecord {
+            status: "pending".into(),
+            event_id,
+            executed: false,
+            committed: false,
+            undo_until: None,
+        })
+    }
+
+    /// Expire pending approvals past their TTL and commit decisions whose undo window has closed.
+    pub fn sweep(&mut self, wall_ms: u64) -> Result<()> {
+        self.expire_due(wall_ms)?;
+        self.commit_due(wall_ms)?;
+        Ok(())
+    }
+
+    pub fn expire_due(&mut self, wall_ms: u64) -> Result<Vec<String>> {
+        let due: Vec<(String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, job_id, thread_id FROM approvals
+                 WHERE status = 'pending'
+                   AND COALESCE(expires_at, created_at + ?1) <= ?2",
+            )?;
+            let rows = stmt.query_map(params![APPROVAL_TTL_MS as i64, wall_ms as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut expired = Vec::new();
+        for (id, job_id, thread_id) in due {
+            let hlc = self.clock.tick(wall_ms);
+            let event_id = Uuid::new_v4().to_string();
+            let payload = serde_json::json!({
+                "approval_id": id,
+                "reason": "ttl",
+            })
+            .to_string();
+            let key = format!("approval-expired:{id}");
+            let tx = self.conn.transaction()?;
+            insert_event(
+                &tx,
+                EventInsert {
+                    id: &event_id,
+                    hlc: &hlc,
+                    source: "runtime",
+                    kind: dasdevbot_core::kind::APPROVAL_EXPIRED,
+                    payload: &payload,
+                    idempotency_key: &key,
+                    thread_id: &thread_id,
+                    wall_ms,
+                },
+            )?;
+            tx.execute(
+                "UPDATE approvals SET status = 'expired',
+                    decided_at = ?1,
+                    decision_event_id = ?2,
+                    expires_at = COALESCE(expires_at, ?1)
+                 WHERE id = ?3 AND status = 'pending'",
+                params![wall_ms as i64, event_id, id],
+            )?;
+            tx.execute(
+                "UPDATE jobs SET status = 'done', lease_owner = NULL, lease_until_ms = NULL
+                 WHERE id = ?1 AND status = 'waiting_approval'",
+                params![job_id],
+            )?;
+            tx.commit()?;
+            expired.push(id);
+        }
+        Ok(expired)
+    }
+
+    /// Finalize decisions whose undo window has closed.
+    ///
+    /// This is the commit point. [`perform_commit_effect`] is where a later phase
+    /// posts to GitHub. Phase 0 returns false and records that nothing was posted.
+    pub fn commit_due(&mut self, wall_ms: u64) -> Result<Vec<String>> {
+        let due: Vec<(String, String, String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, job_id, thread_id, status, COALESCE(decision_event_id, '')
+                 FROM approvals
+                 WHERE committed = 0
+                   AND status IN ('approved', 'denied')
+                   AND commit_due_ms IS NOT NULL
+                   AND commit_due_ms <= ?1",
+            )?;
+            let rows = stmt.query_map([wall_ms as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut committed = Vec::new();
+        for (id, job_id, thread_id, status, decision_event_id) in due {
+            let executed = perform_commit_effect(&id, &status);
+            let hlc = self.clock.tick(wall_ms);
+            let event_id = Uuid::new_v4().to_string();
+            let payload = serde_json::json!({
+                "approval_id": id,
+                "decision": status,
+                "executed": executed,
+                "commit": true,
+            })
+            .to_string();
+            let key = format!("approval-committed:{id}:{decision_event_id}");
+            let tx = self.conn.transaction()?;
+            insert_event(
+                &tx,
+                EventInsert {
+                    id: &event_id,
+                    hlc: &hlc,
+                    source: "runtime",
+                    kind: dasdevbot_core::kind::APPROVAL_COMMITTED,
+                    payload: &payload,
+                    idempotency_key: &key,
+                    thread_id: &thread_id,
+                    wall_ms,
+                },
+            )?;
+            tx.execute(
+                "UPDATE approvals SET committed = 1 WHERE id = ?1 AND committed = 0",
+                params![id],
+            )?;
+            tx.execute(
+                "UPDATE jobs SET status = 'done', lease_owner = NULL, lease_until_ms = NULL
+                 WHERE id = ?1 AND status = 'waiting_approval'",
+                params![job_id],
+            )?;
+            tx.commit()?;
+            committed.push(id);
+        }
+        Ok(committed)
+    }
+
+    fn approval_decision_row(&self, approval_id: &str) -> Result<DecisionRow> {
+        self.conn
+            .query_row(
+                "SELECT status, job_id, thread_id, decision_event_id, commit_due_ms, committed
+                 FROM approvals WHERE id = ?1",
+                [approval_id],
+                |row| {
+                    Ok(DecisionRow {
+                        status: row.get(0)?,
+                        job_id: row.get(1)?,
+                        thread_id: row.get(2)?,
+                        decision_event_id: row.get(3)?,
+                        commit_due_ms: row.get(4)?,
+                        committed: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("approval {approval_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+}
+
+/// Outcome of decide or undo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionRecord {
+    pub status: String,
+    pub event_id: String,
+    pub executed: bool,
+    pub committed: bool,
+    pub undo_until: Option<u64>,
+}
+
+struct DecisionRow {
+    status: String,
+    #[allow(dead_code)]
+    job_id: String,
+    thread_id: String,
+    decision_event_id: Option<String>,
+    commit_due_ms: Option<i64>,
+    committed: i64,
+}
+
+fn undo_until_ms(committed: i64, commit_due_ms: Option<i64>) -> Option<u64> {
+    if committed != 0 {
+        return None;
+    }
+    commit_due_ms.and_then(|ms| if ms > 0 { Some(ms as u64) } else { None })
+}
+
+fn clean_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// Phase 0 commit hook. Returns whether an external side effect ran.
+/// A later phase posts to GitHub here, and only here, after the undo window.
+fn perform_commit_effect(_approval_id: &str, _decision: &str) -> bool {
+    false
 }
 
 struct EventInsert<'a> {
@@ -791,6 +1108,17 @@ fn map_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
         input_tokens: row.get(14)?,
         output_tokens: row.get(15)?,
         micro_usd: row.get(16)?,
+        evidence_repo: row.get(17)?,
+        evidence_ref: row.get(18)?,
+        evidence_event_id: row.get(19)?,
+        evidence_kind: row.get(20)?,
+        decided_at: row.get(21)?,
+        decision_event_id: row.get(22)?,
+        reason: row.get(23)?,
+        commit_due_ms: row.get(24)?,
+        committed: row.get(25)?,
+        expires_at: row.get(26)?,
+        created_at: row.get(27)?,
     })
 }
 
@@ -894,6 +1222,10 @@ fn migrate(conn: &Connection) -> Result<()> {
             purpose TEXT NOT NULL,
             draft TEXT NOT NULL,
             evidence TEXT NOT NULL,
+            evidence_repo TEXT NOT NULL DEFAULT '',
+            evidence_ref TEXT NOT NULL DEFAULT '',
+            evidence_event_id TEXT NOT NULL DEFAULT '',
+            evidence_kind TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL,
             provider TEXT NOT NULL,
             model TEXT NOT NULL,
@@ -901,7 +1233,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             input_tokens INTEGER NOT NULL,
             output_tokens INTEGER NOT NULL,
             micro_usd INTEGER NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            decided_at INTEGER,
+            decision_event_id TEXT,
+            reason TEXT,
+            commit_due_ms INTEGER,
+            committed INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS ledger (
@@ -919,6 +1257,51 @@ fn migrate(conn: &Connection) -> Result<()> {
             created_at INTEGER NOT NULL
         );
         ",
+    )?;
+    ensure_column(
+        conn,
+        "approvals",
+        "evidence_repo",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "approvals",
+        "evidence_ref",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "approvals",
+        "evidence_event_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "approvals",
+        "evidence_kind",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(conn, "approvals", "expires_at", "INTEGER")?;
+    ensure_column(conn, "approvals", "decided_at", "INTEGER")?;
+    ensure_column(conn, "approvals", "decision_event_id", "TEXT")?;
+    ensure_column(conn, "approvals", "reason", "TEXT")?;
+    ensure_column(conn, "approvals", "commit_due_ms", "INTEGER")?;
+    ensure_column(conn, "approvals", "committed", "INTEGER NOT NULL DEFAULT 0")?;
+    Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+        [],
     )?;
     Ok(())
 }
@@ -1096,5 +1479,174 @@ mod tests {
         assert_eq!(store.agent_status("reviewer").unwrap(), "idle");
         let _ = store.claim_at("w", 60, 1_000).unwrap().unwrap();
         assert_eq!(store.agent_status("reviewer").unwrap(), "working");
+    }
+
+    fn pending_approval(store: &mut Store, now: u64) -> String {
+        let job_key = format!("job-approval-{}", uuid::Uuid::new_v4());
+        let job_id = store
+            .enqueue_job("reviewer", &job_key, "{}", now)
+            .unwrap()
+            .unwrap();
+        store.claim_at("owner", now, 60_000).unwrap().unwrap();
+        store
+            .record_approval_and_wait(
+                now,
+                "owner",
+                NewApproval {
+                    job_id,
+                    agent_id: "reviewer".into(),
+                    thread_id: format!("thread-{now}"),
+                    effect_class: "external".into(),
+                    action: "post_pr_comment".into(),
+                    purpose: "Post a review comment.".into(),
+                    draft: "draft".into(),
+                    evidence: "repo DasVR/NIL\nref phase0\nevent ev_test".into(),
+                    evidence_repo: "DasVR/NIL".into(),
+                    evidence_ref: "phase0".into(),
+                    evidence_event_id: "ev_test".into(),
+                    evidence_kind: "repo.push".into(),
+                    provider: "mock".into(),
+                    model: "mock-review-v0".into(),
+                    usage_kind: "estimated".into(),
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    micro_usd: 0,
+                    ledger_note: "test".into(),
+                    project: "DasVR/NIL".into(),
+                },
+                "{}",
+                "{}",
+            )
+            .unwrap()
+    }
+
+    fn row(store: &Store, id: &str) -> ApprovalRow {
+        store
+            .approvals()
+            .unwrap()
+            .into_iter()
+            .find(|approval| approval.id == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn undo_inside_the_window_reverts_to_pending() {
+        let mut store = memory();
+        let now = 1_000_000;
+        let id = pending_approval(&mut store, now);
+        let decided = store
+            .decide_approval(&id, "approve", None, now + 10)
+            .unwrap();
+        assert_eq!(decided.status, "approved");
+        assert!(!decided.committed);
+        assert_eq!(decided.undo_until, Some(now + 10 + UNDO_WINDOW_MS));
+        assert_eq!(
+            store
+                .job_status(&row(&store, &id).job_id)
+                .unwrap()
+                .as_deref(),
+            Some("waiting_approval")
+        );
+
+        let undone = store.undo_approval(&id, now + 1_000).unwrap();
+        assert_eq!(undone.status, "pending");
+        let approval = row(&store, &id);
+        assert_eq!(approval.status, "pending");
+        assert!(approval.reason.is_none());
+        assert!(approval.decision_event_id.is_none());
+        assert_eq!(approval.committed, 0);
+        assert_eq!(store.agent_status("reviewer").unwrap(), "blocked");
+        let events = store.recent_events(20).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == dasdevbot_core::kind::APPROVAL_UNDONE));
+    }
+
+    #[test]
+    fn undo_outside_the_window_commits_and_rejects() {
+        let mut store = memory();
+        let now = 2_000_000;
+        let id = pending_approval(&mut store, now);
+        store
+            .decide_approval(&id, "deny", Some("no"), now + 5)
+            .unwrap();
+        let outside = now + 5 + UNDO_WINDOW_MS;
+        let err = store.undo_approval(&id, outside).unwrap_err();
+        assert!(err.to_string().contains("window"));
+        let approval = row(&store, &id);
+        assert_eq!(approval.status, "denied");
+        assert_eq!(approval.committed, 1);
+        assert_eq!(approval.reason.as_deref(), Some("no"));
+        assert_eq!(
+            store.job_status(&approval.job_id).unwrap().as_deref(),
+            Some("done")
+        );
+        assert_eq!(store.agent_status("reviewer").unwrap(), "idle");
+        let events = store.recent_events(20).unwrap();
+        let committed = events
+            .iter()
+            .find(|event| event.kind == dasdevbot_core::kind::APPROVAL_COMMITTED)
+            .unwrap();
+        assert!(committed.payload.contains("\"executed\":false"));
+        assert!(committed.payload.contains("\"commit\":true"));
+        let again = store.undo_approval(&id, outside + 50).unwrap_err();
+        assert!(again.to_string().contains("window"));
+    }
+
+    #[test]
+    fn reason_round_trips_and_blank_is_absent() {
+        let mut store = memory();
+        let now = 3_000_000;
+        let id = pending_approval(&mut store, now);
+        store
+            .decide_approval(
+                &id,
+                "deny",
+                Some("  Not worth a comment on a phase-0 branch  "),
+                now + 1,
+            )
+            .unwrap();
+        assert_eq!(
+            row(&store, &id).reason.as_deref(),
+            Some("Not worth a comment on a phase-0 branch")
+        );
+        store.undo_approval(&id, now + 2).unwrap();
+        assert!(row(&store, &id).reason.is_none());
+        store
+            .decide_approval(&id, "approve", Some("   "), now + 3)
+            .unwrap();
+        let approval = row(&store, &id);
+        assert_eq!(approval.status, "approved");
+        assert!(approval.reason.is_none());
+        assert_eq!(approval.evidence_repo, "DasVR/NIL");
+        assert_eq!(approval.evidence_ref, "phase0");
+        assert_eq!(approval.evidence_event_id, "ev_test");
+    }
+
+    #[test]
+    fn pending_approval_expires_after_ttl() {
+        let mut store = memory();
+        let now = 4_000_000;
+        let id = pending_approval(&mut store, now);
+        store.sweep(now + APPROVAL_TTL_MS - 1).unwrap();
+        assert_eq!(row(&store, &id).status, "pending");
+        store.sweep(now + APPROVAL_TTL_MS).unwrap();
+        let approval = row(&store, &id);
+        assert_eq!(approval.status, "expired");
+        assert!(approval.decided_at.is_some());
+        assert!(approval.decision_event_id.is_some());
+        assert_eq!(
+            store.job_status(&approval.job_id).unwrap().as_deref(),
+            Some("done")
+        );
+        assert_eq!(store.agent_status("reviewer").unwrap(), "idle");
+        let events = store.recent_events(20).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == dasdevbot_core::kind::APPROVAL_EXPIRED));
+        let err = store
+            .decide_approval(&id, "approve", None, now + APPROVAL_TTL_MS + 1)
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"));
     }
 }

@@ -1,5 +1,6 @@
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use dasdevbot_core::{decide, kind, EffectClass, GateInput, Policy};
 use dasdevbot_proto::EmitRequest;
@@ -23,10 +24,12 @@ pub fn spawn_worker(app: std::sync::Arc<App>, rx: mpsc::Receiver<()>) -> JoinHan
 }
 
 fn worker_loop(app: std::sync::Arc<App>, rx: mpsc::Receiver<()>) {
-    // Claim until the queue is empty, then park. The channel buffers a wake that
-    // arrives between the empty claim and recv, so a notification cannot be lost
-    // and the thread does not poll.
+    // Claim until the queue is empty, then park. A short timeout also sweeps
+    // approval expiry and the undo-window commit point while the queue is idle.
+    // The channel buffers a wake that arrives between the empty claim and recv,
+    // so a notification cannot be lost.
     loop {
+        sweep_approvals(&app);
         loop {
             let job = {
                 let store = app.store.lock().expect("store");
@@ -52,9 +55,18 @@ fn worker_loop(app: std::sync::Arc<App>, rx: mpsc::Receiver<()>) {
                 let _ = store.fail_leased(&job.id, &app.worker_id);
             }
         }
-        if rx.recv().is_err() {
-            break;
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+fn sweep_approvals(app: &App) {
+    let mut store = app.store.lock().expect("store");
+    if let Err(err) = store.sweep(wall_ms()) {
+        eprintln!("dasdevbotd sweep: {err}");
     }
 }
 
@@ -180,6 +192,10 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
         purpose: prepared.purpose,
         draft: completion.text,
         evidence: prepared.evidence,
+        evidence_repo: prepared.evidence_repo,
+        evidence_ref: prepared.evidence_ref,
+        evidence_event_id: prepared.evidence_event_id,
+        evidence_kind: prepared.evidence_kind,
         provider: completion.provider,
         model: completion.model,
         usage_kind: completion.usage_kind,
@@ -206,6 +222,10 @@ struct Prepared {
     project: String,
     user_message: String,
     evidence: String,
+    evidence_repo: String,
+    evidence_ref: String,
+    evidence_event_id: String,
+    evidence_kind: String,
     purpose: String,
     thread_id: String,
     tainted: bool,
@@ -266,6 +286,10 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
         ),
         evidence: format!("repo {repo}\nref {reference}\nevent {event_id}"),
+        evidence_repo: repo.to_string(),
+        evidence_ref: reference.to_string(),
+        evidence_event_id: event_id.to_string(),
+        evidence_kind: kind_name.to_string(),
         purpose: format!(
             "Post a review comment on {repo} at {reference}. Nothing is sent until you approve, and phase 0 does not send it at all."
         ),

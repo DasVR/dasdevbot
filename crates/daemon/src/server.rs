@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -5,7 +6,8 @@ use std::sync::Arc;
 
 use dasdevbot_proto::{
     AgentView, ApprovalView, DecisionRequest, DecisionResponse, EmitRequest, EmitResponse,
-    ErrorBody, EventView, Health, LedgerView, Snapshot, PROTOCOL_VERSION,
+    ErrorBody, EventView, EvidenceView, Health, LedgerView, Snapshot, UndoResponse,
+    PROTOCOL_VERSION,
 };
 use dasdevbot_sync::TRANSPORT;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -61,7 +63,8 @@ fn dispatch(app: &App, request: &mut Request) -> Result<Response<Cursor<Vec<u8>>
     match (request.method(), matched.as_str()) {
         (&Method::Get, "/v1/health") => Ok(json_response(200, &health(app))),
         (&Method::Get, "/v1/snapshot") => {
-            let store = app.store.lock().expect("store");
+            let mut store = app.store.lock().expect("store");
+            store.sweep(wall_ms())?;
             Ok(json_response(200, &snapshot(app, &store)?))
         }
         (&Method::Post, "/v1/events") => {
@@ -104,18 +107,46 @@ fn dispatch(app: &App, request: &mut Request) -> Result<Response<Cursor<Vec<u8>>
             let body = read_body(request)?;
             let req: DecisionRequest = serde_json::from_str(&body)
                 .map_err(|err| Error::BadRequest(format!("invalid JSON: {err}")))?;
-            let (status, event_id) = {
+            let recorded = {
                 let mut store = app.store.lock().expect("store");
-                store.decide_approval(&id, &req.decision, wall_ms())?
+                store.decide_approval(&id, &req.decision, req.reason.as_deref(), wall_ms())?
             };
             Ok(json_response(
                 200,
                 &DecisionResponse {
                     protocol: PROTOCOL_VERSION,
                     approval_id: id,
-                    status,
-                    event_id,
-                    executed: false,
+                    status: recorded.status,
+                    event_id: recorded.event_id,
+                    executed: recorded.executed,
+                    committed: recorded.committed,
+                    undo_until: recorded.undo_until,
+                },
+            ))
+        }
+        (&Method::Post, approval_path)
+            if approval_path.starts_with("/v1/approvals/") && approval_path.ends_with("/undo") =>
+        {
+            let id = approval_path
+                .trim_start_matches("/v1/approvals/")
+                .trim_end_matches("/undo")
+                .trim_matches('/')
+                .to_string();
+            if id.is_empty() || id.contains('/') {
+                return Err(Error::BadRequest("missing approval id".into()));
+            }
+            let _ = read_body(request)?;
+            let recorded = {
+                let mut store = app.store.lock().expect("store");
+                store.undo_approval(&id, wall_ms())?
+            };
+            Ok(json_response(
+                200,
+                &UndoResponse {
+                    protocol: PROTOCOL_VERSION,
+                    approval_id: id,
+                    status: recorded.status,
+                    event_id: recorded.event_id,
                 },
             ))
         }
@@ -159,27 +190,48 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
             }
         })
         .collect();
-    let approvals = store
-        .approvals()?
+    let approval_rows = store.approvals()?;
+    let events = referenced_events(store, &approval_rows)?
         .into_iter()
-        .map(|row| ApprovalView {
-            id: row.id,
-            job_id: row.job_id,
-            agent_id: row.agent_id,
-            agent_name: row.agent_name,
-            thread_id: row.thread_id,
-            effect_class: row.effect_class,
-            action: row.action,
-            purpose: row.purpose,
-            draft: row.draft,
-            evidence: row.evidence,
-            status: row.status,
-            provider: row.provider,
-            model: row.model,
-            usage_kind: row.usage_kind,
-            input_tokens: row.input_tokens.max(0) as u64,
-            output_tokens: row.output_tokens.max(0) as u64,
-            micro_usd: row.micro_usd,
+        .map(event_view)
+        .collect();
+    let approvals = approval_rows
+        .into_iter()
+        .map(|row| {
+            let evidence = evidence_view(&row);
+            let pending = row.status == "pending";
+            let committed = row.committed != 0;
+            ApprovalView {
+                id: row.id,
+                job_id: row.job_id,
+                agent_id: row.agent_id,
+                agent_name: row.agent_name,
+                thread_id: row.thread_id,
+                effect_class: row.effect_class,
+                action: row.action,
+                purpose: row.purpose,
+                draft: row.draft,
+                evidence,
+                evidence_text: row.evidence,
+                status: row.status,
+                provider: row.provider,
+                model: row.model,
+                usage_kind: row.usage_kind,
+                input_tokens: row.input_tokens.max(0) as u64,
+                output_tokens: row.output_tokens.max(0) as u64,
+                micro_usd: row.micro_usd,
+                created_at: row.created_at.max(0) as u64,
+                expires_at: optional_ms(row.expires_at, pending),
+                decided_at: optional_ms(row.decided_at, true),
+                decision_event_id: row.decision_event_id,
+                reason: row.reason,
+                committed,
+                undo_until: if committed {
+                    None
+                } else {
+                    optional_ms(row.commit_due_ms, true)
+                },
+            }
         })
         .collect();
     let ledger = store
@@ -199,19 +251,6 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
             note: row.note,
         })
         .collect();
-    let events = store
-        .recent_events(30)?
-        .into_iter()
-        .map(|event| EventView {
-            id: event.id,
-            version: event.version,
-            hlc: event.hlc.to_string(),
-            source: event.source,
-            kind: event.kind,
-            thread_id: event.thread_id,
-            idempotency_key: event.idempotency_key,
-        })
-        .collect();
     Ok(Snapshot {
         protocol: PROTOCOL_VERSION,
         role: app.role.clone(),
@@ -224,6 +263,103 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
         ledger,
         events,
     })
+}
+
+fn event_view(event: crate::store::StoredEvent) -> EventView {
+    EventView {
+        id: event.id,
+        version: event.version,
+        hlc: event.hlc.to_string(),
+        source: event.source,
+        kind: event.kind,
+        thread_id: event.thread_id,
+        idempotency_key: event.idempotency_key,
+    }
+}
+
+/// Recent events, plus any evidence, decision, or `approval.requested` row the
+/// card names, so a displayed `ev_####` is always a row in the stream.
+fn referenced_events(
+    store: &crate::store::Store,
+    approvals: &[crate::store::ApprovalRow],
+) -> Result<Vec<crate::store::StoredEvent>> {
+    let mut events = store.recent_events(30)?;
+    let mut seen: HashSet<String> = events.iter().map(|event| event.id.clone()).collect();
+    let mut extra = Vec::new();
+    for row in approvals {
+        remember(store, &mut seen, &mut extra, &row.evidence_event_id)?;
+        if let Some(id) = row.decision_event_id.as_deref() {
+            remember(store, &mut seen, &mut extra, id)?;
+        }
+        let key = format!("approval-requested:{}", row.id);
+        if let Some(event) = store.event_by_key(&key)? {
+            if seen.insert(event.id.clone()) {
+                extra.push(event);
+            }
+        }
+    }
+    events.append(&mut extra);
+    events.sort_by(|left, right| {
+        right
+            .hlc
+            .cmp(&left.hlc)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    Ok(events)
+}
+
+fn remember(
+    store: &crate::store::Store,
+    seen: &mut HashSet<String>,
+    extra: &mut Vec<crate::store::StoredEvent>,
+    id: &str,
+) -> Result<()> {
+    if id.is_empty() || !seen.insert(id.to_string()) {
+        return Ok(());
+    }
+    if let Some(event) = store.event_by_id(id)? {
+        extra.push(event);
+    }
+    Ok(())
+}
+
+fn evidence_view(row: &crate::store::ApprovalRow) -> EvidenceView {
+    if !row.evidence_repo.is_empty()
+        || !row.evidence_ref.is_empty()
+        || !row.evidence_event_id.is_empty()
+    {
+        return EvidenceView {
+            repo: row.evidence_repo.clone(),
+            git_ref: row.evidence_ref.clone(),
+            event_id: row.evidence_event_id.clone(),
+            kind: row.evidence_kind.clone(),
+        };
+    }
+    let mut repo = String::new();
+    let mut git_ref = String::new();
+    let mut event_id = String::new();
+    for line in row.evidence.lines() {
+        if let Some(rest) = line.strip_prefix("repo ") {
+            repo = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("ref ") {
+            git_ref = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("event ") {
+            event_id = rest.trim().to_string();
+        }
+    }
+    EvidenceView {
+        repo,
+        git_ref,
+        event_id,
+        kind: String::new(),
+    }
+}
+
+fn optional_ms(value: Option<i64>, include: bool) -> Option<u64> {
+    if !include {
+        return None;
+    }
+    value.and_then(|ms| if ms >= 0 { Some(ms as u64) } else { None })
 }
 
 fn serve_static(app: &App, path: &str) -> Response<Cursor<Vec<u8>>> {
@@ -410,11 +546,28 @@ mod tests {
         let approval = &snap["approvals"][0];
         assert_eq!(approval["status"], "pending");
         assert_eq!(approval["effect_class"], "external");
-        assert_eq!(approval["provider"], "mock");
-        assert!(approval["draft"]
+        assert_eq!(approval["action"], "post_pr_comment");
+        assert_eq!(approval["evidence"]["repo"], "DasVR/NIL");
+        assert_eq!(approval["evidence"]["ref"], "phase0");
+        assert_eq!(approval["evidence"]["kind"], "repo.push");
+        assert!(!approval["evidence"]["event_id"]
             .as_str()
             .unwrap()
-            .contains("[mock provider]"));
+            .is_empty());
+        assert!(approval["evidence_text"]
+            .as_str()
+            .unwrap()
+            .contains("DasVR/NIL"));
+        assert_eq!(approval["provider"], "mock");
+        assert!(approval["draft"].as_str().unwrap().contains("refresh()"));
+        let evidence_id = approval["evidence"]["event_id"].as_str().unwrap();
+        let approval_id = approval["id"].as_str().unwrap();
+        let request_key = format!("approval-requested:{approval_id}");
+        let events = snap["events"].as_array().unwrap();
+        assert!(events.iter().any(|event| event["id"] == evidence_id));
+        assert!(events
+            .iter()
+            .any(|event| event["idempotency_key"] == request_key));
         let agents = snap["agents"].as_array().unwrap();
         let reviewer = agents.iter().find(|a| a["id"] == "reviewer").unwrap();
         assert_eq!(reviewer["status"], "blocked");
@@ -425,8 +578,7 @@ mod tests {
 
         let decision = agent
             .post(&format!(
-                "http://{addr}/v1/approvals/{}/decision",
-                approval["id"].as_str().unwrap()
+                "http://{addr}/v1/approvals/{approval_id}/decision"
             ))
             .send_json(json!({"decision": "approve"}))
             .unwrap()
@@ -434,6 +586,8 @@ mod tests {
             .unwrap();
         assert_eq!(decision.status, "approved");
         assert!(!decision.executed);
+        assert!(!decision.committed);
+        assert!(decision.undo_until.is_some());
         assert!(!decision.event_id.is_empty());
 
         let after: serde_json::Value = agent
@@ -443,6 +597,7 @@ mod tests {
             .into_json()
             .unwrap();
         assert_eq!(after["approvals"][0]["status"], "approved");
+        assert_eq!(after["approvals"][0]["committed"], false);
         assert_eq!(
             after["agents"]
                 .as_array()
@@ -450,9 +605,53 @@ mod tests {
                 .iter()
                 .find(|a| a["id"] == "reviewer")
                 .unwrap()["status"],
-            "idle"
+            "blocked"
         );
-        let kinds: Vec<&str> = after["events"]
+
+        let undone = agent
+            .post(&format!("http://{addr}/v1/approvals/{approval_id}/undo"))
+            .send_json(json!({}))
+            .unwrap()
+            .into_json::<dasdevbot_proto::UndoResponse>()
+            .unwrap();
+        assert_eq!(undone.status, "pending");
+
+        let denied = agent
+            .post(&format!(
+                "http://{addr}/v1/approvals/{approval_id}/decision"
+            ))
+            .send_json(json!({
+                "decision": "deny",
+                "reason": "Not worth a comment on a phase-0 branch"
+            }))
+            .unwrap()
+            .into_json::<DecisionResponse>()
+            .unwrap();
+        assert_eq!(denied.status, "denied");
+        assert!(!denied.executed);
+        assert!(!denied.committed);
+
+        let reasoned: serde_json::Value = agent
+            .get(&format!("http://{addr}/v1/snapshot"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(reasoned["approvals"][0]["status"], "denied");
+        assert_eq!(
+            reasoned["approvals"][0]["reason"],
+            "Not worth a comment on a phase-0 branch"
+        );
+        assert_eq!(
+            reasoned["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["id"] == "reviewer")
+                .unwrap()["status"],
+            "blocked"
+        );
+        let kinds: Vec<&str> = reasoned["events"]
             .as_array()
             .unwrap()
             .iter()
@@ -461,7 +660,9 @@ mod tests {
         assert!(kinds.contains(&"repo.push"));
         assert!(kinds.contains(&"approval.requested"));
         assert!(kinds.contains(&"approval.decided"));
+        assert!(kinds.contains(&"approval.undone"));
         assert!(kinds.contains(&"ledger.posted"));
+        assert!(!kinds.contains(&"approval.committed"));
     }
 
     fn wait_ok(agent: &ureq::Agent, url: &str) -> serde_json::Value {
