@@ -34,52 +34,32 @@ function unitRandom(seed: number): () => number {
   };
 }
 
-function n(value: number): string {
-  return value.toFixed(1);
+const NUDGE_PX = 1.5;
+
+function nudge(rng: () => number, x: number, y: number): string {
+  const dx = (rng() - 0.5) * (NUDGE_PX * 2);
+  const dy = (rng() - 0.5) * (NUDGE_PX * 2);
+  return `${(x + dx).toFixed(2)} ${(y + dy).toFixed(2)}`;
 }
 
-/** Seeded wobble from beside the title to the risk strip. Length follows layout. */
-export function arrowFromLayout(
-  approvalId: string,
-  card: DOMRect,
-  strip: DOMRect,
-  title: DOMRect,
-): ArrowMark | null {
-  const startX = title.right - card.left + 12;
-  const startY = title.top - card.top + title.height * 0.42;
-  const endX = strip.right - card.left - 36;
-  const endY = strip.bottom - card.top - 1;
-  const dx = endX - startX;
-  const dy = endY - startY;
-  const len = Math.hypot(dx, dy);
-  if (len < 12 || card.width < 8 || card.height < 8) {
-    return null;
-  }
+/**
+ * Mock shaft + head in a 58×46 box. Endpoints stay put so the tip lands on the
+ * strip's lower edge; only the control points take a seeded ±1.5px nudge.
+ */
+export function arrowFromId(approvalId: string): ArrowMark {
   const rng = unitRandom(hashSeed(approvalId));
-  const px = -dy / len;
-  const py = dx / len;
-  const wobbleA = (rng() - 0.5) * 10;
-  const wobbleB = (rng() - 0.5) * 8;
-  const c1x = startX + dx * 0.34 + px * wobbleA;
-  const c1y = startY + dy * 0.34 + py * wobbleA;
-  const c2x = startX + dx * 0.7 + px * wobbleB;
-  const c2y = startY + dy * 0.7 + py * wobbleB;
-  const shaft = `M${n(startX)} ${n(startY)}C${n(c1x)} ${n(c1y)} ${n(c2x)} ${n(c2y)} ${n(endX)} ${n(endY)}`;
-  const tx = dx / len;
-  const ty = dy / len;
-  const back = 8 + rng() * 2;
-  const spread = 4.2 + rng() * 1.6;
-  const bx = endX - tx * back;
-  const by = endY - ty * back;
-  const lx = bx + px * spread;
-  const ly = by + py * spread;
-  const rx = bx - px * spread;
-  const ry = by - py * spread;
-  const head = `M${n(lx)} ${n(ly)}C${n((lx + endX) / 2)} ${n((ly + endY) / 2)} ${n(endX - tx * 2)} ${n(endY - ty * 2)} ${n(endX)} ${n(endY)}C${n(endX - tx * 2)} ${n(endY - ty * 2)} ${n((rx + endX) / 2)} ${n((ry + endY) / 2)} ${n(rx)} ${n(ry)}`;
+  const shaftC1 = nudge(rng, 46.1, 35.8);
+  const shaftC2 = nudge(rng, 43.3, 29.7);
+  const shaftC3 = nudge(rng, 34.3, 19.3);
+  const shaftC4 = nudge(rng, 29.5, 15.1);
+  const headC1 = nudge(rng, 28.7, 9.7);
+  const headC2 = nudge(rng, 26.3, 9.0);
+  const headC3 = nudge(rng, 24.5, 10.9);
+  const headC4 = nudge(rng, 25.2, 13.4);
   return {
-    width: Math.max(1, Math.round(card.width)),
-    height: Math.max(1, Math.round(card.height)),
-    shaft,
-    head,
+    width: 58,
+    height: 46,
+    shaft: `M47.2 42.6C${shaftC1} ${shaftC2} 38.4 24.0C${shaftC3} ${shaftC4} 24.2 8.2`,
+    head: `M31.4 10.6C${headC1} ${headC2} 24.1 8.3C${headC3} ${headC4} 26.2 15.9`,
   };
 }

@@ -16,7 +16,7 @@
     type Approval,
     type Decision,
   } from "./api";
-  import { CHECK_PATH, CHEVRON_PATH, DENY_MARK_PATH, STRIKE_PATH, arrowFromLayout, type ArrowMark } from "./pen";
+  import { CHECK_PATH, CHEVRON_PATH, DENY_MARK_PATH, STRIKE_PATH, arrowFromId, type ArrowMark } from "./pen";
 
   interface Props {
     approval: Approval;
@@ -172,17 +172,8 @@
     const id = approval.id;
     let current = "";
     const measure = () => {
-      const heading = card.querySelector("h2");
-      if (!heading) {
-        return;
-      }
-      const next = arrowFromLayout(
-        id,
-        card.getBoundingClientRect(),
-        strip.getBoundingClientRect(),
-        heading.getBoundingClientRect(),
-      );
-      const key = next ? `${next.width}x${next.height}:${next.shaft}` : "";
+      const next = arrowFromId(id);
+      const key = `${next.width}x${next.height}:${next.shaft}:${next.head}`;
       if (key === current) {
         return;
       }
@@ -190,11 +181,9 @@
       arrow = next;
     };
     measure();
-    const frame = requestAnimationFrame(measure);
     const observer = new ResizeObserver(measure);
     observer.observe(card);
     return () => {
-      cancelAnimationFrame(frame);
       observer.disconnect();
     };
   }
@@ -652,8 +641,8 @@
 
       <div class="quiet">
         <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && seenArmed && !denyOpen}
-          <p class="hold-hint">hold ⌘↵ / hold ⌘⌫</p>
+        {#if cardFocused && !denyOpen}
+          <p class={["hold-hint", seenArmed && "armed"]}>hold ⌘↵ / hold ⌘⌫</p>
         {/if}
       </div>
     </div>
@@ -753,7 +742,7 @@
     gap: 8px;
     min-height: 36px;
     padding: 8px 14px;
-    border-radius: 20px;
+    border-radius: var(--r-lg);
     background: var(--risk-bg);
     color: var(--risk-external);
     font-size: var(--t-meta);
@@ -767,13 +756,13 @@
 
   .card[data-risk="destructive"] .risk {
     color: var(--risk-destructive);
-    background: var(--danger-bg);
+    background: var(--risk-destructive-bg);
   }
 
   .risk-read {
-    min-height: 36px;
+    margin: 0;
     padding: 8px 14px;
-    color: var(--ink-2);
+    color: var(--risk-read);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
     font-weight: var(--w-semibold);
@@ -822,9 +811,10 @@
 
   .arrow {
     position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
+    right: 34px;
+    top: 38px;
+    width: 58px;
+    height: 46px;
     overflow: visible;
     pointer-events: none;
   }
@@ -1112,6 +1102,10 @@
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
+    color: var(--ink-3);
+  }
+
+  .hold-hint.armed {
     color: var(--ink-2);
   }
 
