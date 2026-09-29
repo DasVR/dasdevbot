@@ -38,6 +38,18 @@
     }, null);
   });
   const shown = $derived(oldestPending ?? latestSettled);
+  const stream = $derived.by(() => {
+    const events = snapshot?.events ?? [];
+    return [...events].reverse().map((event) => {
+      const source = event.source.trim();
+      return {
+        id: event.id,
+        mark: source.charAt(0).toUpperCase() || "·",
+        who: source ? `${source} · ${event.kind}` : event.kind,
+        body: `${event.hlc} · ${event.id}`,
+      };
+    });
+  });
   const undoable = $derived.by(() => {
     const now = Date.now();
     const rows =
@@ -185,23 +197,38 @@
       </aside>
 
       <main>
-        <p class="section">Approval</p>
-        {#if shown}
-          {#key shown.id}
-            <ApprovalCard
-              approval={shown}
-              busy={deciding}
-              shortcutTarget={shown.status === "pending"}
-              ondecide={(decision, reason) => ondecide(shown.id, decision, reason)}
-              onundo={() => onundo(shown.id)}
-            />
-          {/key}
-        {:else}
-          <div class="empty">
-            <h2>Nothing is waiting.</h2>
-            <p>A push wakes Reviewer. The turn drafts a comment and asks before any external effect. Approving records the decision and does not post it.</p>
+        <p class="section">Stream</p>
+        <div class="stage">
+          <ol class="stream">
+            {#each stream as row (row.id)}
+              <li class="ev">
+                <span class="disc" aria-hidden="true">{row.mark}</span>
+                <div class="bubble">
+                  <p class="who">{row.who}</p>
+                  <p class="ev-body">{row.body}</p>
+                </div>
+              </li>
+            {/each}
+          </ol>
+          <div class={["slot", shown?.status === "pending" && "over"]}>
+            {#if shown}
+              {#key shown.id}
+                <ApprovalCard
+                  approval={shown}
+                  busy={deciding}
+                  shortcutTarget={shown.status === "pending"}
+                  ondecide={(decision, reason) => ondecide(shown.id, decision, reason)}
+                  onundo={() => onundo(shown.id)}
+                />
+              {/key}
+            {:else}
+              <div class="empty">
+                <h2>Nothing is waiting.</h2>
+                <p>A push wakes Reviewer. The turn drafts a comment and asks before any external effect. Approving records the decision and does not post it.</p>
+              </div>
+            {/if}
           </div>
-        {/if}
+        </div>
 
         <p class="section ledger-head">Ledger</p>
         {#if snapshot && snapshot.ledger.length > 0}
@@ -217,16 +244,6 @@
           <p class="muted">No spend yet. Idle agents do not call a provider.</p>
         {/if}
 
-        <p class="section ledger-head">Event log</p>
-        <ol class="log">
-          {#each snapshot?.events ?? [] as event (event.id)}
-            <li>
-              <span>{event.hlc}</span>
-              <span>{event.kind}</span>
-              <span>{event.id}</span>
-            </li>
-          {/each}
-        </ol>
       </main>
     </div>
   </div>
@@ -277,9 +294,9 @@
 
   .status,
   .budget,
-  .log,
   .ledger,
-  .project {
+  .project,
+  .ev-body {
     font-family: var(--font-machine);
   }
 
@@ -412,6 +429,81 @@
     margin-top: var(--s-2);
   }
 
+  .stage {
+    position: relative;
+  }
+
+  .stream {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 0;
+    padding: 0;
+  }
+
+  .ev {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .disc {
+    width: 28px;
+    height: 28px;
+    flex: none;
+    border-radius: var(--r-pill);
+    background: var(--paper-sunken);
+    box-shadow: 0 0 0 1px var(--hairline);
+    display: grid;
+    place-items: center;
+    color: var(--ink-2);
+    font-size: 12px;
+    line-height: 1;
+    font-weight: var(--w-semibold);
+  }
+
+  .bubble {
+    flex: 1;
+    min-width: 0;
+    background: var(--convex), var(--paper-raised);
+    border: 1px solid var(--hairline);
+    border-radius: var(--r-lg);
+    padding: 12px 16px;
+    box-shadow: var(--shadow-puff);
+  }
+
+  .who {
+    color: var(--ink-3);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+  }
+
+  .ev-body {
+    margin-top: 4px;
+    color: var(--ink-1);
+    font-size: 12px;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+
+  .slot {
+    margin-top: 14px;
+  }
+
+  .slot.over {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    justify-content: center;
+    margin-top: -460px;
+    padding: 0 28px;
+  }
+
+  .slot.over :global(article.card) {
+    width: min(520px, 100%);
+  }
+
   .empty {
     padding: var(--s-5);
     border: 1px solid var(--hairline);
@@ -446,29 +538,8 @@
     color: var(--ink-1);
   }
 
-  .ledger span,
-  .log {
+  .ledger span {
     display: block;
-    color: var(--ink-2);
-    font-size: var(--t-micro);
-  }
-
-  .log {
-    list-style: none;
-    display: grid;
-    gap: 4px;
-  }
-
-  .log li {
-    display: grid;
-    grid-template-columns: minmax(0, 1.4fr) 0.8fr minmax(0, 1.2fr);
-    gap: var(--s-3);
-  }
-
-  .log span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--ink-2);
     font-size: var(--t-micro);
   }
@@ -494,10 +565,6 @@
 
     .status {
       text-align: left;
-    }
-
-    .log li {
-      grid-template-columns: 1fr;
     }
   }
 </style>

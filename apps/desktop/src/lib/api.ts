@@ -182,17 +182,14 @@ export function formatTokens(value: number): string {
 
 export function formatDecisionStamp(ms: number): string {
   const date = new Date(ms);
-  const time = new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).format(date);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
   const zone =
     new Intl.DateTimeFormat("en-US", { timeZoneName: "short" })
       .formatToParts(date)
       .find((part) => part.type === "timeZoneName")?.value ?? "";
-  return zone ? `${time} ${zone}` : time;
+  return zone ? `${hh}:${mm}:${ss} ${zone}` : `${hh}:${mm}:${ss}`;
 }
 
 export function shortEventId(id: string): string {

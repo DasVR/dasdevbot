@@ -67,6 +67,12 @@ input {
   font-family: inherit;
 }
 
+/* Figtree's semibold is 620. The UA stylesheet sets b/strong to 700. */
+b,
+strong {
+  font-weight: var(--w-semibold);
+}
+
 ::selection {
   background: var(--accent-bg);
   color: var(--ink-1);

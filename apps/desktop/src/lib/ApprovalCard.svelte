@@ -652,8 +652,8 @@
 
       <div class="quiet">
         <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && !denyOpen}
-          <p class={["hold-hint", seenArmed && "armed"]}>hold ⌘↵ / hold ⌘⌫</p>
+        {#if cardFocused && seenArmed && !denyOpen}
+          <p class="hold-hint">hold ⌘↵ / hold ⌘⌫</p>
         {/if}
       </div>
     </div>
@@ -773,7 +773,7 @@
   .risk-read {
     min-height: 36px;
     padding: 8px 14px;
-    color: var(--risk-read);
+    color: var(--ink-2);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
     font-weight: var(--w-semibold);
@@ -1112,10 +1112,6 @@
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
-    color: var(--ink-3);
-  }
-
-  .hold-hint.armed {
     color: var(--ink-2);
   }
 
