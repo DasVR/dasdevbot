@@ -509,10 +509,7 @@ mod tests {
             .unwrap()
             .contains("DasVR/NIL"));
         assert_eq!(approval["provider"], "mock");
-        assert!(approval["draft"]
-            .as_str()
-            .unwrap()
-            .contains("[mock provider]"));
+        assert!(approval["draft"].as_str().unwrap().contains("refresh()"));
         let agents = snap["agents"].as_array().unwrap();
         let reviewer = agents.iter().find(|a| a["id"] == "reviewer").unwrap();
         assert_eq!(reviewer["status"], "blocked");

@@ -847,9 +847,12 @@ impl Store {
                 },
             )?;
             tx.execute(
-                "UPDATE approvals SET status = 'expired', expires_at = COALESCE(expires_at, ?1)
-                 WHERE id = ?2 AND status = 'pending'",
-                params![wall_ms as i64, id],
+                "UPDATE approvals SET status = 'expired',
+                    decided_at = ?1,
+                    decision_event_id = ?2,
+                    expires_at = COALESCE(expires_at, ?1)
+                 WHERE id = ?3 AND status = 'pending'",
+                params![wall_ms as i64, event_id, id],
             )?;
             tx.execute(
                 "UPDATE jobs SET status = 'done', lease_owner = NULL, lease_until_ms = NULL
@@ -1617,6 +1620,8 @@ mod tests {
         store.sweep(now + APPROVAL_TTL_MS).unwrap();
         let approval = row(&store, &id);
         assert_eq!(approval.status, "expired");
+        assert!(approval.decided_at.is_some());
+        assert!(approval.decision_event_id.is_some());
         assert_eq!(
             store.job_status(&approval.job_id).unwrap().as_deref(),
             Some("done")

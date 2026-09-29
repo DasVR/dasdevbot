@@ -83,6 +83,35 @@
     const id = shortEventId(approval.evidence.event_id);
     return approval.evidence.kind ? `${id} · ${approval.evidence.kind}` : id;
   });
+  const commandGlyph = $derived.by(() => {
+    const platform = navigator.platform;
+    const agent = navigator.userAgent;
+    if (/Mac|iPhone|iPad/.test(platform) || /Mac OS X/.test(agent)) {
+      return "⌘";
+    }
+    return "Ctrl";
+  });
+  const holdHint = $derived(`hold ${commandGlyph}↵ / hold ${commandGlyph}⌫`);
+  const draftPieces = $derived.by(() => {
+    const pieces: { code: boolean; text: string }[] = [];
+    const pattern = /refresh\(\)/g;
+    let cursor = 0;
+    for (const match of approval.draft.matchAll(pattern)) {
+      const index = match.index ?? 0;
+      if (index > cursor) {
+        pieces.push({ code: false, text: approval.draft.slice(cursor, index) });
+      }
+      pieces.push({ code: true, text: match[0] });
+      cursor = index + match[0].length;
+    }
+    if (cursor < approval.draft.length) {
+      pieces.push({ code: false, text: approval.draft.slice(cursor) });
+    }
+    if (pieces.length === 0) {
+      pieces.push({ code: false, text: approval.draft });
+    }
+    return pieces;
+  });
   const subline = $derived.by(() => {
     if (approval.status === "expired") {
       return "Reviewer will ask again on the next push.";
@@ -582,7 +611,15 @@
             <span class="prov">mock provider, not written by a model</span>
           {/if}
         </summary>
-        <p class="draft">{approval.draft}</p>
+        <p class="draft">
+          {#each draftPieces as part, index (index)}
+            {#if part.code}
+              <code>{part.text}</code>
+            {:else}
+              {part.text}
+            {/if}
+          {/each}
+        </p>
       </details>
 
       <p class="meta">
@@ -624,16 +661,20 @@
             onkeydown={onApproveKeydown}
             onclick={() => void onApproveClick()}
           >
-            {#if holdKind === "approve" || committing === "approve" || checkOffset < 1}
-              <svg
-                class={["check", committing === "approve" && "inline"]}
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
+            {#if holdKind === "approve"}
+              <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
                 <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
               </svg>
             {/if}
-            <span>{committing === "approve" ? "Approved" : "Approve draft"}</span>
+            <span class="face">
+              <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
+              <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
+                <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
+                </svg>
+                Approved
+              </span>
+            </span>
           </button>
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
         {/if}
@@ -642,7 +683,7 @@
       <div class="quiet">
         <p>Records your decision. Nothing is posted in this demo.</p>
         {#if cardFocused && !denyOpen}
-          <p class={["hold-hint", seenArmed && "armed"]}>hold ⌘↵ / hold ⌘⌫</p>
+          <p class={["hold-hint", seenArmed && "armed"]}>{holdHint}</p>
         {/if}
       </div>
     </div>
@@ -653,6 +694,10 @@
           <path class="pen trace draw" pathLength="1" d={CHECK_PATH} />
         </svg>
       {:else if approval.status === "denied"}
+        <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
+          <path class="pen trace draw" pathLength="1" d={DENY_MARK_PATH} />
+        </svg>
+      {:else if approval.status === "expired"}
         <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
           <path class="pen trace draw" pathLength="1" d={DENY_MARK_PATH} />
         </svg>
@@ -671,7 +716,7 @@
       {/if}
       {#if showUndo}
         <button class="undo" type="button" onclick={() => void onUndoClick()}>
-          Undo<span class="t" aria-hidden="true">{undoSeconds}s</span>
+          <span class="u">Undo</span><span class="t" aria-hidden="true">{undoSeconds}s</span>
         </button>
       {/if}
     </div>
@@ -976,6 +1021,14 @@
     box-shadow: 0 0 0 1px var(--hairline);
   }
 
+  .draft code {
+    font-family: var(--font-machine);
+    font-size: 12.5px;
+    border-radius: var(--r-xs);
+    background: var(--paper-sunken);
+    padding: 0 4px;
+  }
+
   .meta {
     margin-top: var(--s-3);
     font-family: var(--font-machine);
@@ -1053,6 +1106,11 @@
       0 8px 16px -8px rgb(var(--shade) / 0.28);
   }
 
+  .approve:active:not(:disabled),
+  .deny:active:not(:disabled) {
+    box-shadow: var(--shadow-press);
+  }
+
   button:active:not(:disabled) {
     transform: scale(0.97, 0.955);
     box-shadow: var(--shadow-press);
@@ -1083,6 +1141,33 @@
 
   .check.inline {
     position: static;
+  }
+
+  .face {
+    display: grid;
+    place-items: center;
+  }
+
+  .face-idle,
+  .face-done {
+    grid-area: 1 / 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: opacity var(--dur-soft) var(--ease-in-out);
+  }
+
+  .face-done {
+    opacity: 0;
+  }
+
+  .face-idle.gone {
+    opacity: 0;
+  }
+
+  .face-done.show {
+    opacity: 1;
   }
 
   .quiet {
@@ -1203,6 +1288,8 @@
   }
 
   .undo {
+    display: inline-block;
+    gap: 0;
     height: auto;
     padding: 0;
     border: 0;
@@ -1213,10 +1300,14 @@
     font-size: var(--t-meta);
     line-height: 1;
     font-weight: var(--w-semibold);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .undo .u {
     text-decoration: underline;
     text-underline-offset: 3px;
     text-decoration-thickness: 1px;
-    white-space: nowrap;
   }
 
   .undo:hover:not(:disabled),
@@ -1260,6 +1351,16 @@
     .reason,
     .chev {
       animation: none;
+      transition: none;
+    }
+
+    button:hover:not(:disabled),
+    button:active:not(:disabled) {
+      transform: none;
+    }
+
+    .face-idle,
+    .face-done {
       transition: none;
     }
   }

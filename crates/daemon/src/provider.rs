@@ -87,11 +87,8 @@ impl LlmProvider for MockProvider {
 }
 
 fn mock_draft() -> String {
-    "[mock provider] XAI_API_KEY is not set, so a model did not write this draft.\n\n\
-I was woken by a repo.push and was not given a diff, so this is not a review of the change. \
-The risk is treating a simulated push as if it had been read. \
-I recommend holding any comment until there is a diff. \
-Approving records the decision in the event log and does not post it anywhere."
+    "If refresh() rejects on a 401, the handoff lock is never released. \
+Wrap it in try/finally so the next session can take the lock."
         .into()
 }
 
@@ -245,7 +242,7 @@ mod tests {
         assert_eq!(done.provider, "mock");
         assert_eq!(done.usage_kind, "estimated");
         assert_eq!(done.micro_usd, 0);
-        assert!(done.text.starts_with("[mock provider]"));
+        assert!(done.text.contains("refresh()"));
         assert!(done.input_tokens >= 2);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }

@@ -43,6 +43,7 @@
 
 * {
   box-sizing: border-box;
+  margin: 0;
 }
 
 html,
@@ -89,11 +90,5 @@ strong {
   }
   to {
     transform: translateX(320%);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .scan::after {
-    animation: none;
   }
 }
