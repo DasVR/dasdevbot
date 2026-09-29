@@ -7,6 +7,7 @@
     formatUsd,
     getSnapshot,
     isTextEntry,
+    shortEventId,
     undo,
     type Approval,
     type Decision,
@@ -40,16 +41,19 @@
   const shown = $derived(oldestPending ?? latestSettled);
   const stream = $derived.by(() => {
     const events = snapshot?.events ?? [];
+    const requestKey = shown ? `approval-requested:${shown.id}` : "";
     return [...events].reverse().map((event) => {
       const source = event.source.trim();
       return {
         id: event.id,
         mark: source.charAt(0).toUpperCase() || "·",
         who: source ? `${source} · ${event.kind}` : event.kind,
-        body: `${event.hlc} · ${event.id}`,
+        body: `${event.hlc} · ${shortEventId(event.id)}`,
+        request: requestKey !== "" && event.idempotency_key === requestKey,
       };
     });
   });
+  const anchored = $derived(stream.some((row) => row.request));
   const undoable = $derived.by(() => {
     const now = Date.now();
     const rows =
@@ -239,6 +243,27 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
+{#snippet approvalSlot()}
+  <div class={["slot", shown?.status === "pending" && "over"]} {@attach flipSlot}>
+    {#if shown}
+      {#key shown.id}
+        <ApprovalCard
+          approval={shown}
+          busy={deciding}
+          shortcutTarget={shown.status === "pending"}
+          ondecide={(decision, reason) => ondecide(shown.id, decision, reason)}
+          onundo={() => onundo(shown.id)}
+        />
+      {/key}
+    {:else}
+      <div class="empty">
+        <h2>Nothing is waiting.</h2>
+        <p>A push wakes Reviewer. The turn drafts a comment and asks before any external effect. Approving records the decision and does not post it.</p>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
 <div class="well">
   <div class="shell">
     <header class="titlebar">
@@ -290,33 +315,23 @@
         <div class="stage" {@attach pinOverlay}>
           <ol class="stream">
             {#each stream as row (row.id)}
-              <li class="ev">
-                <span class="disc" aria-hidden="true">{row.mark}</span>
-                <div class="bubble">
-                  <p class="who">{row.who}</p>
-                  <p class="ev-body">{row.body}</p>
-                </div>
+              <li class={row.request && shown && shown.status !== "pending" ? "slot-row" : "ev"}>
+                {#if !(row.request && shown && shown.status !== "pending")}
+                  <span class="disc" aria-hidden="true">{row.mark}</span>
+                  <div class="bubble">
+                    <p class="who">{row.who}</p>
+                    <p class="ev-body">{row.body}</p>
+                  </div>
+                {/if}
+                {#if row.request && shown}
+                  {@render approvalSlot()}
+                {/if}
               </li>
             {/each}
           </ol>
-          <div class={["slot", shown?.status === "pending" && "over"]} {@attach flipSlot}>
-            {#if shown}
-              {#key shown.id}
-                <ApprovalCard
-                  approval={shown}
-                  busy={deciding}
-                  shortcutTarget={shown.status === "pending"}
-                  ondecide={(decision, reason) => ondecide(shown.id, decision, reason)}
-                  onundo={() => onundo(shown.id)}
-                />
-              {/key}
-            {:else}
-              <div class="empty">
-                <h2>Nothing is waiting.</h2>
-                <p>A push wakes Reviewer. The turn drafts a comment and asks before any external effect. Approving records the decision and does not post it.</p>
-              </div>
-            {/if}
-          </div>
+          {#if !anchored}
+            {@render approvalSlot()}
+          {/if}
         </div>
 
         <p class="section ledger-head">Ledger</p>
@@ -584,6 +599,7 @@
 
   .slot {
     margin-top: 14px;
+    scroll-margin-bottom: 16px;
   }
 
   .slot.over {

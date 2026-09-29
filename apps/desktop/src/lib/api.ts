@@ -136,6 +136,21 @@ export function effectWhy(effect: EffectClass): string {
   }
 }
 
+export function effectAsk(effect: EffectClass): string {
+  switch (effect) {
+    case "destructive":
+      return "asks before overwriting";
+    case "read":
+    case "write_local":
+    case "external":
+      return "asks before posting";
+    default: {
+      const exhaustive: never = effect;
+      return exhaustive;
+    }
+  }
+}
+
 export function actionTitle(action: string): string {
   switch (action) {
     case "post_pr_comment":

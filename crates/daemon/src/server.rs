@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -189,8 +190,12 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
             }
         })
         .collect();
-    let approvals = store
-        .approvals()?
+    let approval_rows = store.approvals()?;
+    let events = referenced_events(store, &approval_rows)?
+        .into_iter()
+        .map(event_view)
+        .collect();
+    let approvals = approval_rows
         .into_iter()
         .map(|row| {
             let evidence = evidence_view(&row);
@@ -246,19 +251,6 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
             note: row.note,
         })
         .collect();
-    let events = store
-        .recent_events(30)?
-        .into_iter()
-        .map(|event| EventView {
-            id: event.id,
-            version: event.version,
-            hlc: event.hlc.to_string(),
-            source: event.source,
-            kind: event.kind,
-            thread_id: event.thread_id,
-            idempotency_key: event.idempotency_key,
-        })
-        .collect();
     Ok(Snapshot {
         protocol: PROTOCOL_VERSION,
         role: app.role.clone(),
@@ -271,6 +263,64 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
         ledger,
         events,
     })
+}
+
+fn event_view(event: crate::store::StoredEvent) -> EventView {
+    EventView {
+        id: event.id,
+        version: event.version,
+        hlc: event.hlc.to_string(),
+        source: event.source,
+        kind: event.kind,
+        thread_id: event.thread_id,
+        idempotency_key: event.idempotency_key,
+    }
+}
+
+/// Recent events, plus any evidence, decision, or `approval.requested` row the
+/// card names, so a displayed `ev_####` is always a row in the stream.
+fn referenced_events(
+    store: &crate::store::Store,
+    approvals: &[crate::store::ApprovalRow],
+) -> Result<Vec<crate::store::StoredEvent>> {
+    let mut events = store.recent_events(30)?;
+    let mut seen: HashSet<String> = events.iter().map(|event| event.id.clone()).collect();
+    let mut extra = Vec::new();
+    for row in approvals {
+        remember(store, &mut seen, &mut extra, &row.evidence_event_id)?;
+        if let Some(id) = row.decision_event_id.as_deref() {
+            remember(store, &mut seen, &mut extra, id)?;
+        }
+        let key = format!("approval-requested:{}", row.id);
+        if let Some(event) = store.event_by_key(&key)? {
+            if seen.insert(event.id.clone()) {
+                extra.push(event);
+            }
+        }
+    }
+    events.append(&mut extra);
+    events.sort_by(|left, right| {
+        right
+            .hlc
+            .cmp(&left.hlc)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    Ok(events)
+}
+
+fn remember(
+    store: &crate::store::Store,
+    seen: &mut HashSet<String>,
+    extra: &mut Vec<crate::store::StoredEvent>,
+    id: &str,
+) -> Result<()> {
+    if id.is_empty() || !seen.insert(id.to_string()) {
+        return Ok(());
+    }
+    if let Some(event) = store.event_by_id(id)? {
+        extra.push(event);
+    }
+    Ok(())
 }
 
 fn evidence_view(row: &crate::store::ApprovalRow) -> EvidenceView {
@@ -510,6 +560,14 @@ mod tests {
             .contains("DasVR/NIL"));
         assert_eq!(approval["provider"], "mock");
         assert!(approval["draft"].as_str().unwrap().contains("refresh()"));
+        let evidence_id = approval["evidence"]["event_id"].as_str().unwrap();
+        let approval_id = approval["id"].as_str().unwrap();
+        let request_key = format!("approval-requested:{approval_id}");
+        let events = snap["events"].as_array().unwrap();
+        assert!(events.iter().any(|event| event["id"] == evidence_id));
+        assert!(events
+            .iter()
+            .any(|event| event["idempotency_key"] == request_key));
         let agents = snap["agents"].as_array().unwrap();
         let reviewer = agents.iter().find(|a| a["id"] == "reviewer").unwrap();
         assert_eq!(reviewer["status"], "blocked");
@@ -518,7 +576,6 @@ mod tests {
         assert_eq!(snap["ledger"][0]["usage_kind"], "estimated");
         assert_eq!(snap["ledger"][0]["micro_usd"], 0);
 
-        let approval_id = approval["id"].as_str().unwrap();
         let decision = agent
             .post(&format!(
                 "http://{addr}/v1/approvals/{approval_id}/decision"

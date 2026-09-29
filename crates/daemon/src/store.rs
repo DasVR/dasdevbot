@@ -223,6 +223,19 @@ impl Store {
         }))
     }
 
+    pub fn event_by_id(&self, id: &str) -> Result<Option<StoredEvent>> {
+        self.conn
+            .query_row(
+                "SELECT id, version, hlc_millis, hlc_counter, hlc_node, source, kind,
+                        payload, idempotency_key, thread_id
+                 FROM events WHERE id = ?1",
+                [id],
+                map_event,
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
     pub fn event_by_key(&self, key: &str) -> Result<Option<StoredEvent>> {
         self.conn
             .query_row(

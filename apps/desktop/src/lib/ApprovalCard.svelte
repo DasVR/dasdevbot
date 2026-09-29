@@ -4,6 +4,7 @@
   import {
     SEEN_LOCK_MS,
     actionTitle,
+    effectAsk,
     effectLabel,
     effectWhy,
     formatDecisionStamp,
@@ -575,7 +576,7 @@
       <header class="card-head">
         <div class="agent" aria-hidden="true">{monogram}</div>
         <div>
-          <p class="kicker"><b>{approval.agent_name}</b> · asks before posting</p>
+          <p class="kicker"><b>{approval.agent_name}</b> · {effect ? effectAsk(effect) : "asks before posting"}</p>
           <h2 id={titleId}>{title}</h2>
         </div>
       </header>
