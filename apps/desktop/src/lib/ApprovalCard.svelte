@@ -750,6 +750,7 @@
     border-radius: var(--r-md);
     border: 1px solid var(--hairline);
     box-shadow: var(--highlight-top), var(--shadow-puff);
+    min-height: 52px;
     padding: 10px 14px 10px 12px;
   }
 
@@ -1238,7 +1239,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    min-height: 52px;
+    min-height: 0;
   }
 
   .mark {
