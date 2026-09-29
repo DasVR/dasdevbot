@@ -205,8 +205,15 @@
 
   function tokenMs(name: string, fallback: number): number {
     const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    const value = Number.parseFloat(raw);
-    return Number.isFinite(value) ? value : fallback;
+    const match = /^(-?\d*\.?\d+)(ms|s)?$/.exec(raw);
+    if (!match) {
+      return fallback;
+    }
+    const value = Number(match[1]);
+    if (!Number.isFinite(value)) {
+      return fallback;
+    }
+    return match[2] === "s" ? value * 1000 : value;
   }
 
   function prefersReducedMotion(): boolean {
@@ -678,7 +685,9 @@
     grid-template-columns: 76px 28px minmax(0, 1fr);
     column-gap: 12px;
     align-items: center;
-    padding: 10px 2px 11px;
+    padding: 10px 2px 10px;
+    /* 37px copy + 20px padding + the 1px rule is 58. Min-height matches the 60px receipt. */
+    min-height: 60px;
     border: 0;
     border-bottom: 1px solid var(--hairline);
     border-radius: 0;
@@ -695,8 +704,8 @@
     font-family: var(--font-machine);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
-    font-weight: var(--w-medium);
-    color: var(--ink-1);
+    font-weight: var(--w-regular);
+    color: var(--ink-2);
     text-align: right;
     font-variant-numeric: tabular-nums;
   }

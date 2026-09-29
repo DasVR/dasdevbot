@@ -251,7 +251,7 @@ export function shortEventId(id: string): string {
     return id;
   }
   const compact = id.replace(/-/g, "");
-  return `ev_${compact.slice(-4)}`;
+  return `ev_${compact.slice(-6)}`;
 }
 
 export function isTextEntry(target: EventTarget | null): boolean {
@@ -276,7 +276,8 @@ export async function getSnapshot(): Promise<Snapshot> {
   return (await response.json()) as Snapshot;
 }
 
-export async function emitPush(): Promise<void> {
+/** Demo `repo.push`. `forced` asks for a destructive force-push instead of a PR comment. */
+export async function emitPush(forced = false): Promise<void> {
   const response = await fetch("/v1/events", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -288,6 +289,7 @@ export async function emitPush(): Promise<void> {
         ref: "phase0",
         subject: "simulated push",
         note: "phase 0 attaches no diff",
+        forced,
       },
       idempotency_key: `ui-${crypto.randomUUID()}`,
     }),

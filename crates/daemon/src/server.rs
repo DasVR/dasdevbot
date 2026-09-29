@@ -665,6 +665,57 @@ mod tests {
         assert!(!kinds.contains(&"approval.committed"));
     }
 
+    #[test]
+    fn forced_push_snapshot_effect_class_is_destructive() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-forced-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: None,
+                role: "server".into(),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        spawn_worker(Arc::clone(&app), rx);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let health = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        assert_eq!(health["ready"], true);
+
+        let emitted = agent
+            .post(&format!("http://{addr}/v1/events"))
+            .send_json(json!({
+                "source": "demo",
+                "kind": "repo.push",
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0",
+                    "subject": "simulated push",
+                    "forced": true
+                },
+                "idempotency_key": "ipc-forced-1"
+            }))
+            .unwrap()
+            .into_json::<EmitResponse>()
+            .unwrap();
+        assert!(emitted.created);
+        assert_eq!(emitted.jobs.len(), 1);
+
+        let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
+        let approval = &snap["approvals"][0];
+        assert_eq!(approval["effect_class"], "destructive");
+        assert_eq!(approval["action"], "force_push");
+        assert_eq!(approval["draft"], "git push --force origin phase0");
+        assert_eq!(approval["status"], "pending");
+    }
+
     fn wait_ok(agent: &ureq::Agent, url: &str) -> serde_json::Value {
         let start = Instant::now();
         loop {
