@@ -132,11 +132,16 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
     if !store.heartbeat_at(&job.id, &app.worker_id, wall_ms(), LEASE_MS)? {
         return Ok(());
     }
-    let grant = store.has_grant(&prepared.agent_id, EffectClass::External.as_str())?;
+    let class = if prepared.forced {
+        EffectClass::Destructive
+    } else {
+        EffectClass::External
+    };
+    let grant = store.has_grant(&prepared.agent_id, class.as_str())?;
     let outcome = decide(
         GateInput {
             grant,
-            class: EffectClass::External,
+            class,
             budget_remaining: true,
             tainted: prepared.tainted,
         },
@@ -145,7 +150,7 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
     if outcome != dasdevbot_core::GateOutcome::Ask {
         let payload = json!({
             "job_id": job.id,
-            "effect_class": "external",
+            "effect_class": class.as_str(),
             "outcome": "deny",
             "tainted": prepared.tainted,
         })
@@ -165,10 +170,28 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
         store.fail_leased(&job.id, &app.worker_id)?;
         return Ok(());
     }
+    let action = if prepared.forced {
+        "force_push"
+    } else {
+        "post_pr_comment"
+    };
+    let purpose = if prepared.forced {
+        format!(
+            "Force-push {}. This rewrites the remote branch.",
+            prepared.evidence_ref
+        )
+    } else {
+        prepared.purpose.clone()
+    };
+    let draft = if prepared.forced {
+        format!("git push --force origin {}", prepared.evidence_ref)
+    } else {
+        completion.text.clone()
+    };
     let request_payload = json!({
         "job_id": job.id,
-        "action": "post_pr_comment",
-        "effect_class": "external",
+        "action": action,
+        "effect_class": class.as_str(),
         "tainted": prepared.tainted,
         "provider": completion.provider,
     })
@@ -187,10 +210,10 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
         job_id: job.id.clone(),
         agent_id: prepared.agent_id.clone(),
         thread_id: prepared.thread_id,
-        effect_class: "external".into(),
-        action: "post_pr_comment".into(),
-        purpose: prepared.purpose,
-        draft: completion.text,
+        effect_class: class.as_str().into(),
+        action: action.into(),
+        purpose,
+        draft,
         evidence: prepared.evidence,
         evidence_repo: prepared.evidence_repo,
         evidence_ref: prepared.evidence_ref,
@@ -229,6 +252,7 @@ struct Prepared {
     purpose: String,
     thread_id: String,
     tainted: bool,
+    forced: bool,
 }
 
 fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> {
@@ -267,6 +291,10 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
         .get("tainted")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let forced = payload
+        .get("forced")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let kind_name = body.get("kind").and_then(|v| v.as_str()).unwrap_or("event");
     let event_id = body.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
     let repo = payload
@@ -295,6 +323,7 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
         ),
         thread_id,
         tainted,
+        forced,
     }))
 }
 

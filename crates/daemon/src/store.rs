@@ -1333,7 +1333,7 @@ fn seed(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES ('rule-repo-push-reviewer', 'repo.push', 'reviewer')",
         [],
     )?;
-    for class in ["read", "write_local", "external"] {
+    for class in ["read", "write_local", "external", "destructive"] {
         conn.execute(
             "INSERT OR IGNORE INTO grants (agent_id, effect_class) VALUES ('reviewer', ?1)",
             [class],
