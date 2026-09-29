@@ -1,11 +1,16 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { flip, type AnimationConfig } from "svelte/animate";
+  import { linear } from "svelte/easing";
+  import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
   import {
     decide,
     emitPush,
+    formatStreamTime,
     formatUsd,
     getSnapshot,
+    hlcMillis,
     isTextEntry,
     shortEventId,
     undo,
@@ -18,6 +23,7 @@
   let error = $state<string | null>(null);
   let busy = $state(false);
   let deciding = $state(false);
+  let primed = $state(false);
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const oldestPending = $derived.by(() => {
@@ -44,11 +50,16 @@
     const requestKey = shown ? `approval-requested:${shown.id}` : "";
     return [...events].reverse().map((event) => {
       const source = event.source.trim();
+      const shortId = shortEventId(event.id);
+      const millis = hlcMillis(event.hlc);
+      const detail = `${event.hlc} · ${shortId}`;
       return {
         id: event.id,
         mark: source.charAt(0).toUpperCase() || "·",
+        when: millis == null ? "—" : formatStreamTime(millis),
+        iso: millis == null ? "" : new Date(millis).toISOString(),
         who: source ? `${source} · ${event.kind}` : event.kind,
-        body: `${event.hlc} · ${shortEventId(event.id)}`,
+        detail,
         request: requestKey !== "" && event.idempotency_key === requestKey,
       };
     });
@@ -77,6 +88,10 @@
     try {
       snapshot = await getSnapshot();
       error = null;
+      if (!primed) {
+        await tick();
+        primed = true;
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : "The daemon is not reachable.";
     }
@@ -141,6 +156,101 @@
       return;
     }
     void onundo(target.id);
+  }
+
+  function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t: number) => number {
+    const cx = 3 * x1;
+    const bx = 3 * (x2 - x1) - cx;
+    const ax = 1 - cx - bx;
+    const cy = 3 * y1;
+    const by = 3 * (y2 - y1) - cy;
+    const ay = 1 - cy - by;
+    const sampleX = (t: number) => ((ax * t + bx) * t + cx) * t;
+    const sampleY = (t: number) => ((ay * t + by) * t + cy) * t;
+    const sampleDX = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
+    const solveX = (x: number) => {
+      let guess = x;
+      for (let i = 0; i < 8; i += 1) {
+        const error = sampleX(guess) - x;
+        if (Math.abs(error) < 1e-6) {
+          return guess;
+        }
+        const slope = sampleDX(guess);
+        if (Math.abs(slope) < 1e-6) {
+          break;
+        }
+        guess -= error / slope;
+      }
+      let lo = 0;
+      let hi = 1;
+      guess = x;
+      for (let i = 0; i < 24; i += 1) {
+        const xEst = sampleX(guess);
+        if (Math.abs(xEst - x) < 1e-6) {
+          return guess;
+        }
+        if (xEst < x) {
+          lo = guess;
+        } else {
+          hi = guess;
+        }
+        guess = (lo + hi) / 2;
+      }
+      return guess;
+    };
+    return (x: number) => sampleY(solveX(x));
+  }
+
+  const easeOut = cubicBezier(0.22, 1, 0.36, 1);
+
+  function tokenMs(name: string, fallback: number): number {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const value = Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  function prefersReducedMotion(): boolean {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  // New rows rise 8px. The motion reads --dur-soft / --ease-out at start time.
+  // Reduced motion is a 160ms fade with no travel. The first paint does not play it.
+  function arrive(_node: Element, params: { play: boolean }): TransitionConfig {
+    if (!params.play) {
+      return { duration: 0 };
+    }
+    if (prefersReducedMotion()) {
+      return {
+        duration: 160,
+        easing: linear,
+        css: (t) => `opacity: ${t};`,
+      };
+    }
+    return {
+      duration: tokenMs("--dur-soft", 360),
+      easing: easeOut,
+      css: (t, u) => `opacity: ${t}; transform: translateY(${u * 8}px);`,
+    };
+  }
+
+  // Existing rows step to their new slots. Translate only: Svelte's flip also
+  // scales, which would squash the row a receipt opens in.
+  function stepRows(node: Element, coords: { from: DOMRect; to: DOMRect }): AnimationConfig {
+    const dx = coords.from.left - coords.to.left;
+    const dy = coords.from.top - coords.to.top;
+    const moved = Math.abs(dx) >= 1 || Math.abs(dy) >= 1;
+    const duration = prefersReducedMotion() || !moved ? 0 : tokenMs("--dur-soft", 360);
+    const base = flip(node, coords, { duration, easing: easeOut });
+    const css = base.css;
+    if (!css || duration === 0) {
+      return { duration: 0 };
+    }
+    return {
+      ...base,
+      duration,
+      easing: easeOut,
+      css: (t, u) => css(t, u).replace(/scale\([^)]*\);?$/, "scale(1, 1);"),
+    };
   }
 
   function pinOverlay(stage: HTMLElement): () => void {
@@ -315,12 +425,16 @@
         <div class="stage" {@attach pinOverlay}>
           <ol class="stream">
             {#each stream as row (row.id)}
-              <li class={row.request && shown && shown.status !== "pending" ? "slot-row" : "ev"}>
-                {#if !(row.request && shown && shown.status !== "pending")}
-                  <span class="disc" aria-hidden="true">{row.mark}</span>
-                  <div class="bubble">
-                    <p class="who">{row.who}</p>
-                    <p class="ev-body">{row.body}</p>
+              {@const filed = row.request && shown !== null && shown.status !== "pending"}
+              <li class={filed ? "slot-row" : "event"} animate:stepRows>
+                {#if !filed}
+                  <div class="row" title={row.detail} in:arrive|global={{ play: primed }}>
+                    <time class="when" datetime={row.iso || undefined}>{row.when}</time>
+                    <span class="disc" aria-hidden="true">{row.mark}</span>
+                    <div class="copy">
+                      <p class="who">{row.who}</p>
+                      <p class="detail">{row.detail}</p>
+                    </div>
                   </div>
                 {/if}
                 {#if row.request && shown}
@@ -399,8 +513,7 @@
   .status,
   .budget,
   .ledger,
-  .project,
-  .ev-body {
+  .project {
     font-family: var(--font-machine);
   }
 
@@ -547,15 +660,45 @@
     list-style: none;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 0;
     margin: 0;
     padding: 0;
   }
 
-  .ev {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
+  .event,
+  .slot-row {
+    list-style: none;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 76px 28px minmax(0, 1fr);
+    column-gap: 12px;
+    align-items: center;
+    padding: 10px 2px 11px;
+    border: 0;
+    border-bottom: 1px solid var(--hairline);
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .row:hover {
+    border-bottom-color: var(--hairline-strong);
+    background: color-mix(in oklab, var(--paper-sunken) 65%, transparent);
+  }
+
+  .when {
+    font-family: var(--font-machine);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+    font-weight: var(--w-medium);
+    color: var(--ink-1);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
   }
 
   .disc {
@@ -573,28 +716,32 @@
     font-weight: var(--w-semibold);
   }
 
-  .bubble {
-    flex: 1;
+  .copy {
     min-width: 0;
-    background: var(--convex), var(--paper-raised);
-    border: 1px solid var(--hairline);
-    border-radius: var(--r-lg);
-    padding: 12px 16px;
-    box-shadow: var(--shadow-puff);
   }
 
   .who {
-    color: var(--ink-3);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
+    color: var(--ink-1);
+    font-size: var(--t-body);
+    line-height: var(--lh-body);
   }
 
-  .ev-body {
-    margin-top: 4px;
-    color: var(--ink-1);
-    font-size: 12px;
-    line-height: 1.55;
+  .detail {
+    margin-top: 2px;
+    font-family: var(--font-machine);
+    font-size: var(--t-micro);
+    line-height: var(--lh-micro);
+    color: var(--ink-3);
     overflow-wrap: anywhere;
+  }
+
+  .slot-row {
+    padding: 12px 0 14px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .slot-row .slot {
+    margin-top: 0;
   }
 
   .slot {

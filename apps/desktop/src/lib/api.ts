@@ -128,7 +128,7 @@ export function effectWhy(effect: EffectClass): string {
     case "external":
       return "posts to GitHub, leaves this machine";
     case "destructive":
-      return "removes or overwrites, and cannot be undone";
+      return "overwrites history. Can't be undone once it runs";
     default: {
       const exhaustive: never = effect;
       return exhaustive;
@@ -151,20 +151,32 @@ export function effectAsk(effect: EffectClass): string {
   }
 }
 
+const TITLE_ACRONYMS = new Set(["pr", "api", "url", "ui"]);
+
+/** Sentence case for every action. `post_pr_comment` keeps its article. */
 export function actionTitle(action: string): string {
-  switch (action) {
-    case "post_pr_comment":
-      return "Post a PR comment";
-    default:
-      if (!action.includes("_") && action !== action.toLowerCase()) {
-        return action;
+  const source = action === "post_pr_comment" ? "post a pr comment" : action;
+  return sentenceCase(source);
+}
+
+function sentenceCase(action: string): string {
+  const words = action
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  return words
+    .map((word, index) => {
+      const lower = word.toLowerCase();
+      if (TITLE_ACRONYMS.has(lower)) {
+        return lower.toUpperCase();
       }
-      return action
-        .split("_")
-        .filter((part) => part.length > 0)
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(" ");
-  }
+      if (index === 0) {
+        return lower.charAt(0).toUpperCase() + lower.slice(1);
+      }
+      return lower;
+    })
+    .join(" ");
 }
 
 export function clampHoldMs(ms: number): number {
@@ -193,6 +205,30 @@ export function formatUsd(micro: number): string {
 
 export function formatTokens(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+const streamClock = new Intl.DateTimeFormat("en-US", {
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true,
+});
+
+/** Local-zone clock time, e.g. `1:42 PM`. The zone is the runtime's, not a fixed offset. */
+export function formatStreamTime(ms: number): string {
+  return streamClock.format(ms);
+}
+
+/** Wall millis from an HLC stamp `millis:counter:node`, or null when it does not parse. */
+export function hlcMillis(hlc: string): number | null {
+  const head = hlc.split(":", 1)[0] ?? "";
+  if (!/^\d+$/.test(head)) {
+    return null;
+  }
+  const ms = Number(head);
+  if (!Number.isSafeInteger(ms)) {
+    return null;
+  }
+  return ms;
 }
 
 export function formatDecisionStamp(ms: number): string {
