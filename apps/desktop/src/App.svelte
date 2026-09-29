@@ -735,9 +735,12 @@
     overflow-wrap: anywhere;
   }
 
+  /* Filed receipt: the card is the row. A hairline's padding or rule would sit under it. */
   .slot-row {
-    padding: 12px 0 14px;
-    border-bottom: 1px solid var(--hairline);
+    padding: 0;
+    border: 0;
+    min-height: 0;
+    height: auto;
   }
 
   .slot-row .slot {
