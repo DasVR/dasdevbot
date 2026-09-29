@@ -39,8 +39,8 @@
   --risk-write-local: var(--warning);   /* ochre */
   --risk-external:    #8A5A12;          /* amber-ochre oklch(50.9% 0.103 71) 5.6:1 on raised, 4.8:1 on --risk-bg; leaves the machine */
   --risk-destructive: var(--danger);    /* clay — the one escalation (approved 2026-09-29) */
-  --risk-destructive-bg: var(--danger-bg);
   --risk-bg:          color-mix(in oklab, var(--warning) 12%, var(--paper-raised));
+  --risk-destructive-bg: var(--danger-bg); /* destructive strip uses clay tint, 4.7:1 */
 
   /* pen — hand-drawn marks */
   --pen:        var(--ink-1);
@@ -50,8 +50,8 @@
   --r-xs: 6px;    /* inline code, tiny tags */
   --r-sm: 10px;   /* fields, evidence well, chips */
   --r-md: 14px;   /* buttons, list rows, menu items */
-  --r-lg: 20px;   /* panels, risk strip inset */
-  --r-xl: 28px;   /* approval card, popovers */
+  --r-lg: 20px;   /* panels, risk strip inset (NOT the approval card: that is --r-xl 28) */
+  --r-xl: 28px;   /* approval card (waiting glass), popovers */
   --r-2xl: 32px;  /* composer, sheets */
   --r-pill: 999px;/* status chips, toasts */
 
