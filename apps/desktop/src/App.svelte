@@ -186,6 +186,9 @@
       const dy = origin.top - last.top;
       if (motion.matches || (Math.abs(dx) < 1 && Math.abs(dy) < 1)) {
         first = last;
+        if (!over) {
+          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
+        }
         return;
       }
       flying = true;
@@ -211,6 +214,9 @@
         node.style.zIndex = "";
         node.style.position = "";
         flying = false;
+        if (!over) {
+          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
+        }
         first = node.getBoundingClientRect();
       };
       node.addEventListener("transitionend", done);

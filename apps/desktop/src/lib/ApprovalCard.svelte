@@ -1025,9 +1025,6 @@
   .draft code {
     font-family: var(--font-machine);
     font-size: 12.5px;
-    border-radius: var(--r-xs);
-    background: var(--paper-sunken);
-    padding: 0 4px;
   }
 
   .meta {
