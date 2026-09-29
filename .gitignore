@@ -1,0 +1,14 @@
+/target/
+**/*.rs.bk
+.DS_Store
+
+node_modules/
+apps/desktop/dist/
+apps/desktop/.svelte-kit/
+
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+*.log

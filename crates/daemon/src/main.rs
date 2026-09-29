@@ -1,0 +1,195 @@
+use std::env;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use dasdevbotd::{serve, Error};
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("dasdevbotd: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run() -> Result<(), Error> {
+    let mut args = env::args().skip(1).peekable();
+    if args.peek().is_none() {
+        return serve_from(Vec::new());
+    }
+    let first = args.next().unwrap();
+    if first == "--help" || first == "-h" {
+        print_help();
+        return Ok(());
+    }
+    let mut rest: Vec<String> = args.collect();
+    if first.starts_with('-') {
+        rest.insert(0, first);
+        serve_from(rest)
+    } else {
+        match first.as_str() {
+            "serve" => serve_from(rest),
+            "emit" => emit(rest),
+            "help" => {
+                print_help();
+                Ok(())
+            }
+            other => Err(Error::BadRequest(format!(
+                "unknown command {other}; try --help"
+            ))),
+        }
+    }
+}
+
+struct Flags {
+    bind: String,
+    data: PathBuf,
+    web: Option<PathBuf>,
+    role: String,
+    url: String,
+    repo: String,
+    reference: String,
+    allow_remote: bool,
+}
+
+fn flags(args: Vec<String>) -> Result<Flags, Error> {
+    let mut bind = "127.0.0.1:8787".to_string();
+    let mut data = PathBuf::from("data/dasdevbot.sqlite");
+    let mut web: Option<PathBuf> = None;
+    let mut web_set = false;
+    let mut role = "server".to_string();
+    let mut url = "http://127.0.0.1:8787".to_string();
+    let mut repo = "DasVR/NIL".to_string();
+    let mut reference = "phase0".to_string();
+    let mut allow_remote = false;
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let mut value = || {
+            iter.next()
+                .ok_or_else(|| Error::BadRequest(format!("{arg} needs a value")))
+        };
+        match arg.as_str() {
+            "--bind" => bind = value()?,
+            "--data" => data = PathBuf::from(value()?),
+            "--web" => {
+                web = Some(PathBuf::from(value()?));
+                web_set = true;
+            }
+            "--role" => role = value()?,
+            "--url" => url = value()?,
+            "--repo" => repo = value()?,
+            "--ref" => reference = value()?,
+            "--allow-remote" => allow_remote = true,
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => return Err(Error::BadRequest(format!("unknown argument {other}"))),
+        }
+    }
+    if !matches!(role.as_str(), "device" | "server" | "display") {
+        return Err(Error::BadRequest(
+            "role must be device, server, or display".into(),
+        ));
+    }
+    if !web_set {
+        let default = PathBuf::from("apps/desktop/dist");
+        if default.join("index.html").is_file() {
+            web = Some(default);
+        }
+    }
+    Ok(Flags {
+        bind,
+        data,
+        web,
+        role,
+        url,
+        repo,
+        reference,
+        allow_remote,
+    })
+}
+
+fn serve_from(args: Vec<String>) -> Result<(), Error> {
+    let flags = flags(args)?;
+    ensure_loopback(&flags.bind, flags.allow_remote)?;
+    eprintln!(
+        "dasdevbotd starting role={} data={} provider={}",
+        flags.role,
+        flags.data.display(),
+        provider_label()
+    );
+    serve(
+        dasdevbotd::build_and_worker(dasdevbotd::Config {
+            data: flags.data,
+            web_root: flags.web,
+            role: flags.role,
+        })?,
+        &flags.bind,
+    )
+}
+
+fn emit(args: Vec<String>) -> Result<(), Error> {
+    let flags = flags(args)?;
+    let endpoint = format!("{}/v1/events", flags.url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "source": "cli",
+        "kind": "repo.push",
+        "payload": {
+            "repo": flags.repo,
+            "ref": flags.reference,
+            "subject": "simulated push",
+            "note": "phase 0 attaches no diff"
+        },
+        "idempotency_key": format!("cli-{}", uuid::Uuid::new_v4())
+    });
+    let response = ureq::post(&endpoint)
+        .send_json(body)
+        .map_err(|err| Error::BadRequest(format!("emit failed: {err}")))?;
+    let text = response
+        .into_string()
+        .map_err(|err| Error::BadRequest(err.to_string()))?;
+    println!("{text}");
+    Ok(())
+}
+
+fn provider_label() -> &'static str {
+    match env::var("XAI_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => "xai",
+        _ => "mock (XAI_API_KEY unset)",
+    }
+}
+
+fn ensure_loopback(bind: &str, allow_remote: bool) -> Result<(), Error> {
+    if allow_remote {
+        return Ok(());
+    }
+    let host = bind.rsplit_once(':').map(|(host, _)| host).unwrap_or(bind);
+    let host = host.trim_matches(['[', ']']);
+    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+        Ok(())
+    } else {
+        Err(Error::BadRequest(
+            "refusing a non-loopback bind without --allow-remote".into(),
+        ))
+    }
+}
+
+fn print_help() {
+    eprintln!(
+        "\
+dasdevbotd — phase 0 spike
+
+Usage:
+  dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
+                  [--web apps/desktop/dist] [--role server|device|display]
+  dasdevbotd emit [--url http://127.0.0.1:8787] [--repo DasVR/NIL] [--ref phase0]
+
+The provider is xAI chat completions when XAI_API_KEY is set.
+Otherwise every draft is produced by the labeled mock provider.
+XAI_MODEL overrides the model (default grok-4.6).
+"
+    );
+}

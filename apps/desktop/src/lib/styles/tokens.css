@@ -1,0 +1,237 @@
+/* Copied from DasVR/NIL frontend/src/lib/styles/tokens.css (our design system). */
+/* ============================================================
+   NIL — token layer
+   Rule of the system: COLOR MEANS RISK.
+   Chrome is greyscale. Saturation in Zone B/C is reserved for severity.
+   --brand-ember-* is the one named exception, Zone A identity only
+   (cold open, lock screen, session handoff, report cover).
+   If something in the workstation is colored and it isn't a severity,
+   it's a bug.
+   ============================================================ */
+
+:root {
+  /* -- surfaces: a "well" with panels floating in it (macOS inset sidebar) --
+        Nudged warmer across the board — a few degrees toward ember instead of
+        neutral charcoal, so the chrome and the identity color feel like one
+        family instead of a cool grey with a warm accent dropped on top. */
+  --nil-void:      #0a0908;  /* app background / the well */
+  --nil-panel:     #141210;  /* floating panel */
+  --nil-raised:    #1c1916;  /* input, hovered row, tool card */
+  --nil-line:      #2a2622;  /* hairline border */
+  --nil-line-hot:  #3c352e;  /* hairline on hover/focus-within */
+
+  /* -- ink: warm off-white, never #fff (pure white on near-black rings) -- */
+  --nil-ink:       #efe9e0;
+  --nil-ink-2:     #a39a8e;  /* secondary label */
+  --nil-ink-3:     #736a5f;  /* dim / metadata / disabled */
+  --nil-ink-4:     #4a453c;  /* placeholder, inactive tick */
+
+  /* -- brand ember: the ONE named exception to "color means risk," and it is
+        narrow on purpose. Reserved for Zone A identity moments only (cold open,
+        lock screen, session handoff, report export cover — see 40-nil-gpu.mdc).
+        Never reference these in Zone B chrome or Zone C stream/findings/terminal;
+        that is what --sev-* and --nil-ink-* are for. See 00-nil-design-language.mdc
+        Law 1. Replaces the retired --color-violet* primitives. -- */
+  --brand-ember-900: #3a1c15;  /* deepest — pressed / shadow within Zone A */
+  --brand-ember-700: #7a3320;  /* identity mark, resting */
+  --brand-ember-500: #c2652f;  /* identity mark, active / highlight */
+  --brand-ember-300: #e6a35c;  /* brightest — glint, never a fill */
+
+  /* -- severity ramp: chroma falls with severity, so the eye is pulled
+        to Critical without a single decorative accent in the app -- */
+  --sev-critical:  #e5484d;
+  --sev-high:      #e8833a;
+  --sev-medium:    #d9b341;
+  --sev-low:       #5c9ead;
+  --sev-info:      var(--nil-ink-3);
+
+  /* tinted backfills for severity chips — never a solid block */
+  --sev-critical-bg: color-mix(in oklab, var(--sev-critical) 14%, transparent);
+  --sev-high-bg:     color-mix(in oklab, var(--sev-high)     12%, transparent);
+  --sev-medium-bg:   color-mix(in oklab, var(--sev-medium)   12%, transparent);
+  --sev-low-bg:      color-mix(in oklab, var(--sev-low)      12%, transparent);
+  --sev-info-bg:     color-mix(in oklab, var(--nil-ink-3)    10%, transparent);
+
+  /* -- agent state is MOTION, not hue. These are the only exceptions,
+        and both are ink-derived, not a brand accent. -- */
+  --nil-live:      var(--nil-ink);                 /* agent working: full ink + scanline */
+  --nil-halo:      color-mix(in oklab, var(--nil-ink) 55%, transparent);
+
+  /* -- type: the typeface encodes WHO IS SPEAKING --
+     mono  = the machine (output, targets, hashes, CVEs, paths, CVSS)
+     sans  = the application (labels, prose, buttons, findings copy)
+     Never mix roles. This is the one typographic law. */
+  --font-machine: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+  --font-ui:      "Plus Jakarta Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+
+  --t-micro:  0.6875rem;  /* 11px — tick labels, gutter indices */
+  --t-meta:   0.75rem;    /* 12px — metadata, timestamps */
+  --t-body:   0.8125rem;  /* 13px — the workstation default (macOS-dense) */
+  --t-lead:   0.9375rem;  /* 15px — finding titles */
+  --t-head:   1.375rem;   /* 22px — panel headline */
+  --t-display:2.25rem;    /* 36px — session/report title only */
+
+  --track-tight: -0.011em;  /* sans display */
+  --track-mono:  -0.005em;
+  --track-tick:   0.08em;   /* the /Work(01) gutter indices only */
+
+  --lh-tight: 1.15;
+  --lh-body:  1.55;
+
+  /* -- geometry: radius encodes elevation, not decoration -- */
+  --r-chip:   4px;
+  --r-field:  6px;
+  --r-card:   10px;
+  --r-panel:  14px;   /* floating panel in the well */
+  --r-window: 18px;   /* app shell */
+
+  /* -- space: 4px base, dense workstation rhythm -- */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 24px; --s-6: 32px; --s-7: 48px; --s-8: 64px;
+
+  /* -- depth: macOS does elevation with LIGHT (border) + a long soft shadow,
+        not a grey box-shadow under everything.
+        The ramp reads as a physical stack:
+          lift-1  a card resting ON a panel — lit top edge + a 1px contact
+                  shadow so it sits rather than being painted on. Also the
+                  LIFT hover state, where the contact line sells the 1px rise.
+          lift-2  a panel floating in the well.
+          lift-3  the top layer (palette, sheet, popover).
+        On the near-black well the long shadows are mostly felt, not seen; the
+        contact line and the inset highlight are what actually carry depth. -- */
+  --lift-1: 0 1px 2px rgb(0 0 0 / 0.4),
+            0 1px 0 color-mix(in oklab, #fff 6%, transparent) inset;
+  --lift-2: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px -8px rgb(0 0 0 / 0.6),
+            0 1px 0 color-mix(in oklab, #fff 6%, transparent) inset;
+  --lift-3: 0 2px 4px rgb(0 0 0 / 0.5), 0 24px 64px -16px rgb(0 0 0 / 0.75),
+            0 1px 0 color-mix(in oklab, #fff 8%, transparent) inset;
+
+  /* -- depth & wash: the gradient vocabulary.
+        FRAMEWORK bans gradients as DECORATION — a hue ramp, a colored fill, an
+        aurora. These are the opposite: one tone (ink, void, or the panel
+        itself) stepping toward transparent along an eased curve, so a wash reads
+        as light falling on a surface rather than a band with a hard midpoint.
+        Every stop list is the same sigmoid — 0 · .05 · .18 · .38 · .62 · .82 ·
+        .95 · 1 — scaled to the peak. Do not write a two-stop gradient in a
+        component; add a named one here. Ember is Zone A only, as everywhere. -- */
+
+  /* Stage ambient behind an empty cluster (Welcome, Build/Pentest idle). Lifts
+     the copy off the well without a panel. Ink, not ember: an idle field is not
+     one of the four identity moments.
+     Peak 7.5% (was 5%): the field reads as lit and recessed — a pool of light
+     the cluster sits in — instead of a faint lift off a flat panel. Same
+     sigmoid, same ellipse; only the amplitude changed, so the starters' slabs
+     (Welcome .row) have real ambient to pick up. */
+  --wash-stage: radial-gradient(120% 68% at 50% 40%,
+    color-mix(in oklab, var(--nil-ink) 7.5%,  transparent) 0%,
+    color-mix(in oklab, var(--nil-ink) 7.1%,  transparent) 10%,
+    color-mix(in oklab, var(--nil-ink) 6.15%, transparent) 20%,
+    color-mix(in oklab, var(--nil-ink) 4.65%, transparent) 30%,
+    color-mix(in oklab, var(--nil-ink) 2.85%, transparent) 40%,
+    color-mix(in oklab, var(--nil-ink) 1.35%, transparent) 50%,
+    color-mix(in oklab, var(--nil-ink) 0.4%,  transparent) 60%,
+    transparent 70%);
+
+  /* Zone A identity wash — report cover, lock, handoff. The one ember gradient.
+     A warm ambient up-stage of the hero — a highlight, per Law 1, so the peak
+     stays low and the ellipse tight. Never a full-bleed fill. */
+  --wash-ember: radial-gradient(70% 48% at 50% 28%,
+    color-mix(in oklab, var(--brand-ember-700) 14%,   transparent) 0%,
+    color-mix(in oklab, var(--brand-ember-700) 13.3%, transparent) 9%,
+    color-mix(in oklab, var(--brand-ember-700) 11.5%, transparent) 18%,
+    color-mix(in oklab, var(--brand-ember-700) 8.7%,  transparent) 27%,
+    color-mix(in oklab, var(--brand-ember-900) 5.3%,  transparent) 37%,
+    color-mix(in oklab, var(--brand-ember-900) 2.5%,  transparent) 46%,
+    color-mix(in oklab, var(--brand-ember-900) 0.7%,  transparent) 56%,
+    transparent 65%);
+
+  /* The well itself: a faint top light so the app background is a space, not
+     a fill. Static, Zone B, layered under everything. */
+  --well-depth: radial-gradient(90% 55% at 50% 0%,
+    color-mix(in oklab, var(--nil-ink) 3%,    transparent) 0%,
+    color-mix(in oklab, var(--nil-ink) 2.85%, transparent) 14%,
+    color-mix(in oklab, var(--nil-ink) 2.46%, transparent) 28%,
+    color-mix(in oklab, var(--nil-ink) 1.86%, transparent) 42%,
+    color-mix(in oklab, var(--nil-ink) 1.14%, transparent) 57%,
+    color-mix(in oklab, var(--nil-ink) 0.54%, transparent) 71%,
+    color-mix(in oklab, var(--nil-ink) 0.15%, transparent) 86%,
+    transparent 100%);
+
+  /* Panel sheen: extends the 1px --lift inset highlight into a short tonal
+     fall-off, so a floating panel is lit from above like the well is. Layered
+     as background-image over --nil-panel; the panel color stays the token. */
+  --panel-depth: linear-gradient(180deg,
+    color-mix(in oklab, var(--nil-ink) 2.4%,  transparent) 0,
+    color-mix(in oklab, var(--nil-ink) 2.3%,  transparent) 8px,
+    color-mix(in oklab, var(--nil-ink) 2%,    transparent) 16px,
+    color-mix(in oklab, var(--nil-ink) 1.5%,  transparent) 24px,
+    color-mix(in oklab, var(--nil-ink) 0.9%,  transparent) 32px,
+    color-mix(in oklab, var(--nil-ink) 0.45%, transparent) 40px,
+    color-mix(in oklab, var(--nil-ink) 0.1%,  transparent) 48px,
+    transparent 56px);
+
+  /* Top-layer scrim (palette, settings). Lighter where the window sits, denser
+     toward the edges — hierarchy by tone, no extra blur on B/C. */
+  --scrim-overlay: radial-gradient(120% 100% at 50% 35%,
+    color-mix(in oklab, var(--nil-void) 58%,   transparent) 0%,
+    color-mix(in oklab, var(--nil-void) 59.3%, transparent) 14%,
+    color-mix(in oklab, var(--nil-void) 62.7%, transparent) 28%,
+    color-mix(in oklab, var(--nil-void) 67.9%, transparent) 42%,
+    color-mix(in oklab, var(--nil-void) 74.1%, transparent) 57%,
+    color-mix(in oklab, var(--nil-void) 79.3%, transparent) 71%,
+    color-mix(in oklab, var(--nil-void) 82.7%, transparent) 86%,
+    color-mix(in oklab, var(--nil-void) 84%,   transparent) 100%);
+
+  /* Scroll-edge fades for dense surfaces: rows dissolve under the panel edge
+     instead of hard-clipping. Panel tone, sized by the pseudo-element. */
+  --fade-panel-top: linear-gradient(180deg,
+    var(--nil-panel) 0%,
+    color-mix(in oklab, var(--nil-panel) 95%, transparent) 14%,
+    color-mix(in oklab, var(--nil-panel) 82%, transparent) 28%,
+    color-mix(in oklab, var(--nil-panel) 62%, transparent) 42%,
+    color-mix(in oklab, var(--nil-panel) 38%, transparent) 57%,
+    color-mix(in oklab, var(--nil-panel) 18%, transparent) 71%,
+    color-mix(in oklab, var(--nil-panel) 5%,  transparent) 86%,
+    transparent 100%);
+  --fade-panel-bottom: linear-gradient(0deg,
+    var(--nil-panel) 0%,
+    color-mix(in oklab, var(--nil-panel) 95%, transparent) 14%,
+    color-mix(in oklab, var(--nil-panel) 82%, transparent) 28%,
+    color-mix(in oklab, var(--nil-panel) 62%, transparent) 42%,
+    color-mix(in oklab, var(--nil-panel) 38%, transparent) 57%,
+    color-mix(in oklab, var(--nil-panel) 18%, transparent) 71%,
+    color-mix(in oklab, var(--nil-panel) 5%,  transparent) 86%,
+    transparent 100%);
+
+  /* Vignette mask for a full-bleed wash (the idle rain): the field softens
+     toward the panel edges instead of clipping against the radius. Mask
+     colors are alpha only, never a hue. */
+  --mask-vignette: radial-gradient(100% 90% at 50% 50%,
+    #000 0%,
+    rgb(0 0 0 / 0.95) 14%,
+    rgb(0 0 0 / 0.82) 28%,
+    rgb(0 0 0 / 0.62) 42%,
+    rgb(0 0 0 / 0.38) 57%,
+    rgb(0 0 0 / 0.18) 71%,
+    rgb(0 0 0 / 0.05) 86%,
+    transparent 100%);
+
+  /* -- glass: DOM backdrop-filter is allowed on TOP-LAYER TRANSIENT scrims
+        only — the palette, the settings sheet, dialog::backdrop. It never goes
+        on a panel, a card, a popover over the stream, or anything that persists
+        while someone is reading (40-nil-gpu.mdc, Zone C). Light blur, one at a
+        time; a frosted card grid is the cliché this system rejects. -- */
+  --glass-scrim: color-mix(in oklab, var(--nil-void) 62%, transparent);
+  --glass-scrim-solid: color-mix(in oklab, var(--nil-void) 84%, transparent);
+  --glass-blur: 6px;
+
+  /* -- grain: the A24 atmosphere from the lab, dialed down for long sessions.
+        Applied once on the shell, never per-panel. -- */
+  --grain-opacity: 0.022;
+
+  --z-panel: 10; --z-rail: 20; --z-overlay: 100; --z-cursor: 9999;
+}
+
+/* Light mode is a deliberate non-goal: NIL is a long-session, low-light
+   analysis tool. If it ships, it ships as a separate token file — do not
+   fork these values with a media query. */
