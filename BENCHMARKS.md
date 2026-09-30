@@ -32,34 +32,32 @@ strip = false
 
 ```bash
 cargo build --release -p dasdevbotd
-cp target/release/dasdevbotd /tmp/dasdevbotd-p2p
+cp target/release/dasdevbotd /tmp/dasdevbotd-p2p-main
 cargo bloat --release -p dasdevbotd --crates -n 30
 cargo build --release --no-default-features -p dasdevbotd
-cp target/release/dasdevbotd /tmp/dasdevbotd-off
-python3 scripts/bench.py /tmp/dasdevbotd-p2p
-python3 scripts/bench.py /tmp/dasdevbotd-off
+cp target/release/dasdevbotd /tmp/dasdevbotd-off-main
+python3 scripts/bench.py /tmp/dasdevbotd-p2p-main
+python3 scripts/bench.py /tmp/dasdevbotd-off-main
 ```
 
 `scripts/bench.py` copies the given binary, runs `strip --strip-unneeded` on the copy, times seven process starts until `GET /v1/health` returns 200, then reads `/proc/<pid>/status` and `ps -o rss=` after startup, after 60 seconds idle, and after one `repo.push`.
 
-First `p2p` release build (dependencies included), `time.perf_counter` around cargo:
+This run is the current daemon (receipts and stream rows included). iroh was already built in the target directory, so the times below are the local crates, not a cold dependency build.
 
 ```text
-elapsed_sec 99.759
-Finished `release` profile [optimized] target(s) in 1m 39s
+p2p release elapsed_sec 40.662
+Finished `release` profile [optimized] target(s) in 40.59s
+
+p2p off elapsed_sec 10.341
+Finished `release` profile [optimized] target(s) in 10.30s
 ```
 
-The `--no-default-features` release after that, three local crates relinked:
-
-```text
-elapsed_sec 10.465
-Finished `release` profile [optimized] target(s) in 10.42s
-```
+The first release build that compiled iroh 1.3, on the earlier daemon, was 99.759 s (`Finished ... in 1m 39s`).
 
 Health captured during the RSS run:
 
 ```text
-p2p  sync=iroh endpoint_id=bd7590c6d4d657c76bc86b6b829cd73bb131ab59dd38fdca82f418e822fe020c
+p2p  sync=iroh endpoint_id=dc5075fe9bd4c168f187665df36944568fa6982fa713e71b3c42f254a91d6448
 off  sync=off  endpoint_id=null
 ```
 
@@ -70,37 +68,37 @@ MiB is 1024². RSS KiB values are what `/proc` and `ps` printed; they agreed on 
 | | Stripped bytes | Stripped MiB | Idle RSS after 60 s | Idle RSS with endpoint up | Cold start median |
 |---|---:|---:|---:|---:|---:|
 | Earlier kernel (no iroh) | 3,053,712 | 2.91 | 4868 KiB (4.75 MiB) | not measured | 6.193 ms |
-| This tree, `p2p` off | 3,055,984 | 2.91 | 4880 KiB (4.77 MiB) | no endpoint | 11.760 ms |
-| This tree, `p2p` on | 7,109,416 | 6.78 | 9176 KiB (8.96 MiB) | 9176 KiB (8.96 MiB) | 11.606 ms |
+| This tree, `p2p` off | 3,090,832 | 2.95 | 4964 KiB (4.85 MiB) | no endpoint | 11.272 ms |
+| This tree, `p2p` on | 7,146,824 | 6.82 | 9276 KiB (9.06 MiB) | 9276 KiB (9.06 MiB) | 11.481 ms |
 
 Deltas of the `p2p` binary against the earlier numbers (2.91 MiB, 4.75 MiB, 6.193 ms):
 
 | | Delta |
 |---|---|
-| Stripped size | +4,055,704 bytes (+3.87 MiB) |
-| Idle RSS | +4308 KiB (+4.21 MiB) |
-| Cold start median | +5.413 ms |
+| Stripped size | +4,093,112 bytes (+3.90 MiB) |
+| Idle RSS | +4408 KiB (+4.30 MiB) |
+| Cold start median | +5.288 ms |
 
-Against the new `p2p`-off binary (same source, feature off): stripped size +4,053,432 bytes (+3.86 MiB), idle RSS +4296 KiB (+4.20 MiB), cold-start median −0.154 ms. The two new medians sit inside each other's sample spread, so the bind cost is not visible above the noise on this machine. Both new medians are slower than the earlier 6.193 ms median.
+Against the new `p2p`-off binary (same source, feature off): stripped size +4,055,992 bytes (+3.87 MiB), idle RSS +4312 KiB (+4.21 MiB), cold-start median +0.209 ms. The two new medians sit inside each other's sample spread, so the bind cost is not visible above the noise on this machine. Both new medians are slower than the earlier 6.193 ms median. The feature-off binary is 37,120 bytes larger than the earlier kernel, which is the daemon that landed after that measurement, not iroh.
 
-Unstripped file sizes: `p2p` off 5,915,944 bytes (5.64 MiB); `p2p` on 11,961,264 bytes (11.41 MiB).
+Unstripped file sizes: `p2p` off 5,960,328 bytes (5.68 MiB); `p2p` on 12,008,360 bytes (11.45 MiB).
 
-**20 MB on disk: pass**, with and without iroh. 7,109,416 is under 20 × 1024² (20,971,520) and under 20 × 10⁶.
+**20 MB on disk: pass**, with and without iroh. 7,146,824 is under 20 × 1024² (20,971,520) and under 20 × 10⁶.
 
-**25 MB idle: pass**, with the endpoint up. 9176 KiB is 9,396,224 bytes, under 25 × 1024² (26,214,400) and under 25 × 10⁶.
+**25 MB idle: pass**, with the endpoint up. 9276 KiB is 9,498,624 bytes, under 25 × 1024² (26,214,400) and under 25 × 10⁶.
 
 ### RSS detail
 
 | Binary | When | VmRSS | VmHWM | RssAnon | RssFile | ps RSS |
 |---|---|---:|---:|---:|---:|---:|
-| `p2p` on | After health, then 0.2 s (endpoint already up) | 8988 | 8988 | 1964 | 7024 | 8988 |
-| `p2p` on | After 60 s idle, endpoint still up | 9176 | 9176 | 1964 | 7212 | 9176 |
-| `p2p` on | After one mock `repo.push` | 9260 | 9260 | 1984 | 7276 | 9260 |
-| `p2p` off | After health, then 0.2 s | 4880 | 4880 | 552 | 4328 | 4880 |
-| `p2p` off | After 60 s idle | 4880 | 4880 | 552 | 4328 | 4880 |
-| `p2p` off | After one mock `repo.push` | 4964 | 4964 | 572 | 4392 | 4964 |
+| `p2p` on | After health, then 0.2 s (endpoint already up) | 9088 | 9088 | 1984 | 7104 | 9088 |
+| `p2p` on | After 60 s idle, endpoint still up | 9276 | 9276 | 1984 | 7292 | 9276 |
+| `p2p` on | After one mock `repo.push` | 9292 | 9292 | 2000 | 7292 | 9292 |
+| `p2p` off | After health, then 0.2 s | 4964 | 4964 | 572 | 4392 | 4964 |
+| `p2p` off | After 60 s idle | 4964 | 4964 | 572 | 4392 | 4964 |
+| `p2p` off | After one mock `repo.push` | 4980 | 4980 | 588 | 4392 | 4980 |
 
-8988 KiB is 8.78 MiB. 9260 KiB is 9.04 MiB. 4964 KiB is 4.85 MiB. The endpoint-up RSS grew 188 KiB across the idle minute (file mappings, not anonymous).
+9088 KiB is 8.88 MiB. 9292 KiB is 9.07 MiB. 4980 KiB is 4.86 MiB. The endpoint-up RSS grew 188 KiB across the idle minute (file mappings, not anonymous).
 
 ### Cold start samples
 
@@ -109,49 +107,49 @@ Milliseconds, process start until health 200. Seven runs. Median is the middle s
 `p2p` on:
 
 ```text
-25.020
-11.606
-11.370
-11.139
-16.489
-11.968
-11.385
-median_ms 11.606
+19.656
+11.481
+11.228
+11.789
+11.647
+11.335
+11.342
+median_ms 11.481
 ```
 
 `p2p` off:
 
 ```text
-19.188
-11.886
-5.999
-6.141
-11.760
-12.097
-11.393
-median_ms 11.760
+18.506
+11.530
+11.272
+6.191
+5.993
+12.225
+11.165
+median_ms 11.272
 ```
 
 ### Which crate dominates
 
-`cargo bloat --release -p dasdevbotd --crates -n 30` on the `p2p` release binary (symbols present, file 11.4 MiB, `.text` 4.5 MiB). cargo-bloat says these figures are guesswork.
+`cargo bloat --release -p dasdevbotd --crates -n 30` on the `p2p` release binary (symbols present, file 11.5 MiB, `.text` 4.6 MiB). cargo-bloat says these figures are guesswork.
 
 | % of file | % of .text | Size | Crate |
 |---:|---:|---:|---|
-| 6.2% | 15.6% | 722.5 KiB | [Unknown] |
-| 4.8% | 12.1% | 559.6 KiB | netlink_packet_route |
-| 4.2% | 10.5% | 488.8 KiB | std |
-| 3.2% | 8.0% | 370.2 KiB | iroh |
-| 2.6% | 6.6% | 305.0 KiB | rustls |
+| 6.2% | 15.5% | 722.5 KiB | [Unknown] |
+| 4.8% | 12.0% | 559.6 KiB | netlink_packet_route |
+| 4.2% | 10.5% | 490.7 KiB | std |
+| 3.2% | 7.9% | 370.2 KiB | iroh |
+| 2.6% | 6.5% | 305.0 KiB | rustls |
 | 2.1% | 5.3% | 247.1 KiB | noq_proto |
-| 1.5% | 3.9% | 179.1 KiB | ring |
-| 1.5% | 3.8% | 174.3 KiB | reqwest |
-| 1.0% | 2.5% | 116.3 KiB | dasdevbotd |
-| 0.8% | 2.0% | 90.9 KiB | portmapper |
+| 1.5% | 3.9% | 181.5 KiB | ring |
+| 1.5% | 3.7% | 174.3 KiB | reqwest |
+| 1.2% | 3.0% | 140.3 KiB | dasdevbotd |
+| 0.8% | 1.9% | 90.9 KiB | portmapper |
 
 The largest named crate is `netlink_packet_route` (559.6 KiB of `.text`). It is pulled in by iroh's netwatch/netdev stack, not by the daemon. The `iroh` crate itself is next among the p2p crates, at 370.2 KiB. `noq_proto`, `portmapper`, `iroh_relay`, `igd_next`, `n0_dns_resolver`, `noq`, `netwatch`, `netdev`, and `iroh_dns` are the rest of that neighborhood in the top 30.
 
-iroh does not blow either budget. Stripped size is 13.2 MiB under 20 MiB. Idle RSS with the endpoint up is 16.0 MiB under 25 MiB.
+iroh does not blow either budget. Stripped size is 13.2 MiB under 20 MiB. Idle RSS with the endpoint up is 15.9 MiB under 25 MiB.
 
 ## Round 1 baseline (kept)
 
