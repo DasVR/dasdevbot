@@ -21,6 +21,11 @@
     type Snapshot,
   } from "./lib/api";
 
+  /** Flat rows and the roster. tokens.css has no zero radius. */
+  const FLAT_RADIUS = "0";
+  /** Reduced-motion fades. tokens.css has no linear easing token. */
+  const REDUCED_FADE_EASE = linear;
+
   let snapshot = $state<Snapshot | null>(null);
   let error = $state<string | null>(null);
   let busy = $state(false);
@@ -175,7 +180,7 @@
     if (prefersReducedMotion()) {
       return {
         duration: tokenMs("--dur-soft", 160),
-        easing: linear,
+        easing: REDUCED_FADE_EASE,
         css: (t) => `opacity: ${t};`,
       };
     }
@@ -322,7 +327,7 @@
   </div>
 {/snippet}
 
-<div class="well">
+<div class="well" style:--flat-radius={FLAT_RADIUS}>
   <div class="shell">
     <header class="titlebar">
       <div class="wordmark">
@@ -444,8 +449,7 @@
     margin: 0 auto;
     background: var(--paper-raised);
     border: 1px solid var(--hairline);
-    /* Flat hairline. Radius 0 is the stream/roster rule; there is no zero token. */
-    border-radius: 0;
+    border-radius: var(--flat-radius);
     overflow: hidden;
   }
 
@@ -525,7 +529,7 @@
     overflow: hidden;
     padding: var(--s-3);
     border: 1px solid var(--hairline);
-    border-radius: 0;
+    border-radius: var(--flat-radius);
     background: var(--paper-raised);
   }
 
@@ -631,7 +635,7 @@
   .event,
   .slot-row {
     list-style: none;
-    border-radius: 0;
+    border-radius: var(--flat-radius);
     background: none;
     box-shadow: none;
   }
@@ -646,7 +650,7 @@
     min-height: 60px;
     border: 0;
     border-bottom: 1px solid var(--hairline);
-    border-radius: 0;
+    border-radius: var(--flat-radius);
     background: none;
     box-shadow: none;
   }

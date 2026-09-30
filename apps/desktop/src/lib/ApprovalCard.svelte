@@ -17,8 +17,34 @@
     type Approval,
     type Decision,
   } from "./api";
-  import { tokenMs } from "./cssTokens";
-  import { CHECK_PATH, CHEVRON_PATH, DENY_MARK_PATH, STRIKE_PATH, arrowFromId, type ArrowMark } from "./pen";
+  import { tokenEase, tokenMs } from "./cssTokens";
+  import {
+    CHECK_PATH,
+    CHEVRON_PATH,
+    DELETE_KEY_PATH,
+    DENY_MARK_PATH,
+    ENTER_KEY_PATH,
+    STRIKE_PATH,
+    arrowFromId,
+    type ArrowMark,
+  } from "./pen";
+
+  /** Risk arrow waits after the card rise. No default-motion token is 120ms. */
+  const ARROW_DELAY = "120ms";
+  /** Arrow head draws after the shaft. No default token is 160ms. */
+  const ARROW_HEAD_DRAW = "160ms";
+  /** Early-release retract. No default token is 160ms (--dur-fast is 140ms). Easing is --ease-exit. */
+  const RETRACT_MS = 160;
+  /** Reduced-motion fades. tokens.css has no linear easing token. */
+  const REDUCED_FADE_EASE = "linear";
+  /** Evidence is off the 11 / 12.5 / 14 type ramp. */
+  const EVIDENCE_SIZE = "12px";
+  /** Monogram is off the 11 / 12.5 / 14 type ramp. */
+  const MONOGRAM_SIZE = "13px";
+  /** Line icons. --pen-width is 1.75 and is only the pen. */
+  const ICON_STROKE = "1.5";
+  /** Pen marks. Same weight as --pen-width. Not a new token. */
+  const PEN_STROKE = "1.75px";
 
   interface Props {
     approval: Approval;
@@ -85,15 +111,11 @@
     const id = shortEventId(approval.evidence.event_id);
     return approval.evidence.kind ? `${id} · ${approval.evidence.kind}` : id;
   });
-  const commandGlyph = $derived.by(() => {
+  const macModifier = $derived.by(() => {
     const platform = navigator.platform;
     const agent = navigator.userAgent;
-    if (/Mac|iPhone|iPad/.test(platform) || /Mac OS X/.test(agent)) {
-      return "⌘";
-    }
-    return "Ctrl";
+    return /Mac|iPhone|iPad/.test(platform) || /Mac OS X/.test(agent);
   });
-  const holdHint = $derived(`hold ${commandGlyph}↵ / hold ${commandGlyph}⌫`);
   const draftPieces = $derived.by(() => {
     const pieces: { code: boolean; text: string }[] = [];
     const pattern = /refresh\(\)/g;
@@ -242,7 +264,13 @@
     });
   }
 
-  function animateNumber(from: number, to: number, ms: number, apply: (value: number) => void): Promise<void> {
+  function animateNumber(
+    from: number,
+    to: number,
+    ms: number,
+    apply: (value: number) => void,
+    ease: (t: number) => number = (t) => t,
+  ): Promise<void> {
     if (reducedMotion.current || ms <= 0) {
       apply(to);
       return Promise.resolve();
@@ -252,7 +280,8 @@
       const start = performance.now();
       const step = (now: number) => {
         const t = Math.min(1, (now - start) / ms);
-        apply(from + (to - from) * t);
+        const curved = ease(t);
+        apply(from + (to - from) * curved);
         if (t < 1) {
           holdFrame = requestAnimationFrame(step);
         } else {
@@ -349,7 +378,7 @@
       node.style.overflow = "";
       node.style.opacity = "0";
       void node.offsetHeight;
-      node.style.transition = "opacity var(--dur-soft) linear";
+      node.style.transition = `opacity var(--dur-soft) ${REDUCED_FADE_EASE}`;
       node.style.opacity = "1";
       morphTimer = window.setTimeout(() => finishMorph(to), 180);
       return;
@@ -402,9 +431,15 @@
     }
     committing = "approve";
     const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
-    await animateNumber(1, 0, drawMs, (value) => {
-      checkOffset = value;
-    });
+    await animateNumber(
+      1,
+      0,
+      drawMs,
+      (value) => {
+        checkOffset = value;
+      },
+      tokenEase("--ease-draw"),
+    );
     if (reducedMotion.current) {
       checkOffset = 0;
       await wait(tokenMs("--dur-base", 120));
@@ -419,9 +454,15 @@
     committing = "deny";
     if (strike < 1) {
       const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
-      await animateNumber(strike, 1, drawMs, (value) => {
-        strike = value;
-      });
+      await animateNumber(
+        strike,
+        1,
+        drawMs,
+        (value) => {
+          strike = value;
+        },
+        tokenEase("--ease-draw"),
+      );
       if (reducedMotion.current) {
         await wait(tokenMs("--dur-base", 120));
       }
@@ -449,13 +490,19 @@
       }
       return;
     }
-    void animateNumber(from, 0, 160, (value) => {
-      if (kind === "approve") {
-        checkOffset = 1 - value;
-      } else {
-        strike = value;
-      }
-    });
+    void animateNumber(
+      from,
+      0,
+      RETRACT_MS,
+      (value) => {
+        if (kind === "approve") {
+          checkOffset = 1 - value;
+        } else {
+          strike = value;
+        }
+      },
+      tokenEase("--ease-exit"),
+    );
   }
 
   function cancelHold(): void {
@@ -592,6 +639,13 @@
 <article
   {@attach bindCard}
   class={["card", pending ? "glass" : "paper", playRise && "rise"]}
+  style:--arrow-delay={ARROW_DELAY}
+  style:--arrow-head-draw={ARROW_HEAD_DRAW}
+  style:--reduced-fade={REDUCED_FADE_EASE}
+  style:--evidence-size={EVIDENCE_SIZE}
+  style:--monogram-size={MONOGRAM_SIZE}
+  style:--icon-stroke={ICON_STROKE}
+  style:--pen-stroke={PEN_STROKE}
   data-risk={risk}
   tabindex={pending ? 0 : undefined}
   aria-labelledby={pending ? titleId : undefined}
@@ -624,8 +678,8 @@
           viewBox={`0 0 ${arrow.width} ${arrow.height}`}
           aria-hidden="true"
         >
-          <path class="pen trace draw" pathLength="1" d={arrow.shaft} />
-          <path class="pen trace draw" pathLength="1" d={arrow.head} />
+          <path class="pen trace shaft" pathLength="1" d={arrow.shaft} />
+          <path class="pen trace head" pathLength="1" d={arrow.head} />
         </svg>
       {/if}
     {/if}
@@ -742,7 +796,26 @@
       <div class="quiet">
         <p>Records your decision. Nothing is posted in this demo.</p>
         {#if cardFocused && !denyOpen}
-          <p class={["hold-hint", seenArmed && "armed"]}>{holdHint}</p>
+          {#snippet modifier()}
+            <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
+          {/snippet}
+          {#snippet enterKey()}
+            <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Enter">
+              <path d={ENTER_KEY_PATH} />
+            </svg>
+          {/snippet}
+          {#snippet deleteKey()}
+            <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Delete">
+              <path d={DELETE_KEY_PATH} />
+            </svg>
+          {/snippet}
+          <p class={["hold-hint", seenArmed && "armed"]}>
+            {#if seenArmed}
+              hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
+            {:else}
+              hold {@render modifier()} {@render enterKey()} unlocks once the evidence has been on screen
+            {/if}
+          </p>
         {/if}
       </div>
     </div>
@@ -889,7 +962,7 @@
   .pen {
     fill: none;
     stroke: var(--pen);
-    stroke-width: var(--pen-width);
+    stroke-width: var(--pen-stroke);
     stroke-linecap: round;
     stroke-linejoin: round;
     vector-effect: non-scaling-stroke;
@@ -904,8 +977,16 @@
     animation: draw var(--dur-draw) var(--ease-draw) both;
   }
 
-  .arrow .draw {
-    animation-delay: calc(var(--dur-stage) + 120ms);
+  .arrow .shaft {
+    stroke-dashoffset: 0;
+    animation: draw var(--dur-draw) var(--ease-draw) both;
+    animation-delay: calc(var(--dur-stage) + var(--arrow-delay));
+  }
+
+  .arrow .head {
+    stroke-dashoffset: 0;
+    animation: draw var(--arrow-head-draw) var(--ease-draw) both;
+    animation-delay: calc(var(--dur-stage) + var(--arrow-delay) + var(--dur-draw));
   }
 
   @keyframes draw {
@@ -941,7 +1022,7 @@
     box-shadow: var(--highlight-top), 0 0 0 1px var(--hairline);
     display: grid;
     place-items: center;
-    font-size: 13px;
+    font-size: var(--monogram-size);
     line-height: 1;
     font-weight: var(--w-semibold);
     color: var(--ink-2);
@@ -986,7 +1067,7 @@
 
   .evidence {
     font-family: var(--font-machine);
-    font-size: 12px;
+    font-size: var(--evidence-size);
     line-height: 1.6;
     color: var(--ink-1);
     background: color-mix(in oklab, var(--paper-sunken) 94%, transparent);
@@ -1035,12 +1116,21 @@
     transition: transform var(--dur-base) var(--ease-out);
   }
 
-  .chev path {
+  .chev path,
+  .key path {
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.5;
+    stroke-width: var(--icon-stroke);
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  .key {
+    width: 12px;
+    height: 12px;
+    display: inline-block;
+    vertical-align: -2px;
+    overflow: visible;
   }
 
   details[open] .chev {
@@ -1226,13 +1316,27 @@
     line-height: var(--lh-meta);
   }
 
-  .hold-hint,
-  .hold-hint.armed {
+  .hold-hint {
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
-    /* ink-3 is banned on glass. Both hint states stay ink-2. */
+    color: var(--ink-3);
+    animation: hint-in var(--dur-base) var(--ease-out) both;
+  }
+
+  .hold-hint.armed {
     color: var(--ink-2);
+  }
+
+  .hold-hint kbd {
+    font: inherit;
+    color: inherit;
+  }
+
+  @keyframes hint-in {
+    from {
+      opacity: 0;
+    }
   }
 
   .reason {
@@ -1366,7 +1470,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .card.rise {
-      animation: fade var(--dur-stage) linear both;
+      animation: fade var(--dur-stage) var(--reduced-fade) both;
     }
 
     @keyframes fade {
@@ -1376,8 +1480,10 @@
     }
 
     .draw,
-    .arrow .draw {
-      animation: pen-fade var(--dur-base) linear both;
+    .arrow .shaft,
+    .arrow .head {
+      animation: pen-fade var(--dur-base) var(--reduced-fade) both;
+      animation-delay: 0s;
       stroke-dashoffset: 0;
     }
 
@@ -1388,7 +1494,8 @@
     }
 
     .reason,
-    .chev {
+    .chev,
+    .hold-hint {
       animation: none;
       transition: none;
     }

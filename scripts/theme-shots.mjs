@@ -27,7 +27,7 @@ const browser = await chromium.launch({
 const page = await browser.newPage({
   viewport: { width: 1280, height: 800 },
   timezoneId: "America/New_York",
-  deviceScaleFactor: 1,
+  deviceScaleFactor: 2,
 });
 
 async function park() {
@@ -61,11 +61,26 @@ if (mode === "before") {
 
 await shot("idle");
 
-await page.getByRole("button", { name: "Simulate repo.push" }).click();
-await page.locator("article.card.glass").waitFor();
+await page.evaluate(async () => {
+  const response = await fetch("/v1/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: "demo",
+      kind: "session.note",
+      payload: { note: "a stream row with no approval" },
+      idempotency_key: `shot-stream-${crypto.randomUUID()}`,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+});
 await page.locator(".stream .row").first().waitFor();
+if ((await page.locator("article.card").count()) !== 0) {
+  throw new Error("stream shot still has a card");
+}
 await shot("stream");
-await shot("waiting");
 
 const row = page.locator(".stream .row").first();
 const rowBox = await row.boundingBox();
@@ -78,6 +93,9 @@ await page.screenshot({ path: `${outDir}/hover.png` });
 console.log("wrote hover.png");
 
 await park();
+await page.getByRole("button", { name: "Simulate repo.push" }).click();
+await page.locator("article.card.glass").waitFor();
+await shot("waiting");
 await page.locator("article.card button.approve").click();
 await page.locator("article.card.paper").waitFor();
 await page.locator("article.card .receipt").waitFor();

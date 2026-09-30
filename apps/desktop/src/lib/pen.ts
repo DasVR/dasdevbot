@@ -9,11 +9,18 @@ export const DENY_MARK_PATH = "M4.5 12.6c5-.7 10-.6 15 .2";
 export const CHEVRON_PATH = "M4.5 2.5 8 6l-3.5 3.5";
 
 /**
- * Focus glyph. Concentric rings in a 16px viewBox, drawn at 1.5 with round
- * caps and currentColor, same as the other line icons. Not the pen.
+ * Focus glyph. Concentric rings in a 16px viewBox, radii 5.6 and 2.1, drawn
+ * at 1.5 with round caps and currentColor. Not the pen.
  */
-export const FOCUS_OUTER_PATH = "M14.25 8a6.25 6.25 0 1 1-12.5 0 6.25 6.25 0 1 1 12.5 0";
-export const FOCUS_INNER_PATH = "M10.5 8a2.5 2.5 0 1 1-5 0 2.5 2.5 0 1 1 5 0";
+export const FOCUS_OUTER_PATH = "M13.6 8a5.6 5.6 0 1 1-11.2 0 5.6 5.6 0 1 1 11.2 0";
+export const FOCUS_INNER_PATH = "M10.1 8a2.1 2.1 0 1 1-4.2 0 2.1 2.1 0 1 1 4.2 0";
+
+/** Enter. JetBrains Mono has no U+21B5, so the hint draws this 1.5 line icon. */
+export const ENTER_KEY_PATH = "M12 3.25V9.25H4.25M7.15 6.35 4.25 9.25 7.15 12.15";
+
+/** Delete. The latin subset has no U+232B, so the hint draws this 1.5 line icon. */
+export const DELETE_KEY_PATH =
+  "M13.75 4.25H6.6L3 8l3.6 3.75H13.75ZM8.15 6.15 11.35 9.85M11.35 6.15 8.15 9.85";
 
 /** Quiet empty-state rule. One stroke, no card. */
 export const QUIET_LINE_PATH = "M1.5 5.2c18-.7 36-.9 54-.3 16.4.5 32.2.9 48.5.2";
