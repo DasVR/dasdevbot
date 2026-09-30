@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use dasdevbotd::{
-    open_provider, plan_secret_set, prompt_secret_from_tty, read_piped_secret, serve,
-    session_token_path, url_exposes_bearer, CommandKind, Config, Error, KeyringHandle,
+    audit_dev_env, open_provider, plan_secret_set, prompt_secret_from_tty, read_piped_secret,
+    serve, session_token_path, url_exposes_bearer, CommandKind, Config, Error, KeyringHandle,
     ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource,
 };
 
@@ -149,6 +149,8 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
         flags.data.display(),
         flags.provider.as_str()
     );
+    let dev_env = flags.dev_env_secrets;
+    let role = flags.role.clone();
     let provider = open_provider(&ProviderSettings {
         kind: flags.provider,
         model: flags.model.clone(),
@@ -156,18 +158,19 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
         command: CommandKind::Serve,
         role: flags.role.clone(),
     })?;
-    serve(
-        dasdevbotd::build_and_worker(
-            Config {
-                data: flags.data,
-                web_root: flags.web,
-                role: flags.role,
-                token: explicit,
-            },
-            provider,
-        )?,
-        &flags.bind,
-    )
+    let app = dasdevbotd::build_and_worker(
+        Config {
+            data: flags.data,
+            web_root: flags.web,
+            role: flags.role,
+            token: explicit,
+        },
+        provider,
+    )?;
+    if dev_env {
+        audit_dev_env(&app, &role)?;
+    }
+    serve(app, &flags.bind)
 }
 
 fn explicit_token(flag: Option<String>) -> Option<String> {
@@ -182,6 +185,9 @@ fn explicit_token(flag: Option<String>) -> Option<String> {
 
 fn smoke_model(args: Vec<String>) -> Result<(), Error> {
     let flags = flags(args)?;
+    if flags.dev_env_secrets {
+        eprintln!("audit secret.dev_env role={}", flags.role);
+    }
     let provider = match open_provider(&ProviderSettings {
         kind: flags.provider,
         model: flags.model,
@@ -197,12 +203,15 @@ fn smoke_model(args: Vec<String>) -> Result<(), Error> {
         Err(err) => return Err(Error::Provider(err)),
     };
     let started = Instant::now();
-    match provider.complete(&dasdevbotd::CompletionRequest {
-        model: String::new(),
-        system: String::new(),
-        user: "Reply with the single word ok.".into(),
-        max_tokens: 16,
-    }) {
+    match provider.complete(
+        &dasdevbotd::CompletionRequest {
+            model: String::new(),
+            system: String::new(),
+            user: "Reply with the single word ok.".into(),
+            max_tokens: 16,
+        },
+        &mut |_| Ok(()),
+    ) {
         Ok(completion) => {
             println!("latency_ms={}", started.elapsed().as_millis());
             match (

@@ -79,51 +79,29 @@ impl OllamaCloud {
         }
     }
 
-    pub fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+    pub fn complete(
+        &self,
+        req: &CompletionRequest,
+        charge: &mut dyn FnMut(&RetryCost) -> Result<(), ProviderError>,
+    ) -> Result<Completion, ProviderError> {
         let model = choose_model(self.model.as_deref(), &req.model, OLLAMA_CLOUD_MODEL);
-        let mut retry_costs = Vec::new();
-        for attempt in 1..=OLLAMA_BUSY_MAX_ATTEMPTS {
-            match self.post_chat(&model, req) {
-                Ok(mut completion) => {
-                    completion.retry_costs = retry_costs;
-                    self.observe_usage(&mut completion);
-                    return Ok(completion);
-                }
-                Err(ProviderError::Busy(busy)) if !busy.terminal => {
-                    let Some(backoff_ms) = busy_backoff_after(attempt) else {
-                        return Err(self.terminal_busy(retry_costs));
-                    };
-                    retry_costs.push(RetryCost {
-                        attempt,
-                        backoff_ms,
-                        budget_tokens: OLLAMA_BUSY_RETRY_BUDGET_TOKENS,
-                    });
-                    log_provider(&format!(
-                        "ollama cloud busy attempt={attempt} backoff_ms={backoff_ms}"
-                    ));
-                    std::thread::sleep(Duration::from_millis(backoff_ms));
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(self.terminal_busy(retry_costs))
-    }
-
-    fn terminal_busy(&self, retry_costs: Vec<RetryCost>) -> ProviderError {
-        log_provider("ollama cloud busy terminal");
-        ProviderError::Busy(Busy {
-            message: "ollama cloud is busy".into(),
-            retry_costs,
-            terminal: true,
-        })
+        let mut completion = run_busy_retries(
+            || self.post_chat(&model, req),
+            charge,
+            |backoff_ms| std::thread::sleep(Duration::from_millis(backoff_ms)),
+        )?;
+        self.observe_usage(&mut completion);
+        Ok(completion)
     }
 
     fn post_chat(&self, model: &str, req: &CompletionRequest) -> Result<Completion, ProviderError> {
         let body = chat_body(model, req);
-        debug_assert!(
-            !body.to_string().contains(self.secret.expose()),
-            "the api key must not be copied into the prompt"
-        );
+        let rendered = body.to_string();
+        if !self.secret.expose().is_empty() && rendered.contains(self.secret.expose()) {
+            return Err(ProviderError::Failed(
+                "ollama request body contained the api key".into(),
+            ));
+        }
         let response = self
             .agent
             .post(&cloud_chat_url())
@@ -197,7 +175,11 @@ impl OllamaLocal {
         Self { model, agent }
     }
 
-    pub fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+    pub fn complete(
+        &self,
+        req: &CompletionRequest,
+        _charge: &mut dyn FnMut(&RetryCost) -> Result<(), ProviderError>,
+    ) -> Result<Completion, ProviderError> {
         let listeners = current_listeners()?;
         guard_local(&listeners)?;
         let model = choose_model(self.model.as_deref(), &req.model, OLLAMA_LOCAL_MODEL);
@@ -271,6 +253,7 @@ fn header_pairs(resp: &ureq::Response) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A concurrency 429 is retryable. A credits 429, and any other 429, is a terminal limit.
 pub fn cloud_status(
     secret: &Secret,
     status: u16,
@@ -278,12 +261,24 @@ pub fn cloud_status(
     body: &str,
 ) -> ProviderError {
     let scrubbed = scrub(body, secret);
-    if status == 429 || is_concurrency_limit(&scrubbed) {
+    if is_concurrency_limit(&scrubbed) && !is_credits_exhausted(&scrubbed) {
         log_provider("ollama cloud busy");
         return ProviderError::Busy(Busy {
             message: "ollama cloud is busy".into(),
             retry_costs: Vec::new(),
             terminal: false,
+        });
+    }
+    if status == 429 || is_credits_exhausted(&scrubbed) {
+        let message = if is_credits_exhausted(&scrubbed) {
+            "ollama cloud credits are exhausted"
+        } else {
+            "ollama cloud rate limit is not concurrency"
+        };
+        log_provider(message);
+        return ProviderError::LimitReached(super::LimitReached {
+            message: message.into(),
+            resets_at: None,
         });
     }
     cloud_failed(
@@ -298,6 +293,66 @@ pub fn cloud_status(
 fn is_concurrency_limit(body: &str) -> bool {
     body.to_ascii_lowercase()
         .contains("too many concurrent requests")
+}
+
+fn is_credits_exhausted(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("insufficient credit")
+        || lower.contains("credits exhausted")
+        || lower.contains("credit limit")
+        || lower.contains("quota exceeded")
+        || lower.contains("usage limit")
+        || lower.contains("out of credits")
+        || lower.contains("monthly credit")
+}
+
+/// Run chat attempts. After a non-terminal busy response, charge the retry and only then wait and call again.
+pub fn run_busy_retries<Call, Charge, Wait>(
+    mut call: Call,
+    mut charge: Charge,
+    mut wait: Wait,
+) -> Result<Completion, ProviderError>
+where
+    Call: FnMut() -> Result<Completion, ProviderError>,
+    Charge: FnMut(&RetryCost) -> Result<(), ProviderError>,
+    Wait: FnMut(u64),
+{
+    let mut retry_costs = Vec::new();
+    for attempt in 1..=OLLAMA_BUSY_MAX_ATTEMPTS {
+        match call() {
+            Ok(mut completion) => {
+                completion.retry_costs = retry_costs;
+                return Ok(completion);
+            }
+            Err(ProviderError::Busy(busy)) if !busy.terminal => {
+                let Some(backoff_ms) = busy_backoff_after(attempt) else {
+                    return Err(terminal_busy(retry_costs));
+                };
+                let cost = RetryCost {
+                    attempt,
+                    backoff_ms,
+                    budget_tokens: OLLAMA_BUSY_RETRY_BUDGET_TOKENS,
+                };
+                charge(&cost)?;
+                retry_costs.push(cost);
+                log_provider(&format!(
+                    "ollama cloud busy attempt={attempt} backoff_ms={backoff_ms}"
+                ));
+                wait(backoff_ms);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(terminal_busy(retry_costs))
+}
+
+fn terminal_busy(retry_costs: Vec<RetryCost>) -> ProviderError {
+    log_provider("ollama cloud busy terminal");
+    ProviderError::Busy(Busy {
+        message: "ollama cloud is busy".into(),
+        retry_costs,
+        terminal: true,
+    })
 }
 
 fn cloud_failed(secret: &Secret, message: impl AsRef<str>) -> ProviderError {
@@ -713,5 +768,107 @@ mod tests {
     fn missing_proc_table_fails_closed() {
         let err = listeners_from("/no/such/proc/net/tcp", "/no/such/proc/net/tcp6").unwrap_err();
         assert!(err.to_string().contains("LAN"));
+    }
+
+    #[test]
+    fn credits_429_is_terminal_and_concurrency_429_is_busy() {
+        let secret = Secret::new("SENTINEL_KEY");
+        let credits = cloud_status(
+            &secret,
+            429,
+            &[],
+            r#"{"error":"monthly credit limit reached SENTINEL_KEY"}"#,
+        );
+        match credits {
+            ProviderError::LimitReached(limit) => {
+                assert!(limit.message.contains("credits"));
+                assert!(!limit.to_string().contains("SENTINEL_KEY"));
+            }
+            other => panic!("expected a credit limit, got {other}"),
+        }
+        let bare = cloud_status(&secret, 429, &[], "");
+        assert!(matches!(bare, ProviderError::LimitReached(_)));
+        let busy = cloud_status(&secret, 429, &[], "too many concurrent requests");
+        assert!(matches!(busy, ProviderError::Busy(_)));
+    }
+
+    #[test]
+    fn a_retry_is_charged_before_the_next_call() {
+        let trace = std::cell::RefCell::new(Vec::new());
+        let mut calls = 0;
+        let completion = run_busy_retries(
+            || {
+                calls += 1;
+                trace.borrow_mut().push(format!("call{calls}"));
+                if calls < 3 {
+                    Err(ProviderError::Busy(Busy {
+                        message: "ollama cloud is busy".into(),
+                        retry_costs: Vec::new(),
+                        terminal: false,
+                    }))
+                } else {
+                    Ok(sample_completion())
+                }
+            },
+            |cost| {
+                trace.borrow_mut().push(format!("charge{}", cost.attempt));
+                Ok(())
+            },
+            |backoff_ms| trace.borrow_mut().push(format!("wait{backoff_ms}")),
+        )
+        .unwrap();
+        assert_eq!(
+            trace.into_inner(),
+            vec![
+                "call1".to_string(),
+                "charge1".to_string(),
+                "wait2000".to_string(),
+                "call2".to_string(),
+                "charge2".to_string(),
+                "wait4000".to_string(),
+                "call3".to_string(),
+            ]
+        );
+        assert_eq!(completion.retry_costs.len(), 2);
+
+        let mut calls = 0;
+        let err = run_busy_retries(
+            || {
+                calls += 1;
+                Err(ProviderError::Busy(Busy {
+                    message: "ollama cloud is busy".into(),
+                    retry_costs: Vec::new(),
+                    terminal: false,
+                }))
+            },
+            |_| Err(ProviderError::Failed("budget".into())),
+            |_| panic!("a refused charge must not wait"),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(matches!(err, ProviderError::Failed(_)));
+    }
+
+    fn sample_completion() -> Completion {
+        Completion {
+            text: "ok".into(),
+            model: OLLAMA_CLOUD_MODEL.into(),
+            provider: "ollama".into(),
+            usage_kind: "absent".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            micro_usd: 0,
+            note: String::new(),
+            usage: crate::provider::UsageReport {
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+                quota: crate::provider::QuotaSignal::Absent {
+                    detail: String::new(),
+                },
+                headroom: Headroom::unknown(),
+            },
+            retry_costs: Vec::new(),
+        }
     }
 }

@@ -175,11 +175,15 @@ pub enum ProviderError {
     #[error("{0}")]
     Busy(Busy),
     #[error("claude-cli tool_use attempted")]
-    ToolUseAttempted,
+    ToolUseAttempted { cli_version: String, event: String },
 }
 
 pub trait LlmProvider: Send + Sync {
-    fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError>;
+    fn complete(
+        &self,
+        req: &CompletionRequest,
+        charge: &mut dyn FnMut(&RetryCost) -> Result<(), ProviderError>,
+    ) -> Result<Completion, ProviderError>;
     fn id(&self) -> &'static str;
     fn detail(&self) -> String;
 }
@@ -264,8 +268,12 @@ pub fn open_with(
 }
 
 impl LlmProvider for OllamaCloud {
-    fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
-        OllamaCloud::complete(self, req)
+    fn complete(
+        &self,
+        req: &CompletionRequest,
+        charge: &mut dyn FnMut(&RetryCost) -> Result<(), ProviderError>,
+    ) -> Result<Completion, ProviderError> {
+        OllamaCloud::complete(self, req, charge)
     }
 
     fn id(&self) -> &'static str {
@@ -278,8 +286,12 @@ impl LlmProvider for OllamaCloud {
 }
 
 impl LlmProvider for OllamaLocal {
-    fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
-        OllamaLocal::complete(self, req)
+    fn complete(
+        &self,
+        req: &CompletionRequest,
+        charge: &mut dyn FnMut(&RetryCost) -> Result<(), ProviderError>,
+    ) -> Result<Completion, ProviderError> {
+        OllamaLocal::complete(self, req, charge)
     }
 
     fn id(&self) -> &'static str {
@@ -292,8 +304,12 @@ impl LlmProvider for OllamaLocal {
 }
 
 impl LlmProvider for ClaudeCli {
-    fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
-        ClaudeCli::complete(self, req)
+    fn complete(
+        &self,
+        req: &CompletionRequest,
+        charge: &mut dyn FnMut(&RetryCost) -> Result<(), ProviderError>,
+    ) -> Result<Completion, ProviderError> {
+        ClaudeCli::complete(self, req, charge)
     }
 
     fn id(&self) -> &'static str {
@@ -324,7 +340,11 @@ impl Default for MockProvider {
 }
 
 impl LlmProvider for MockProvider {
-    fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+    fn complete(
+        &self,
+        req: &CompletionRequest,
+        _charge: &mut dyn FnMut(&RetryCost) -> Result<(), ProviderError>,
+    ) -> Result<Completion, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let text = mock_draft();
         let input_tokens = estimate_tokens(&req.system) + estimate_tokens(&req.user);

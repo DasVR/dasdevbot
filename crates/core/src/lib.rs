@@ -26,4 +26,6 @@ pub mod kind {
     pub const JOB_FAILED: &str = "job.failed";
     pub const JOB_PAUSED: &str = "job.paused";
     pub const PROVIDER_COST: &str = "provider.cost";
+    pub const TOOL_USE_BLOCKED: &str = "provider.tool_use_blocked";
+    pub const DEV_ENV: &str = "secret.dev_env";
 }

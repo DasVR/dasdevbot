@@ -681,6 +681,7 @@ dependencies = [
  "dasdevbot-sync",
  "getrandom 0.2.17",
  "keyring",
+ "libc",
  "rpassword",
  "rusqlite",
  "serde",

@@ -27,6 +27,7 @@ pub use server::{serve, url_exposes_bearer};
 
 const MIN_TOKEN_BYTES: usize = 32;
 pub use store::Store;
+pub use turn::audit_dev_env;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
