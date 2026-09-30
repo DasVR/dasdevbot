@@ -1,5 +1,11 @@
 //! Append-only audit log. Each row's hash covers the previous tip, so a
-//! forged insert breaks [`verify`]. Tool-use failures record an empty payload.
+//! forged insert breaks [`verify`].
+//!
+//! The signing key sits in `<data>.audit-key`, beside the database. Anyone who
+//! can replace the database can replace that key. There is no external witness.
+//! The tip hash is also written to `<data>.audit-tip`. A new genesis is refused
+//! when that sidecar still holds a prior tip, so deleting the database does not
+//! start a fresh chain.
 
 use dasdevbot_core::tool_use_audit_payload;
 use rusqlite::{params, OptionalExtension};
@@ -46,6 +52,9 @@ pub fn append(
         ],
     )?;
     tx.commit()?;
+    if let Some(path) = store.audit_tip_path() {
+        crate::write_private(path.to_path_buf(), tip_hash.as_bytes())?;
+    }
     Ok(seq)
 }
 
@@ -55,8 +64,77 @@ fn link_hash(seq: i64, prev_hash: &str, kind: &str, created_at: i64, payload: &s
         .to_string()
 }
 
-/// Walk the chain. An empty log is valid. A tip read error is an error,
-/// not a new genesis row (that path lives in [`append`]).
+/// Refuse to open a file database whose log was deleted while a prior tip
+/// sidecar still exists, and refuse a sidecar that does not match the log.
+pub fn bind_tip(store: &Store) -> Result<()> {
+    let Some(path) = store.audit_tip_path() else {
+        return Ok(());
+    };
+    let sidecar = read_tip(path)?;
+    let db_tip = latest_tip(store)?;
+    match (db_tip, sidecar) {
+        (None, Some(_)) => Err(crate::Error::Forbidden(
+            "refusing a new audit genesis; a prior tip exists".into(),
+        )),
+        (Some(db), Some(side)) if db != side => Err(crate::Error::Forbidden(
+            "audit tip sidecar does not match the log".into(),
+        )),
+        (Some(db), None) => {
+            crate::write_private(path.to_path_buf(), db.as_bytes())?;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn read_tip(path: &std::path::Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn latest_tip(store: &Store) -> Result<Option<String>> {
+    store
+        .connection()
+        .query_row(
+            "SELECT tip_hash FROM audit_log ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(crate::Error::from)
+}
+
+/// One audit row per seeded grant. Later startups do not append the same payload again.
+pub fn audit_grant_seed(store: &mut Store, now_ms: u64, audit_seed: &[u8; 32]) -> Result<()> {
+    let grants = store.grants()?;
+    for (agent_id, effect_class, expires_at) in grants {
+        let payload = serde_json::json!({
+            "agent_id": agent_id,
+            "effect_class": effect_class,
+            "expires_at": expires_at,
+        })
+        .to_string();
+        let count: i64 = store.connection().query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE kind = 'grant.seeded' AND payload = ?1",
+            [&payload],
+            |row| row.get(0),
+        )?;
+        if count == 0 {
+            append(store, "grant.seeded", &payload, now_ms, audit_seed)?;
+        }
+    }
+    Ok(())
+}
 pub fn verify(store: &Store, audit_seed: &[u8; 32]) -> Result<bool> {
     let mut stmt = store.connection().prepare(
         "SELECT seq, prev_hash, tip_hash, kind, payload, created_at, signature
@@ -105,14 +183,15 @@ pub fn audit_tool_use_blocked(
     store: &mut Store,
     now_ms: u64,
     audit_seed: &[u8; 32],
+    job_id: &str,
+    cli_version: &str,
 ) -> Result<i64> {
-    append(
-        store,
-        "provider.tool_use_blocked",
-        tool_use_audit_payload(),
-        now_ms,
-        audit_seed,
-    )
+    let payload = serde_json::json!({
+        "job_id": job_id,
+        "cli_version": cli_version,
+    })
+    .to_string();
+    append(store, "provider.tool_use_blocked", &payload, now_ms, audit_seed)
 }
 
 #[cfg(test)]

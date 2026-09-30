@@ -2,6 +2,7 @@
 
 mod audit_log;
 mod caps;
+mod hello_key;
 mod harness;
 pub mod ipc;
 mod ownership_store;
@@ -40,9 +41,13 @@ pub use secrets::{
     plan_secret_set, prompt_secret_from_tty, read_piped_secret, CommandKind, KeyringHandle,
     SecretHandle, SecretSource,
 };
+pub use signature::{DECISION_PURPOSE, UNDO_PURPOSE};
 pub use server::{serve, url_exposes_bearer};
 pub use store::Store;
 pub use turn::audit_dev_env;
+
+#[cfg(windows)]
+pub use hello_key::sign_approval_message;
 
 const MIN_TOKEN_BYTES: usize = 32;
 
@@ -83,6 +88,29 @@ pub struct App {
     pub token: String,
     pub data: PathBuf,
     pub audit_seed: [u8; 32],
+    /// Per-launch secrets. The window label is derived from these, not from JSON.
+    pub window_secrets: WindowSecrets,
+}
+
+/// One secret per shell window, minted at process start.
+pub struct WindowSecrets {
+    pub card: String,
+    pub main: String,
+    pub settings: String,
+}
+
+impl WindowSecrets {
+    pub fn resolve(&self, presented: &str) -> Option<&'static str> {
+        if tokens_equal(&self.card, presented) {
+            Some(dasdevbot_core::CARD_WINDOW)
+        } else if tokens_equal(&self.main, presented) {
+            Some(dasdevbot_core::MAIN_WINDOW)
+        } else if tokens_equal(&self.settings, presented) {
+            Some(dasdevbot_core::SETTINGS_WINDOW)
+        } else {
+            None
+        }
+    }
 }
 
 pub struct Config {
@@ -104,12 +132,48 @@ pub fn session_token_path(data: &Path) -> PathBuf {
     sibling(data, ".token")
 }
 
+/// Sibling of `--data`. Authorization does not read this path.
 pub fn role_path(data: &Path) -> PathBuf {
     sibling(data, ".role")
 }
 
+#[cfg(unix)]
+const ROLE_FILE: &str = "/etc/dasdevbot/role";
+#[cfg(windows)]
+const ROLE_FILE: &str = r"C:\ProgramData\dasdevbot\role";
+
+/// Fixed role file. `serve --role` is the other source, from the unit argv.
+pub fn configured_role_path() -> &'static Path {
+    Path::new(ROLE_FILE)
+}
+
+pub fn load_role_file() -> Result<String> {
+    let path = configured_role_path();
+    if !path.is_file() {
+        return Err(Error::Forbidden("daemon role is not configured".into()));
+    }
+    if role_file_is_unsafe(path) {
+        return Err(Error::Forbidden(
+            "role file must be root-owned and not group- or world-writable".into(),
+        ));
+    }
+    let role = fs::read_to_string(path)?.trim().to_string();
+    if role.is_empty() {
+        return Err(Error::Forbidden("daemon role is not configured".into()));
+    }
+    Ok(role)
+}
+
 pub fn audit_key_path(data: &Path) -> PathBuf {
     sibling(data, ".audit-key")
+}
+
+pub fn audit_tip_path(data: &Path) -> PathBuf {
+    sibling(data, ".audit-tip")
+}
+
+pub fn window_secret_path(data: &Path, label: &str) -> PathBuf {
+    sibling(data, &format!(".window-{label}"))
 }
 
 pub fn shell_socket_path(data: &Path) -> PathBuf {
@@ -133,12 +197,13 @@ pub fn build_app(
     config: Config,
     provider: Box<dyn LlmProvider>,
 ) -> Result<(Arc<App>, mpsc::Receiver<()>)> {
-    let store = Store::open(&config.data)?;
+    let mut store = Store::open(&config.data)?;
     let audit_seed = load_or_create_audit_seed(&config.data, &store)?;
     if !audit_log::verify(&store, &audit_seed)? {
         eprintln!("dasdevbotd: audit log failed verification; refusing to start");
         return Err(Error::Forbidden("audit log failed verification".into()));
     }
+    audit_log::audit_grant_seed(&mut store, wall_ms(), &audit_seed)?;
     let node = store.node_id().to_string();
     let (wake, rx) = mpsc::channel();
     let token = match config.token {
@@ -154,8 +219,7 @@ pub fn build_app(
         _ => mint_token(),
     };
     persist_token(&config.data, &token)?;
-    persist_role(&config.data, &config.role)?;
-    warn_role_file(&role_path(&config.data));
+    let window_secrets = mint_window_secrets(&config.data)?;
     let app = Arc::new(App {
         worker_id: format!("{node}:worker-1"),
         role: config.role,
@@ -167,6 +231,7 @@ pub fn build_app(
         token,
         data: config.data,
         audit_seed,
+        window_secrets,
     });
     Ok((app, rx))
 }
@@ -217,8 +282,28 @@ fn persist_token(data: &Path, token: &str) -> Result<()> {
     write_private(session_token_path(data), token.as_bytes())
 }
 
-fn persist_role(data: &Path, role: &str) -> Result<()> {
-    write_private(role_path(data), role.as_bytes())
+fn mint_window_secrets(data: &Path) -> Result<WindowSecrets> {
+    let card = mint_token();
+    let main = mint_token();
+    let settings = mint_token();
+    write_private(window_secret_path(data, "card"), card.as_bytes())?;
+    write_private(window_secret_path(data, "main"), main.as_bytes())?;
+    write_private(window_secret_path(data, "settings"), settings.as_bytes())?;
+    Ok(WindowSecrets {
+        card,
+        main,
+        settings,
+    })
+}
+
+pub(crate) fn tokens_equal(left: &str, right: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    bool::from(left.ct_eq(right))
 }
 
 fn load_or_create_audit_seed(data: &Path, store: &Store) -> Result<[u8; 32]> {
@@ -241,15 +326,8 @@ fn load_or_create_audit_seed(data: &Path, store: &Store) -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
-fn warn_role_file(path: &Path) {
-    if role_file_is_unsafe(path) {
-        eprintln!(
-            "dasdevbotd: role file {} is writable by this process; it should be root-owned and not group- or world-writable",
-            path.display()
-        );
-    }
-}
-
+/// True when this process owns the file or group/other can write it.
+/// Non-unix targets fail closed: the file is treated as unsafe.
 pub(crate) fn role_file_is_unsafe(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -263,7 +341,7 @@ pub(crate) fn role_file_is_unsafe(path: &Path) -> bool {
     #[cfg(not(unix))]
     {
         let _ = path;
-        false
+        true
     }
 }
 
@@ -286,6 +364,15 @@ pub fn signature_seed(text: &str) -> Result<[u8; 32]> {
 pub fn append_audit(store: &mut Store, kind: &str, payload: &str, seed: &[u8; 32]) -> Result<()> {
     audit_log::append(store, kind, payload, wall_ms(), seed)?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn test_window_secrets() -> WindowSecrets {
+    WindowSecrets {
+        card: "c".repeat(64),
+        main: "m".repeat(64),
+        settings: "s".repeat(64),
+    }
 }
 
 pub fn wall_ms() -> u64 {
@@ -328,9 +415,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(minted.token.len(), MIN_TOKEN_BYTES * 2);
-        let role = fs::read_to_string(role_path(&dir.join("minted.sqlite"))).unwrap();
-        assert_eq!(role, "executor");
-        assert!(role_file_is_unsafe(&role_path(&dir.join("minted.sqlite"))));
+        assert_eq!(minted.role, "executor");
+        let data = dir.join("minted.sqlite");
+        assert!(!role_path(&data).exists());
+        let owned = dir.join("owned.role");
+        fs::write(&owned, "executor").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&owned).unwrap().permissions();
+            perms.set_mode(0o666);
+            fs::set_permissions(&owned, perms).unwrap();
+        }
+        assert!(role_file_is_unsafe(&owned));
+        assert_ne!(role_path(&data), configured_role_path());
 
         let supplied = "b".repeat(MIN_TOKEN_BYTES);
         let (app, _) = build_app(
@@ -376,6 +474,26 @@ mod tests {
         match started {
             Err(err) => assert!(err.to_string().contains("audit"), "{err}"),
             Ok(_) => panic!("a forged audit log was accepted"),
+        }
+    }
+
+    #[test]
+    fn a_deleted_database_cannot_mint_a_new_audit_genesis() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-tip-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("db.sqlite");
+        let mut store = Store::open(&data).unwrap();
+        audit_log::append(&mut store, "one", "alpha", 10, &[5u8; 32]).unwrap();
+        let tip = fs::read_to_string(audit_tip_path(&data)).unwrap();
+        assert!(!tip.trim().is_empty());
+        drop(store);
+        let display = data.display().to_string();
+        fs::remove_file(&data).unwrap();
+        let _ = fs::remove_file(format!("{display}-wal"));
+        let _ = fs::remove_file(format!("{display}-shm"));
+        match Store::open(&data) {
+            Err(err) => assert!(err.to_string().contains("prior tip"), "{err}"),
+            Ok(_) => panic!("a deleted database minted a new audit genesis"),
         }
     }
 

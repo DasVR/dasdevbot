@@ -20,8 +20,9 @@
 | `crates/daemon/src/caps.rs` | Ledger read/write. Single writer, fencing epoch, slot cap. |
 | `crates/daemon/src/topology.rs` | Leader assigns pending jobs. Workers claim only their assignment. |
 | `crates/daemon/src/harness.rs` | Checkpointed harness run. Busy and the retry cap pause. Tool use fails closed. |
-| `crates/daemon/src/audit_log.rs` | Append-only hash chain (`prev_hash` per row). Tool-use rows have an empty payload. |
-| `crates/daemon/src/ipc.rs` | `sign_decision` signs the daemon's action material. `undo_decision` and secret-window check. |
+| `crates/daemon/src/audit_log.rs` | Append-only hash chain. The key sits beside the DB. The tip is also in `<data>.audit-tip`. |
+| `crates/daemon/src/hello_key.rs` | External tier: Windows Hello public key only. Other targets deny external. |
+| `crates/daemon/src/ipc.rs` | Internal cards use the approval seed. External cards require a Hello signature. |
 | `crates/daemon/src/secrets.rs` | OS keychain secret store. `secret set` is the operator CLI. Tauri secret entry uses the role allowlist. |
 | `crates/daemon/src/ownership_store.rs` | Device chats cannot set `replicate_to_server`. Server batch is job metadata. |
 | `apps/desktop` | Decisions go through Tauri IPC. Secret entry is `#settings` only. |
@@ -53,11 +54,19 @@ The reservation is the provider's worst-case estimate (`input + max_tokens`, wit
 
 `RETRY_CAP` is 3 on the harness driver. Ollama Cloud retries a busy call up to 6 times. The charge callback reserves the same worst-case estimate before each of those retries. It does not reserve the 1-token accounting field. Terminal `Busy` or `Limit` pauses the job. The claim query does not pick up `paused`. A second `execute` on a paused checkpoint does not call the provider.
 
-`ToolUseAttempted` fails the job closed and appends an audit row whose payload is empty.
+`ToolUseAttempted` fails the job closed. The attempted audit payload stays empty. The blocked audit payload is `{"job_id","cli_version"}` and does not include the tool event.
+
+## Audit chain
+
+The signing key is `<data>.audit-key`, beside the database. Anyone who can replace the database can replace that key. There is no external witness. The latest tip hash is also written to `<data>.audit-tip`. Opening a database refuses a new genesis when that sidecar still holds a prior tip, and refuses a sidecar that does not match the log. `secret.dev_env`, grant seeding, and gate denials are rows on this chain, as are `secret.set`, `approval.decided`, and `approval.undone`.
 
 ## Permission gate
 
-Destructive work is denied in phase 1 and never asked. `repo.force_push` records a denied card and does not call the provider. The payload does not choose the tier. HTTP `POST /v1/approvals/{id}/decision` and `/undo` return 403 with a fixed body. Mutating HTTP requires a bearer token, loopback `Host`, and no `Access-Control-Allow-Origin: *`. `--allow-remote` is refused. Voice, CLI, and banners cannot decide. Sign and undo are capabilities of the `card` window, and the command reads `window.label()` at runtime. `sign` is an Ed25519 signature over the daemon's action hash, nonce, and fencing token, using the `approval-key` secret. `set_secret` is a capability of `main` and `settings` only, and the role is the daemon's configured role.
+Destructive work is denied in phase 1 and never asked. `repo.force_push` records a denied card and does not call the provider. The payload does not choose the tier. HTTP `POST /v1/approvals/{id}/decision` and `/undo` return 403 with a fixed body. Mutating HTTP requires a bearer token, loopback `Host`, and no `Access-Control-Allow-Origin: *`. `--allow-remote` is refused. Voice, CLI, and banners cannot decide.
+
+Internal tiers (`read`, `write_local`, and the other non-external classes) keep the Phase 1 Ed25519 path. `sign_decision` signs with the `approval-key` seed and the daemon verifies that same signature. External cards do not. On Windows the shell signs with a non-exportable Hello key from `KeyCredentialManager`, and the daemon stores only the public key and verifies it with CNG. The consent text names the decision, the action, and the target. On every other target the external tier stays denied, including when the seed is present. The shell protocol is `docs/shell-ipc.md`.
+
+`set_secret` is a capability of `main` and `settings` only. The role is `serve --role` or `/etc/dasdevbot/role` (`C:\ProgramData\dasdevbot\role` on Windows). A file next to `--data` is not a role. The fixed file is refused when the caller owns it or group or other can write it. The audit row is written before the keyring write, and a failed audit does not store the secret.
 
 The secret field is component `$state`. The draft is cleared before the invoke. It is not a Svelte store, `localStorage`, or plugin-store. After a save the UI shows the last 4 characters.
 

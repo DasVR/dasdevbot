@@ -20,6 +20,7 @@ pub struct HarnessRun<'a> {
     pub retry_cap: u32,
     pub now_ms: u64,
     pub audit_seed: &'a [u8; 32],
+    pub cli_version: &'a Mutex<String>,
 }
 
 pub fn execute(
@@ -57,7 +58,14 @@ pub fn execute(
         }
         RunEnd::FailedClosed { tool_use: true, .. } => {
             audit_tool_use_attempted(&mut store, run.now_ms, run.audit_seed)?;
-            audit_tool_use_blocked(&mut store, run.now_ms, run.audit_seed)?;
+            let version = run.cli_version.lock().expect("cli version").clone();
+            audit_tool_use_blocked(
+                &mut store,
+                run.now_ms,
+                run.audit_seed,
+                run.job_id,
+                &version,
+            )?;
             fence_job(&store, run.job_id, run.lease_owner, "failed")?;
         }
         RunEnd::FailedClosed { tool_use: false, .. } => {
@@ -192,6 +200,7 @@ fn run(
     now_ms: u64,
     mut charge: impl FnMut() -> bool,
 ) -> Result<RunEnd> {
+    let version = Mutex::new("test-cli".into());
     execute(
         store,
         HarnessRun {
@@ -200,6 +209,7 @@ fn run(
             retry_cap,
             now_ms,
             audit_seed: &[8u8; 32],
+            cli_version: &version,
         },
         &mut charge,
         || provider.complete(""),
@@ -296,7 +306,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(blocked.is_empty());
+        assert!(blocked.contains("\"job_id\":\"job-tool\""), "{blocked}");
+        assert!(blocked.contains("\"cli_version\":\"test-cli\""), "{blocked}");
+        assert!(!blocked.contains("SECRET"));
         drop(store);
         let store = Store::open(&path).unwrap();
         let saved = load(&store, "job-tool").unwrap().unwrap();
@@ -322,6 +334,7 @@ mod tests {
             stops: vec![ProviderStop::Fault],
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
+        let version = std::sync::Mutex::new(String::new());
         let err = execute(
             &store,
             HarnessRun {
@@ -330,6 +343,7 @@ mod tests {
                 retry_cap: 1,
                 now_ms: 3,
                 audit_seed: &[8u8; 32],
+                cli_version: &version,
             },
             || true,
             || provider.complete(""),

@@ -112,6 +112,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         BEGIN
             SELECT RAISE(ABORT, 'audit log is append-only');
         END;
+
+        CREATE TABLE IF NOT EXISTS hello_public_key (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            blob_type INTEGER NOT NULL,
+            public_key TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
         ",
     )?;
     ensure_column(conn, "jobs", "assigned_worker", "TEXT")?;

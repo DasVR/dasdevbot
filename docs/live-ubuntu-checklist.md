@@ -31,3 +31,12 @@ Security Director sign-off needs every item below to pass.
 15. Inherited env doesn't pass through: start the daemon with `CLAUDE_CONFIG_DIR=/tmp/x`, `ANTHROPIC_API_KEY=sk-test`, `ANTHROPIC_BASE_URL=http://127.0.0.1:9`, and `CLAUDE_CODE_USE_BEDROCK=1` in its environment. The child still uses /var/lib/dasdevbot/claude-config and the Claude Pro login (check `/proc/<child>/environ` holds only USER, LANG, TMPDIR, HOME, CLAUDE_CONFIG_DIR, PATH, DISABLE_AUTOUPDATER, DISABLE_UPDATES).
 16. Refusals at startup: a symlinked or 0755 /var/lib/dasdevbot/claude-config, or one owned by another uid, makes the provider fail closed with no CLI call.
 17. Live-run gate: the shipped unit keeps the all-zero `--claude-sha256` placeholder and no Ollama key is in the keyring until items 1-16 pass, so `serve` fails closed for both providers until then.
+
+## Device user unit
+
+`deploy/ubuntu/dasdevbotd-device.service` is a user unit, not a template.
+
+- There is no `User=` line. `User=%i` is only valid in a template unit (`dasdevbotd-device@.service`). This file is not one.
+- `WantedBy=default.target`. A user unit is pulled in by the user manager's `default.target`, not `multi-user.target`.
+- `ProtectHome` is omitted. On the user manager it hides the home directory, and `ReadWritePaths=%h` does not pierce that, so a database under `%h` cannot be opened. `StateDirectory=dasdevbot` creates the directory under the user state dir, and the unit passes `--data %S/dasdevbot/device.sqlite`.
+- Install with `systemctl --user enable --now dasdevbotd-device.service`.

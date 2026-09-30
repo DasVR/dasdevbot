@@ -1,6 +1,8 @@
 //! Session bearer for the webview, card-window decisions, and settings-window secret entry.
-//! The window label comes from the Tauri runtime. The shell does not open
+//! The Tauri window label only selects which per-launch secret to send.
+//! The daemon derives the window from that secret. The shell does not open
 //! SQLite. Every command is a line on the daemon's local socket.
+//! See docs/shell-ipc.md.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -20,17 +22,16 @@ fn sign_decision(
     reason: Option<String>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    transact(
+    finish_signed(
         &state.data,
+        &label,
         json!({
             "op": "decide",
             "approval_id": id,
             "decision": decision,
             "reason": reason,
-            "window": label,
         }),
-    )?;
-    Ok(())
+    )
 }
 
 #[tauri::command]
@@ -40,15 +41,14 @@ fn undo_decision(
     id: String,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    transact(
+    finish_signed(
         &state.data,
+        &label,
         json!({
             "op": "undo",
             "approval_id": id,
-            "window": label,
         }),
-    )?;
-    Ok(())
+    )
 }
 
 #[tauri::command]
@@ -59,13 +59,13 @@ fn set_secret(
     value: String,
 ) -> Result<SecretStored, String> {
     let label = window.label().to_string();
-    let response = transact(
+    let response = signed_body(
         &state.data,
+        &label,
         json!({
             "op": "secret",
             "name": handle,
             "value": value,
-            "window": label,
         }),
     )?;
     let last4 = response["result"]["last4"]
@@ -78,6 +78,78 @@ fn set_secret(
 #[derive(serde::Serialize)]
 struct SecretStored {
     last4: String,
+}
+
+fn window_secret(data: &Path, label: &str) -> Result<String, String> {
+    let text = std::fs::read_to_string(dasdevbotd::window_secret_path(data, label))
+        .map_err(|err| err.to_string())?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("window secret is missing".into());
+    }
+    Ok(text)
+}
+
+fn signed_body(data: &Path, label: &str, mut body: Value) -> Result<Value, String> {
+    body["window_secret"] = Value::String(window_secret(data, label)?);
+    transact(data, body)
+}
+
+fn finish_signed(data: &Path, label: &str, body: Value) -> Result<(), String> {
+    match signed_body(data, label, body.clone()) {
+        Ok(_) => Ok(()),
+        Err(err) if err.contains("requires a Windows Hello signature") => {
+            complete_hello(data, label, &body)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(windows)]
+fn complete_hello(data: &Path, label: &str, body: &Value) -> Result<(), String> {
+    let approval_id = body["approval_id"].as_str().unwrap_or("");
+    let decision = body
+        .get("decision")
+        .and_then(|value| value.as_str())
+        .unwrap_or("approve");
+    let reason = body
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let purpose = if body["op"] == "undo" {
+        dasdevbotd::UNDO_PURPOSE
+    } else {
+        dasdevbotd::DECISION_PURPOSE
+    };
+    let prepared = signed_body(
+        data,
+        label,
+        json!({
+            "op": "prepare",
+            "approval_id": approval_id,
+            "decision": decision,
+            "reason": reason,
+            "purpose": purpose,
+        }),
+    )?;
+    let result = &prepared["result"];
+    if result["hello_enrolled"].as_bool() != Some(true) {
+        signed_body(data, label, json!({"op": "hello-enroll"}))?;
+    }
+    let message = result["message"].as_str().unwrap_or("");
+    let prompt = result["prompt"].as_str().unwrap_or("");
+    let nonce = result["nonce"].as_str().unwrap_or("").to_string();
+    let signature = dasdevbotd::sign_approval_message(message, prompt)?;
+    let mut again = body.clone();
+    again["client_signature"] = Value::String(signature);
+    again["client_nonce"] = Value::String(nonce);
+    signed_body(data, label, again)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn complete_hello(_data: &Path, _label: &str, _body: &Value) -> Result<(), String> {
+    Err("external tier is denied without Windows Hello".into())
 }
 
 fn daemon_data() -> PathBuf {

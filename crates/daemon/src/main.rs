@@ -7,7 +7,8 @@ use std::time::Instant;
 use dasdevbot_core::{authorize_secret_name, parse_role, SecretRoleError};
 use dasdevbotd::{
     audit_dev_env, audit_key_path, open_provider, parse_sha256_list, plan_secret_set,
-    prompt_secret_from_tty, read_piped_secret, role_path, serve, session_token_path,
+    load_role_file, prompt_secret_from_tty, read_piped_secret, serve,
+    session_token_path,
     url_exposes_bearer, CommandKind, CompletionRequest, Config, Error, KeyringHandle,
     ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource, Store,
 };
@@ -280,10 +281,11 @@ fn secret_set(args: Vec<String>) -> Result<(), Error> {
             read_piped_secret().map_err(|err| Error::BadRequest(err.to_string()))?
         }
     };
+    let tail = dasdevbotd::secrets::last4(&secret);
+    record_secret_audit(&data, &plan.name, tail)?;
     KeyringHandle
         .set(&plan.name, &secret)
         .map_err(|err| Error::BadRequest(err.to_string()))?;
-    record_secret_audit(&data, &plan.name, dasdevbotd::secrets::last4(&secret))?;
     eprintln!("stored secret {}", plan.name);
     Ok(())
 }
@@ -306,7 +308,8 @@ fn split_data_flag(args: Vec<String>) -> Result<(PathBuf, Vec<String>), Error> {
 }
 
 fn authorize_cli_secret(data: &Path, name: &str) -> Result<(), Error> {
-    let role_text = fs::read_to_string(role_path(data)).unwrap_or_default();
+    let _ = data;
+    let role_text = load_role_file()?;
     let Some(role) = parse_role(role_text.trim()) else {
         return Err(Error::Forbidden("daemon role is not configured".into()));
     };
@@ -430,11 +433,14 @@ CLAUDE_CONFIG_DIR. `--claude-sha256` is the hex digest of the native ELF.
 as the service user with CLAUDE_CONFIG_DIR set to that dir. See deploy/ubuntu.
 The mock provider is for tests.
 
-The role is the daemon's own configuration. It is written next to the
-database and is not taken from a webview. serve mints a bearer of at least
-32 bytes when --token and DASDEVBOT_TOKEN are absent, and writes it next to
-the database as <data>.token (mode 0600). HTTP cannot approve a card.
-Decisions are Tauri IPC only.
+The role is `serve --role` or the fixed file /etc/dasdevbot/role
+(C:\\ProgramData\\dasdevbot\\role on Windows). A file next to --data is
+ignored. That file must not be owned by the caller and must not be
+group- or world-writable; otherwise the daemon refuses it. serve mints the
+bearer when --token and DASDEVBOT_TOKEN are absent. HTTP cannot approve a
+card. Decisions are Tauri IPC only. External cards need a Windows Hello
+signature. Internal cards keep the Phase 1 approval-key path. See
+docs/shell-ipc.md.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.
@@ -445,6 +451,7 @@ serve binds an iroh endpoint when the binary is built with the p2p feature
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dasdevbotd::role_path;
 
     #[test]
     fn allow_remote_is_refused() {
@@ -455,20 +462,35 @@ mod tests {
     }
 
     #[test]
-    fn secret_set_github_fails_on_the_device_role() {
-        let dir = std::env::temp_dir().join(format!("dasdevbot-secret-{}", uuid::Uuid::new_v4()));
+    fn a_role_file_next_to_data_cannot_authorize_github() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-spoof-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        let data = dir.join("device.sqlite");
-        fs::write(role_path(&data), "device").unwrap();
-        let err = secret_set(vec![
-            "--data".into(),
-            data.display().to_string(),
-            "github".into(),
-        ])
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("executor") || err.to_string().contains("GitHub"),
-            "{err}"
-        );
+        let data = dir.join("x.sqlite");
+        let spoof = role_path(&data);
+        fs::write(&spoof, "executor").unwrap();
+        assert!(spoof.ends_with("x.sqlite.role"), "{}", spoof.display());
+        assert_ne!(spoof, dasdevbotd::configured_role_path());
+        let literal = std::path::PathBuf::from("/tmp/x.sqlite.role");
+        if spoof != literal {
+            fs::write(&literal, "executor").unwrap();
+        }
+        let result = authorize_cli_secret(&data, "github");
+        match dasdevbotd::load_role_file() {
+            Err(expected) => {
+                let err = result.unwrap_err();
+                assert_eq!(err.to_string(), expected.to_string(), "{err}");
+                assert!(
+                    err.to_string().contains("not configured")
+                        || err.to_string().contains("root-owned"),
+                    "{err}"
+                );
+            }
+            Ok(role) => {
+                let parsed = parse_role(role.trim()).expect("fixed role parses");
+                let allowed = authorize_secret_name(parsed, "github");
+                assert_eq!(result.is_ok(), allowed.is_ok());
+            }
+        }
+        let _ = fs::remove_file(literal);
     }
 }

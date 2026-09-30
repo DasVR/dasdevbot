@@ -1,5 +1,7 @@
-//! Decision signatures. The approval seed is read from the secret store here.
-//! Callers pass a [`SecretHandle`], never the raw seed.
+//! Decision signatures for internal tiers. The approval seed is read from the
+//! secret store here and is never an IPC argument. External tiers do not use
+//! this seed: the daemon verifies a Windows Hello public key and does not sign
+//! with the same material. Callers pass a [`SecretHandle`], never the raw seed.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 
@@ -126,6 +128,10 @@ pub fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0xf) as usize] as char);
     }
     out
+}
+
+pub(crate) fn decode_hex_bytes(text: &str) -> Option<Vec<u8>> {
+    decode_hex(text)
 }
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {

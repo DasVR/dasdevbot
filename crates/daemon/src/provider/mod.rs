@@ -1,5 +1,6 @@
 //! Model providers. Ollama Cloud is the default. The mock provider is for tests.
 
+#[cfg(unix)]
 mod claude;
 mod ollama;
 
@@ -13,8 +14,35 @@ use crate::secrets::{
     DEV_ENV_WARNING,
 };
 
-pub use claude::{parse_sha256_list, ClaudeCli};
+#[cfg(unix)]
+pub use claude::ClaudeCli;
 pub use ollama::{OllamaCloud, OllamaLocal, OLLAMA_BUSY_MAX_MS};
+
+/// Parse a comma-separated list of SHA-256 hex digests of the native Claude ELF.
+/// The provider accepts one digest. A second digest fails because a script
+/// interpreter is not part of the pin.
+pub fn parse_sha256_list(text: &str) -> Result<Vec<[u8; 32]>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("claude_sha256 is empty".into());
+    }
+    let mut out = Vec::new();
+    for part in text.split(',') {
+        let part = part.trim();
+        if part.len() != 64 || !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("claude_sha256 must be 64 hex characters".into());
+        }
+        let mut bytes = [0u8; 32];
+        for (byte, chunk) in bytes.iter_mut().zip(part.as_bytes().chunks(2)) {
+            let hex = std::str::from_utf8(chunk)
+                .map_err(|_| "claude_sha256 must be 64 hex characters".to_string())?;
+            *byte = u8::from_str_radix(hex, 16)
+                .map_err(|_| "claude_sha256 must be 64 hex characters".to_string())?;
+        }
+        out.push(bytes);
+    }
+    Ok(out)
+}
 
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
@@ -238,6 +266,7 @@ pub struct ProviderSettings {
     pub claude_sha256: Vec<[u8; 32]>,
 }
 
+#[cfg(unix)]
 fn claude_sha256_required(settings: &ProviderSettings) -> bool {
     settings.kind == ProviderKind::ClaudeCli
         && settings.command == CommandKind::Serve
@@ -282,23 +311,33 @@ pub fn open_with(
         }
         ProviderKind::OllamaLocal => Ok(Box::new(OllamaLocal::new(settings.model.clone()))),
         ProviderKind::ClaudeCli => {
-            if claude_sha256_required(settings) {
+            #[cfg(not(unix))]
+            {
+                let _ = settings;
                 return Err(ProviderError::Failed(
-                    "claude_sha256 is required for the service role".into(),
+                    "claude-cli is only available on unix".into(),
                 ));
             }
-            let home = settings.claude_home.clone().ok_or_else(|| {
-                ProviderError::Failed(
-                    "claude_home is required; refusing to load the process home".into(),
-                )
-            })?;
-            let provider = ClaudeCli::open(
-                PathBuf::from("claude"),
-                settings.model.clone(),
-                home,
-                &settings.claude_sha256,
-            )?;
-            Ok(Box::new(provider))
+            #[cfg(unix)]
+            {
+                if claude_sha256_required(settings) {
+                    return Err(ProviderError::Failed(
+                        "claude_sha256 is required for the service role".into(),
+                    ));
+                }
+                let home = settings.claude_home.clone().ok_or_else(|| {
+                    ProviderError::Failed(
+                        "claude_home is required; refusing to load the process home".into(),
+                    )
+                })?;
+                let provider = ClaudeCli::open(
+                    PathBuf::from("claude"),
+                    settings.model.clone(),
+                    home,
+                    &settings.claude_sha256,
+                )?;
+                Ok(Box::new(provider))
+            }
         }
     }
 }
@@ -343,6 +382,7 @@ impl LlmProvider for OllamaLocal {
     }
 }
 
+#[cfg(unix)]
 impl LlmProvider for ClaudeCli {
     fn complete(
         &self,

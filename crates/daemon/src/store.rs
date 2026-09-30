@@ -29,6 +29,8 @@ pub struct Store {
     conn: Connection,
     clock: HybridClock,
     node_id: String,
+    /// Sidecar that survives deletion of this database. Empty for memory stores.
+    audit_tip_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +147,10 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         crate::ensure_data_gitignore(path)?;
         let conn = Connection::open(path)?;
-        Self::from_conn(conn)
+        let mut store = Self::from_conn(conn)?;
+        store.audit_tip_path = Some(crate::audit_tip_path(path));
+        crate::audit_log::bind_tip(&store)?;
+        Ok(store)
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
@@ -162,7 +167,12 @@ impl Store {
             conn,
             clock,
             node_id,
+            audit_tip_path: None,
         })
+    }
+
+    pub(crate) fn audit_tip_path(&self) -> Option<&std::path::Path> {
+        self.audit_tip_path.as_deref()
     }
 
     pub fn node_id(&self) -> &str {
@@ -536,6 +546,64 @@ impl Store {
             })
     }
 
+    pub fn approval_target(&self, approval_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT evidence_repo FROM approvals WHERE id = ?1",
+                [approval_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("approval {approval_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    pub fn hello_public_key(&self) -> Result<Option<(i64, String)>> {
+        self.conn
+            .query_row(
+                "SELECT blob_type, public_key FROM hello_public_key WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
+    pub fn enroll_hello_public_key(
+        &self,
+        blob_type: i64,
+        public_key_hex: &str,
+        now_ms: u64,
+    ) -> Result<()> {
+        if self.hello_public_key()?.is_some() {
+            return Err(Error::Forbidden(
+                "a Windows Hello public key is already enrolled".into(),
+            ));
+        }
+        self.conn.execute(
+            "INSERT INTO hello_public_key (id, blob_type, public_key, created_at) VALUES (1, ?1, ?2, ?3)",
+            params![blob_type, public_key_hex, now_ms as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn grants(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT agent_id, effect_class, expires_at FROM grants ORDER BY agent_id, effect_class",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn rules_for_kind(&self, kind: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -596,6 +664,7 @@ impl Store {
         owner: &str,
         approval: &NewApproval,
         reason: &str,
+        audit_seed: &[u8; 32],
     ) -> Result<String> {
         let approval_id = Uuid::new_v4().to_string();
         let payload = format!(
@@ -609,6 +678,13 @@ impl Store {
             &payload,
             &format!("gate-denied:{approval_id}"),
             Some(&approval.thread_id),
+        )?;
+        crate::audit_log::append(
+            self,
+            dasdevbot_core::kind::GATE_DENIED,
+            &payload,
+            wall_ms,
+            audit_seed,
         )?;
         self.conn.execute(
             "INSERT INTO approvals (
@@ -782,6 +858,30 @@ impl Store {
         Ok(approval_id)
     }
 
+    /// External signatures are checked against the stored Hello public key.
+    /// Internal tiers keep the Phase 1 seed. The seed path never verifies an
+    /// external card.
+    fn signature_ok(
+        &self,
+        class_name: &str,
+        secrets: &dyn SecretHandle,
+        message: &str,
+        signature_hex: &str,
+    ) -> Result<bool> {
+        if class_name == "external" {
+            if !crate::hello_key::signing_path_is_present() {
+                return Ok(false);
+            }
+            crate::hello_key::verify_stored(self, message, signature_hex)
+        } else {
+            Ok(signature::verify_decision_signature(
+                secrets,
+                message,
+                signature_hex,
+            ))
+        }
+    }
+
     pub fn approvals(&self) -> Result<Vec<ApprovalRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT a.id, a.job_id, a.agent_id, agents.name, a.thread_id, a.effect_class, a.action,
@@ -870,7 +970,7 @@ impl Store {
             proof.fencing,
             &proof.action_hash,
         );
-        if !signature::verify_decision_signature(secrets, &message, &proof.signature) {
+        if !self.signature_ok(&class_name, secrets, &message, &proof.signature)? {
             return Err(Error::Forbidden(
                 "decision signature is missing or invalid".into(),
             ));
@@ -999,7 +1099,7 @@ impl Store {
             proof.fencing,
             &proof.action_hash,
         );
-        if !signature::verify_decision_signature(secrets, &message, &proof.signature) {
+        if !self.signature_ok(&class_name, secrets, &message, &proof.signature)? {
             return Err(Error::Forbidden(
                 "undo signature is missing or invalid".into(),
             ));
@@ -1821,7 +1921,7 @@ mod tests {
                     job_id,
                     agent_id: "reviewer".into(),
                     thread_id: format!("thread-{now}"),
-                    effect_class: "external".into(),
+                    effect_class: "write_local".into(),
                     action: "post_pr_comment".into(),
                     purpose: "Post a review comment.".into(),
                     draft: "draft".into(),
@@ -1878,6 +1978,8 @@ mod tests {
                 secrets: &secrets,
                 verifier: &verifier,
                 audit_seed: &AUDIT_SEED,
+                client_signature: None,
+                client_nonce: None,
             },
         )
     }
@@ -1896,6 +1998,8 @@ mod tests {
                 secrets: &secrets,
                 verifier: &verifier,
                 audit_seed: &AUDIT_SEED,
+                client_signature: None,
+                client_nonce: None,
             },
         )
     }

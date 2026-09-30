@@ -22,7 +22,6 @@ use crate::provider::{
 };
 use crate::store::{AppendOutcome, Job, NewApproval, Store};
 use crate::topology;
-use crate::verify_user::user_verification_is_real;
 use crate::{wall_ms, App, Error, Result};
 
 const LEASE_MS: u64 = 120_000;
@@ -155,7 +154,7 @@ pub fn ingest(store: &mut Store, request: &EmitRequest, now_ms: u64) -> Result<I
 fn run_turn(app: &App, job: &Job) -> Result<()> {
     let (prepared, request, estimate) = {
         let mut store = app.store.lock().expect("store");
-        let Some(prepared) = prepare(&mut store, &app.worker_id, job)? else {
+        let Some(prepared) = prepare(&mut store, &app.worker_id, job, &app.audit_seed)? else {
             return Ok(());
         };
         if prepared.class == EffectClass::Destructive {
@@ -210,7 +209,7 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
             budget_remaining: true,
             tainted: prepared.tainted,
         },
-        Policy::phase1(),
+        phase1_policy(),
     );
     if outcome != dasdevbot_core::GateOutcome::Ask {
         let payload = json!({
@@ -220,6 +219,13 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
             "tainted": prepared.tainted,
         })
         .to_string();
+        audit_log::append(
+            &mut store,
+            kind::GATE_DENIED,
+            &payload,
+            wall_ms(),
+            &app.audit_seed,
+        )?;
         store.append_at(
             wall_ms(),
             "runtime",
@@ -300,6 +306,7 @@ fn run_attempts(
     let parked = AtomicBool::new(false);
     let completion = Mutex::new(None);
     let last_error: Mutex<Option<ProviderError>> = Mutex::new(None);
+    let cli_version = Mutex::new(String::new());
     let end = harness::execute(
         &app.store,
         HarnessRun {
@@ -308,6 +315,7 @@ fn run_attempts(
             retry_cap: RETRY_CAP,
             now_ms: wall_ms(),
             audit_seed: &app.audit_seed,
+            cli_version: &cli_version,
         },
         || true,
         || {
@@ -339,7 +347,7 @@ fn run_attempts(
                     if parked.load(Ordering::SeqCst) {
                         return Err(dasdevbot_core::ProviderStop::Limit);
                     }
-                    match stop_after_provider_error(app, job, &err) {
+                    match stop_after_provider_error(app, job, &err, &cli_version) {
                         Ok(stop) => {
                             *last_error.lock().expect("provider error") = Some(err);
                             Err(stop)
@@ -373,12 +381,14 @@ fn stop_after_provider_error(
     app: &App,
     job: &Job,
     err: &ProviderError,
+    cli_version: &Mutex<String>,
 ) -> Result<dasdevbot_core::ProviderStop> {
     let mut store = app.store.lock().expect("store");
-    if let ProviderError::ToolUseAttempted { cli_version, event } = err {
+    if let ProviderError::ToolUseAttempted { cli_version: version, event } = err {
+        *cli_version.lock().expect("cli version") = version.clone();
         let payload = json!({
             "job_id": job.id,
-            "cli_version": cli_version,
+            "cli_version": version,
             "event": event,
         })
         .to_string();
@@ -390,7 +400,6 @@ fn stop_after_provider_error(
             &format!("tool-use:{}:{}", job.id, job.attempt),
             None,
         )?;
-        audit_log::audit_tool_use_blocked(&mut store, wall_ms(), &app.audit_seed)?;
     }
     settle_failed_attempt(&mut store, &job.id, &app.worker_id, wall_ms())?;
     let stop = provider_stop(err);
@@ -420,8 +429,14 @@ fn stop_after_provider_error(
     Ok(mapped)
 }
 
+fn phase1_policy() -> Policy {
+    let mut policy = Policy::phase1();
+    policy.deny_external = !crate::hello_key::signing_path_is_present();
+    policy
+}
+
 fn external_tier_is_denied() -> bool {
-    Policy::phase1().deny_external || !user_verification_is_real()
+    phase1_policy().deny_external
 }
 
 enum ProviderStop {
@@ -518,6 +533,13 @@ pub fn audit_dev_env(app: &App, role: &str) -> Result<()> {
         &format!("secret-dev-env:{}", uuid::Uuid::new_v4()),
         None,
     )?;
+    audit_log::append(
+        &mut store,
+        kind::DEV_ENV,
+        &payload,
+        wall_ms(),
+        &app.audit_seed,
+    )?;
     Ok(())
 }
 
@@ -552,6 +574,7 @@ fn deny_destructive(store: &mut Store, app: &App, job: &Job, prepared: &Prepared
         &app.worker_id,
         &approval,
         "destructive is denied in phase 1",
+        &app.audit_seed,
     )?;
     Ok(())
 }
@@ -590,6 +613,7 @@ fn deny_external(store: &mut Store, app: &App, job: &Job, prepared: &Prepared) -
         &app.worker_id,
         &approval,
         "external is denied until Windows Hello is the production verifier",
+        &app.audit_seed,
     )?;
     Ok(())
 }
@@ -736,7 +760,12 @@ struct Prepared {
     action: String,
 }
 
-fn prepare(store: &mut Store, owner: &str, job: &Job) -> Result<Option<Prepared>> {
+fn prepare(
+    store: &mut Store,
+    owner: &str,
+    job: &Job,
+    audit_seed: &[u8; 32],
+) -> Result<Option<Prepared>> {
     let agent = store.agent(&job.agent_id)?;
     let body: Value = serde_json::from_str(&job.payload).unwrap_or_else(|_| json!({}));
     let thread_id = body
@@ -754,7 +783,7 @@ fn prepare(store: &mut Store, owner: &str, job: &Job) -> Result<Option<Prepared>
         .unwrap_or(true);
     let kind_name = body.get("kind").and_then(|v| v.as_str()).unwrap_or("event");
     let Some((class, action)) = classify(kind_name) else {
-        deny_unknown(store, owner, job, kind_name)?;
+        deny_unknown(store, owner, job, kind_name, audit_seed)?;
         return Ok(None);
     };
     let event_id = body.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -800,7 +829,13 @@ fn classify(kind: &str) -> Option<(EffectClass, &'static str)> {
     }
 }
 
-fn deny_unknown(store: &mut Store, owner: &str, job: &Job, kind_name: &str) -> Result<()> {
+fn deny_unknown(
+    store: &mut Store,
+    owner: &str,
+    job: &Job,
+    kind_name: &str,
+    audit_seed: &[u8; 32],
+) -> Result<()> {
     let approval = NewApproval {
         job_id: job.id.clone(),
         agent_id: job.agent_id.clone(),
@@ -823,7 +858,7 @@ fn deny_unknown(store: &mut Store, owner: &str, job: &Job, kind_name: &str) -> R
         ledger_note: "unknown event kind is denied".into(),
         project: String::new(),
     };
-    store.record_gate_denial(wall_ms(), owner, &approval, "unknown event kind")?;
+    store.record_gate_denial(wall_ms(), owner, &approval, "unknown event kind", audit_seed)?;
     Ok(())
 }
 
@@ -897,6 +932,7 @@ mod tests {
             token: "0123456789abcdef0123456789abcdef".into(),
             data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
             audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
         };
         run_turn(&app, &job).unwrap();
         assert_eq!(app.provider.as_ref().id(), "boom");
@@ -977,6 +1013,7 @@ mod tests {
             token: "0123456789abcdef0123456789abcdef".into(),
             data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
             audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
         };
         let err = run_turn(&app, &job).unwrap_err();
         assert!(err.to_string().contains("second attempt failed"), "{err}");
@@ -1082,6 +1119,7 @@ mod tests {
             token: "0123456789abcdef0123456789abcdef".into(),
             data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
             audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
         };
         run_turn(&app, &job).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1120,6 +1158,7 @@ mod tests {
             token: "0123456789abcdef0123456789abcdef".into(),
             data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
             audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
         };
         run_turn(&app, &job).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 0);

@@ -701,11 +701,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "thiserror 1.0.69",
  "tiny_http",
  "ureq",
  "uuid",
  "windows 0.61.3",
+ "windows-future 0.2.1",
  "zeroize",
 ]
 
