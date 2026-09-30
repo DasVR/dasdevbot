@@ -2,7 +2,7 @@
   import type { Snippet } from "svelte";
 
   interface Props {
-    /** Fixed 48px frame. Empty until a character is chosen. */
+    /** Fixed 48px frame. Curl stays in this box across steps. */
     glyph?: Snippet;
   }
 

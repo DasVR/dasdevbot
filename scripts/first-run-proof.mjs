@@ -206,27 +206,33 @@ function installHooks() {
     };
   }
   if (params.get("clock") === "1") {
+    const stampStyle = (side) =>
+      [
+        "position:fixed",
+        "top:8px",
+        side === "left" ? "left:8px" : "right:8px",
+        "z-index:40",
+        "padding:2px 6px",
+        "pointer-events:none",
+        "font:12px/16px 'JetBrains Mono', ui-monospace, monospace",
+        "color:#5A5249",
+        "background:#F6F2EB",
+      ].join(";");
     const tick = () => {
       if (document.body && !document.getElementById("proof-clock")) {
-        const el = document.createElement("div");
-        el.id = "proof-clock";
-        el.textContent = "0 ms";
-        el.style.cssText = [
-          "position:fixed",
-          "top:8px",
-          "right:8px",
-          "z-index:40",
-          "padding:2px 6px",
-          "pointer-events:none",
-          "font:12px/16px 'JetBrains Mono', ui-monospace, monospace",
-          "color:#5A5249",
-          "background:#F6F2EB",
-        ].join(";");
-        document.body.appendChild(el);
+        const frame = document.createElement("div");
+        frame.id = "proof-frame";
+        frame.textContent = "f 0000";
+        frame.style.cssText = stampStyle("left");
+        const clock = document.createElement("div");
+        clock.id = "proof-clock";
+        clock.textContent = "0 ms";
+        clock.style.cssText = stampStyle("right");
+        document.body.append(frame, clock);
       }
-      const el = document.getElementById("proof-clock");
-      if (el) {
-        el.textContent = `${Math.round(performance.now())} ms`;
+      const clock = document.getElementById("proof-clock");
+      if (clock) {
+        clock.textContent = `${Math.round(performance.now())} ms`;
       }
       requestAnimationFrame(tick);
     };
@@ -268,7 +274,6 @@ async function slotBox(page) {
       w: Math.round(rect.width * 100) / 100,
       h: Math.round(rect.height * 100) / 100,
       dpr: window.devicePixelRatio,
-      empty: node.childElementCount === 0 && (node.textContent ?? "").trim() === "",
     };
   });
 }
@@ -363,6 +368,8 @@ async function captureStills(pageOrigin) {
   let skippedLine = "";
   let manualSkipCount = -1;
   const slots = [];
+  let looksBeforeReload = "";
+  let drawsBeforeReload = "";
 
   await page.goto(`${pageOrigin}/?reset=1&scenario=found`, { waitUntil: "domcontentloaded" });
   await page.locator("[data-phase=checking]").waitFor();
@@ -405,7 +412,7 @@ async function captureStills(pageOrigin) {
 
   await page.goto(`${pageOrigin}/?reset=1&scenario=walk&perms=hold`, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "dasdevbot runs a small helper on this machine." }).waitFor();
-  await page.locator("[data-glyph-slot]").waitFor();
+  await page.locator("[data-curl][data-drawn=yes]").waitFor();
   slots.push(await slotBox(page));
   await page.getByRole("button", { name: "I run it elsewhere" }).click();
   await page.getByLabel("Daemon address").waitFor();
@@ -452,6 +459,8 @@ async function captureStills(pageOrigin) {
   await page.getByRole("heading", { name: "Pick a repo." }).waitFor();
   await page.getByText("Reviewer watches one repo in this build.").waitFor();
   slots.push(await slotBox(page));
+  drawsBeforeReload = await page.locator("[data-curl]").getAttribute("data-draws");
+  looksBeforeReload = await page.locator("[data-first-run]").getAttribute("data-looks");
   await page.getByText("needs access").waitFor();
   const fix = page.getByRole("link", { name: "Fix on GitHub" });
   const fixHref = await fix.getAttribute("href");
@@ -504,7 +513,8 @@ async function captureStills(pageOrigin) {
   const permLogDuring = await page.evaluate(() => (window.__perm ?? []).length);
   const glyphReady = await page.locator("[data-first-run] [data-glyph-slot]").evaluate((node) => {
     const hidden = node.hasAttribute("hidden");
-    return !hidden && node.childElementCount === 0 && node.textContent.trim() === "" && node.getAttribute("data-size") === "48";
+    const curl = node.querySelector("[data-curl]");
+    return !hidden && curl != null && node.getAttribute("data-size") === "48";
   });
   const noGreeting = (await page.locator("[data-greeting]").count()) === 0;
   slots.push(await slotBox(page));
@@ -548,6 +558,8 @@ async function captureStills(pageOrigin) {
       true,
     );
   });
+  const looksAtRules = await page.locator("[data-first-run]").getAttribute("data-looks");
+  const drawsAtRules = await page.locator("[data-curl]").getAttribute("data-draws");
   await page.getByRole("button", { name: "Start watching DasVR/NIL" }).click();
   await page.locator("[data-mode=here]").waitFor();
   await page.locator("[data-watching=on]").waitFor();
@@ -583,50 +595,63 @@ async function captureStills(pageOrigin) {
     ["reviewer-empty.png"],
   );
 
-  const landingSlot = await page.locator("[data-landing]").evaluate((root) => {
+  const landingDraws = await page.locator("[data-landing] [data-curl]").getAttribute("data-draws");
+  const lineAfter = await page.locator("[data-landing]").evaluate((root) => {
     const slot = root.querySelector("[data-glyph-slot]");
     const line = root.querySelector("[data-empty-underline]");
-    const slotRect = slot?.getBoundingClientRect();
-    const lineRect = line?.getBoundingClientRect();
-    return {
-      slots: root.querySelectorAll("[data-glyph-slot]").length,
-      empty: slot != null && slot.childElementCount === 0 && (slot.textContent ?? "").trim() === "",
-      lineAfter: Boolean(slotRect && lineRect && lineRect.left >= slotRect.right - 1),
-    };
+    if (!slot || !line) {
+      return false;
+    }
+    const slotRect = slot.getBoundingClientRect();
+    const lineRect = line.getBoundingClientRect();
+    return lineRect.left >= slotRect.right - 1;
   });
-  const straySlots = await page.evaluate(() => {
+  const stray = await page.evaluate(() => {
     return {
-      stream: document.querySelectorAll(".stream [data-glyph-slot]").length,
-      card: document.querySelectorAll("article.card [data-glyph-slot]").length,
-      total: document.querySelectorAll("[data-glyph-slot]").length,
+      stream: document.querySelectorAll(".stream [data-curl], .stream [data-glyph-slot]").length,
+      card: document.querySelectorAll("article.card [data-curl], article.card [data-glyph-slot]").length,
     };
   });
   const slotStable =
     slots.length === 4 &&
-    slots.every((slot) => slot.dpr === 2 && slot.w === 48 && slot.h === 48 && slot.empty) &&
+    slots.every((slot) => slot.dpr === 2 && slot.w === 48 && slot.h === 48) &&
     sameSlot(slots[0], slots[1]) &&
     sameSlot(slots[1], slots[2]) &&
     sameSlot(slots[2], slots[3]);
   record(
     7,
-    "The empty 48px slot is at the same x and y on every step, at 2x",
+    "The Curl slot is at the same x and y on every step, at 2x",
     slotStable,
     ["helper.png", "helper-skipped.png", "repo.png", "rules.png"],
   );
   record(
     8,
-    "The slot stays empty, beside the step title and the landing line only",
-    slotStable &&
+    "Curl draws exactly once in the flow, with one look per step change",
+    drawsBeforeReload === "1" &&
+      looksBeforeReload === "2" &&
+      drawsAtRules === "1" &&
+      looksAtRules === "7" &&
+      landingDraws === "1" &&
+      lineAfter &&
       repoEmptySlots === 1 &&
       deviceSlots === 0 &&
-      landingSlot.slots === 1 &&
-      landingSlot.empty &&
-      landingSlot.lineAfter &&
-      straySlots.stream === 0 &&
-      straySlots.card === 0 &&
-      straySlots.total === 1,
-    ["rules.png", "reviewer-empty.png", "repo-empty.png"],
+      stray.stream === 0 &&
+      stray.card === 0,
+    ["rules.png", "reviewer-empty.png"],
   );
+
+  await page.locator("[data-landing] [data-curl][data-blink-state=on]").waitFor();
+  const blinkMs = await page.locator("[data-landing] [data-curl]").getAttribute("data-blink-ms");
+  const blinksAtRest = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
+  await page.waitForTimeout(6300);
+  const blinksAfter = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
+  fixture.agents[0].status = "working";
+  await page.locator("[data-running-trace]").waitFor();
+  const blinksPaused = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
+  const pausedState = await page.locator("[data-landing] [data-curl]").getAttribute("data-blink-state");
+  await page.waitForTimeout(6300);
+  const blinksHeld = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
+  fixture.agents[0].status = "idle";
 
   const permBeforeCard = await page.locator("[data-permission-line]").count();
   fixture = pendingSnapshot();
@@ -715,6 +740,11 @@ async function captureStills(pageOrigin) {
     ["helper-skipped.png", "github-cancelled.png", "repo.png"],
   );
 
+  const blinkPass =
+    blinkMs === "6000" &&
+    blinksAfter === blinksAtRest + 1 &&
+    pausedState === "paused" &&
+    blinksHeld === blinksPaused;
   const greet = await context.newPage();
   await greet.clock.install({ time: new Date("2026-09-30T22:30:00-04:00") });
   const evening = Date.parse("2026-09-30T21:00:00-04:00");
@@ -760,7 +790,7 @@ async function captureStills(pageOrigin) {
   await greet.reload({ waitUntil: "domcontentloaded" });
   await greet.getByRole("heading", { name: "Evening, Arriq." }).waitFor();
   const eveningSub = (await greet.locator("[data-greeting-sub]").innerText()).trim();
-  const eveningSlots = await greet.locator("[data-greeting] [data-glyph-slot]").count();
+  const eveningCurl = await greet.locator("[data-greeting] [data-curl]").count();
   await park(greet);
   await shot(greet, "greeting-evening");
   await greet.reload({ waitUntil: "domcontentloaded" });
@@ -774,9 +804,9 @@ async function captureStills(pageOrigin) {
   await greet.reload({ waitUntil: "domcontentloaded" });
   await greet.locator("article.card").waitFor();
   const waitingSub = (await greet.locator("[data-greeting-sub]").innerText()).trim();
-  const waitingSlots = await greet.locator("[data-greeting] [data-glyph-slot]").count();
-  const slotInCard = await greet.locator("article.card [data-glyph-slot]").count();
-  const slotInStream = await greet.locator(".stream [data-glyph-slot]").count();
+  const waitingCurl = await greet.locator("[data-greeting] [data-curl]").count();
+  const curlInCard = await greet.locator("article.card [data-curl]").count();
+  const curlInStream = await greet.locator(".stream [data-curl]").count();
   await park(greet);
   await shot(greet, "greeting-waiting");
   await greet.close();
@@ -814,43 +844,47 @@ async function captureStills(pageOrigin) {
   });
   await reducedPage.goto(pageOrigin, { waitUntil: "domcontentloaded" });
   await reducedPage.getByRole("heading", { name: "Nothing waiting on you" }).waitFor();
-  const reducedLine = await reducedPage.locator("[data-empty-underline]").evaluate((node) => {
-    const style = getComputedStyle(node);
-    return { name: style.animationName, offset: style.strokeDashoffset, transform: style.transform };
-  });
-  const reducedSlot = await reducedPage.locator("[data-landing] [data-glyph-slot]").evaluate((node) => {
-    return node.childElementCount === 0 && (node.textContent ?? "").trim() === "";
-  });
-  const reducedTransform = await reducedPage.locator("[data-landing] *").evaluateAll((nodes) => {
+  await reducedPage.waitForTimeout(400);
+  const reducedBlinks = await reducedPage.locator("[data-landing] [data-curl]").getAttribute("data-blinks");
+  const reducedBlinkState = await reducedPage.locator("[data-landing] [data-curl]").getAttribute("data-blink-state");
+  const reducedTransform = await reducedPage.locator("[data-curl] *").evaluateAll((nodes) => {
     return nodes.some((node) => {
       const value = getComputedStyle(node).transform;
       return value && value !== "none";
     });
   });
+  const reducedLine = await reducedPage.locator("[data-empty-underline]").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { name: style.animationName, offset: style.strokeDashoffset };
+  });
+  reducedFixture.agents[0].status = "working";
+  await reducedPage.locator("[data-running-trace]").waitFor();
+  await reducedPage.waitForTimeout(800);
+  const reducedHeld = await reducedPage.locator("[data-landing] [data-curl]").getAttribute("data-blinks");
   await reducedContext.close();
 
   record(
     "landing-1",
-    "The landing slot is empty, and the underline beside it is drawn with reduced motion",
-    landingSlot.empty &&
-      landingSlot.lineAfter &&
-      reducedSlot &&
+    "The blink is about 6s, static with reduced motion, and paused while any trace runs",
+    blinkPass &&
+      reducedBlinks === "0" &&
+      reducedBlinkState === "off" &&
+      !reducedTransform &&
+      reducedHeld === "0" &&
       reducedLine.name === "none" &&
-      reducedLine.offset === "0px" &&
-      reducedLine.transform === "none" &&
-      !reducedTransform,
+      reducedLine.offset === "0px",
     ["reviewer-empty.png", "first-run-reduced.mp4"],
   );
   record(
     "greeting-1",
     "The greeting shows once per day, and a waiting count replaces the ink-2 line",
     eveningSub === "Nothing waiting · 6 done today." &&
-      eveningSlots === 0 &&
+      eveningCurl === 1 &&
       greetingReturned === 0 &&
       waitingSub === "1 waiting on you · 6 done today." &&
-      waitingSlots === 0 &&
-      slotInCard === 0 &&
-      slotInStream === 0,
+      waitingCurl === 1 &&
+      curlInCard === 0 &&
+      curlInStream === 0,
     ["greeting-evening.png", "greeting-waiting.png"],
   );
 
@@ -880,26 +914,30 @@ async function stepFrame(cdp, page, framesDir, index) {
     maxVirtualTimeTaskStarvationCount: 100,
   });
   await done;
-  await page.evaluate(() => {
-    let el = document.getElementById("proof-clock");
-    if (!el) {
-      el = document.createElement("div");
-      el.id = "proof-clock";
-      el.style.cssText = [
-        "position:fixed",
-        "top:8px",
-        "right:8px",
-        "z-index:40",
-        "padding:2px 6px",
-        "pointer-events:none",
-        "font:12px/16px 'JetBrains Mono', ui-monospace, monospace",
-        "color:#5A5249",
-        "background:#F6F2EB",
-      ].join(";");
-      document.body.appendChild(el);
-    }
-    el.textContent = `${Math.round(performance.now())} ms`;
-  });
+  await page.evaluate((frame) => {
+    const paint = (id, side, text) => {
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement("div");
+        el.id = id;
+        el.style.cssText = [
+          "position:fixed",
+          "top:8px",
+          side === "left" ? "left:8px" : "right:8px",
+          "z-index:40",
+          "padding:2px 6px",
+          "pointer-events:none",
+          "font:12px/16px 'JetBrains Mono', ui-monospace, monospace",
+          "color:#5A5249",
+          "background:#F6F2EB",
+        ].join(";");
+        document.body.appendChild(el);
+      }
+      el.textContent = text;
+    };
+    paint("proof-frame", "left", `f ${String(frame).padStart(4, "0")}`);
+    paint("proof-clock", "right", `${Math.round(performance.now())} ms`);
+  }, index);
   const name = String(index).padStart(6, "0");
   await page.screenshot({ path: `${framesDir}/${name}.png`, type: "png" });
   return index + 1;
@@ -953,7 +991,7 @@ async function recordWalk(pageOrigin, reduced, outFile) {
   });
   await page.goto(`${pageOrigin}/?reset=1&scenario=walk&clock=1`, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "dasdevbot runs a small helper on this machine." }).waitFor();
-  await page.locator("[data-glyph-slot]").waitFor();
+  await page.locator("[data-curl][data-drawn=yes]").waitFor();
   await park(page);
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
@@ -1010,7 +1048,9 @@ async function recordWalk(pageOrigin, reduced, outFile) {
     });
   });
   const encoded = await encodeFrames(framesDir, frame, outFile);
-  const clock = await page.locator("#proof-clock").count();
+  const clockText = (await page.locator("#proof-clock").textContent()) ?? "";
+  const frameText = (await page.locator("#proof-frame").textContent()) ?? "";
+  const stamps = /^\d+ ms$/.test(clockText.trim()) && /^f \d{4}$/.test(frameText.trim());
   const unique =
     encoded.duplicates === 0 &&
     encoded.frames === frame &&
@@ -1020,7 +1060,7 @@ async function recordWalk(pageOrigin, reduced, outFile) {
     record(
       "motion-reduced",
       "Reduced-motion walk has no transforms and a drawn underline",
-      motion.name === "none" && motion.offset === "0px" && !transforms && unique && clock === 1,
+      motion.name === "none" && motion.offset === "0px" && !transforms && unique && stamps,
       ["first-run-reduced.mp4"],
       { duplicateFrames: encoded.duplicates, frames: encoded.frames },
     );
@@ -1028,7 +1068,7 @@ async function recordWalk(pageOrigin, reduced, outFile) {
     record(
       "motion",
       "60fps walk of all four steps with a millisecond clock",
-      motion.iterations === "1" && unique && clock === 1,
+      motion.iterations === "1" && unique && stamps,
       ["first-run.mp4"],
       { duplicateFrames: encoded.duplicates, frames: encoded.frames },
     );

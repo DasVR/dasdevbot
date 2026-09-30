@@ -4,6 +4,7 @@
   import { linear } from "svelte/easing";
   import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
+  import Curl from "./lib/Curl.svelte";
   import FirstRun from "./lib/FirstRun.svelte";
   import FocusIcon from "./lib/FocusIcon.svelte";
   import GlyphSlot from "./lib/GlyphSlot.svelte";
@@ -51,6 +52,7 @@
   let landedNow = false;
   let greetingOn = $state(false);
   let greetingName = $state("");
+  let underlineOn = $state(false);
   const remembered = loadPermissionMemory();
   let notificationsAsked = $state(remembered.notifications);
   let micAsked = $state(remembered.mic);
@@ -577,8 +579,15 @@
       <main>
         {#if greetingOn}
           <section class="greet" data-greeting>
-            <h2 class="greet-title">{greetTitle}</h2>
-            <p class="greet-sub" data-greeting-sub>{greetSub}</p>
+            <GlyphSlot>
+              {#snippet glyph()}
+                <Curl blink />
+              {/snippet}
+            </GlyphSlot>
+            <div>
+              <h2 class="greet-title">{greetTitle}</h2>
+              <p class="greet-sub" data-greeting-sub>{greetSub}</p>
+            </div>
           </section>
         {/if}
         <p class="section">Stream</p>
@@ -613,11 +622,21 @@
             <div class="empty-state" data-landing>
               {#if !greetingOn}
                 <div class="landing-row">
-                  <GlyphSlot />
+                  <GlyphSlot>
+                    {#snippet glyph()}
+                      <Curl blink onLanded={() => (underlineOn = true)} />
+                    {/snippet}
+                  </GlyphSlot>
                   <div>
                     <h1 class="empty-title">Nothing waiting on you</h1>
                     <svg class="quiet-line" viewBox="0 0 104 10" aria-hidden="true">
-                      <path class="pen draw" data-empty-underline pathLength="1" d={QUIET_LINE_PATH} />
+                      <path
+                        class="pen"
+                        class:draw={underlineOn}
+                        data-empty-underline
+                        pathLength="1"
+                        d={QUIET_LINE_PATH}
+                      />
                     </svg>
                   </div>
                 </div>
@@ -990,6 +1009,9 @@
   }
 
   .greet {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s-4);
     margin-bottom: var(--s-6);
   }
 

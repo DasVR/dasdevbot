@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Curl from "./Curl.svelte";
   import GlyphSlot from "./GlyphSlot.svelte";
   import PenCheckbox from "./PenCheckbox.svelte";
   import {
@@ -63,10 +64,16 @@
   let busy = $state(false);
   let browserOpens = $state(0);
   let browserUrl = $state("");
+  let lookEpoch = $state(0);
+  let nodEpoch = $state(0);
+  let settleEpoch = $state(0);
   let settling = $state(false);
 
   let stopHandoff: HandoffListen["stop"] | null = null;
   let listenGen = 0;
+  let advanceTimer = 0;
+  let lookReady = false;
+  let looks = 0;
 
   const title = $derived(stepTitle(step));
   const countLabel = $derived(`${stepNumber(step)} of 4`);
@@ -125,6 +132,15 @@
     });
   }
 
+  function prefersReducedMotion(): boolean {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function clearAdvance(): void {
+    window.clearTimeout(advanceTimer);
+    advanceTimer = 0;
+  }
+
   function applyGithub(outcome: HandoffPayload): void {
     stopHandoff?.();
     stopHandoff = null;
@@ -135,8 +151,18 @@
     }
     login = outcome.login;
     github = "connected";
-    step = "repo";
+    nodEpoch += 1;
     persist();
+    clearAdvance();
+    const wait = prefersReducedMotion() ? 0 : 640;
+    advanceTimer = window.setTimeout(() => {
+      advanceTimer = 0;
+      if (step !== "github" || github !== "connected") {
+        return;
+      }
+      step = "repo";
+      persist();
+    }, wait);
   }
 
   function connect(): void {
@@ -164,6 +190,7 @@
   }
 
   function back(): void {
+    clearAdvance();
     helperError = null;
     if (step === "helper" && elsewhere) {
       elsewhere = false;
@@ -270,11 +297,15 @@
       return;
     }
     settling = true;
-    const done = current();
-    done.completed = true;
-    done.step = "rules";
-    saveRecord(done);
-    onDone();
+    settleEpoch += 1;
+    const wait = prefersReducedMotion() ? 0 : 920;
+    window.setTimeout(() => {
+      const done = current();
+      done.completed = true;
+      done.step = "rules";
+      saveRecord(done);
+      onDone();
+    }, wait);
   }
 
   function markHelper(node: HTMLElement): () => void {
@@ -282,11 +313,26 @@
     return () => {};
   }
 
+  $effect(() => {
+    if (phase !== "flow") {
+      return;
+    }
+    const currentStep = step;
+    if (!lookReady) {
+      lookReady = true;
+      return;
+    }
+    void currentStep;
+    looks += 1;
+    lookEpoch = looks;
+  });
+
   onMount(() => {
     if (saved) {
       syncListen();
       return () => {
         listenGen += 1;
+        clearAdvance();
         stopHandoff?.();
       };
     }
@@ -318,6 +364,7 @@
     return () => {
       gone = true;
       listenGen += 1;
+      clearAdvance();
       stopHandoff?.();
     };
   });
@@ -335,6 +382,7 @@
     data-browser-opens={browserOpens}
     data-browser-url={browserUrl}
     data-helper-skipped={helperSkipped ? "yes" : "no"}
+    data-looks={lookEpoch}
   >
     <div class="column">
       <header class="top">
@@ -349,7 +397,11 @@
       </div>
 
       <div class="title-row">
-        <GlyphSlot />
+        <GlyphSlot>
+          {#snippet glyph()}
+            <Curl {lookEpoch} {nodEpoch} {settleEpoch} blink />
+          {/snippet}
+        </GlyphSlot>
         <h1 id="step-title">{title}</h1>
       </div>
 

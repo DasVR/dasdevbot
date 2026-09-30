@@ -57,7 +57,7 @@
     },
     {
       "id": 7,
-      "name": "The empty 48px slot is at the same x and y on every step, at 2x",
+      "name": "The Curl slot is at the same x and y on every step, at 2x",
       "result": "PASS",
       "evidence": [
         "helper.png",
@@ -68,12 +68,11 @@
     },
     {
       "id": 8,
-      "name": "The slot stays empty, beside the step title and the landing line only",
+      "name": "Curl draws exactly once in the flow, with one look per step change",
       "result": "PASS",
       "evidence": [
         "rules.png",
-        "reviewer-empty.png",
-        "repo-empty.png"
+        "reviewer-empty.png"
       ]
     },
     {
@@ -98,7 +97,7 @@
     },
     {
       "id": "landing-1",
-      "name": "The landing slot is empty, and the underline beside it is drawn with reduced motion",
+      "name": "The blink is about 6s, static with reduced motion, and paused while any trace runs",
       "result": "PASS",
       "evidence": [
         "reviewer-empty.png",
@@ -122,7 +121,7 @@
         "first-run.mp4"
       ],
       "duplicateFrames": 0,
-      "frames": 282
+      "frames": 374
     },
     {
       "id": "motion-reduced",
