@@ -162,6 +162,8 @@ pub struct EventView {
     pub kind: String,
     pub thread_id: String,
     pub idempotency_key: String,
+    /// Event payload. The destructive denial row reads `policy`, `line`, and `command`.
+    pub payload: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -175,7 +175,7 @@ function approval(status) {
       repo: "DasVR/NIL",
       pr: "#212 handoff: release lock on refresh",
       pr_number: "212",
-      ref: "phase0",
+      ref: "phase0 @ a41c9e2",
       event_id: "ev_abcdef",
       kind: "repo.push",
     },

@@ -5,9 +5,10 @@
   import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
   import { tokenEase, tokenMs } from "./lib/cssTokens";
-  import { QUIET_LINE_PATH } from "./lib/pen";
+  import { DENY_MARK_PATH, QUIET_LINE_PATH } from "./lib/pen";
   import {
     decide,
+    destructiveDenial,
     emitPush,
     formatStreamTime,
     formatUsd,
@@ -35,7 +36,10 @@
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const pending = $derived.by(() => {
-    const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
+    const rows =
+      snapshot?.approvals.filter(
+        (approval) => approval.status === "pending" && approval.effect_class !== "destructive",
+      ) ?? [];
     return rows.reduce<Approval | null>((oldest, approval) => {
       if (!oldest || approval.created_at < oldest.created_at) {
         return approval;
@@ -68,6 +72,7 @@
         who: source ? `${source} · ${event.kind}` : event.kind,
         detail: shortId,
         title: event.hlc,
+        denial: destructiveDenial(event.payload),
         receipt: receipts[event.idempotency_key] ?? null,
         pendingHere: pendingKey !== "" && event.idempotency_key === pendingKey,
       };
@@ -95,7 +100,10 @@
   // Pending is waiting on a human. During undo the roster is ink-3 "approved · undo Ns", no dot.
   const waitingOnHuman = $derived(
     (snapshot?.approvals ?? []).some(
-      (approval) => approval.agent_id === reviewer?.id && approval.status === "pending",
+      (approval) =>
+        approval.agent_id === reviewer?.id &&
+        approval.status === "pending" &&
+        approval.effect_class !== "destructive",
     ),
   );
   const filingUndo = $derived.by(() => {
@@ -430,7 +438,18 @@
               {@const approval = row.receipt ?? (row.pendingHere ? pending : null)}
               {@const filed = row.receipt !== null}
               <li class={filed ? "slot-row" : "event"} animate:stepRows>
-                {#if !filed}
+                {#if !filed && row.denial}
+                  <div class="row denial" title={row.title} in:arrive|global={{ play: primed }}>
+                    <time class="when" datetime={row.iso || undefined}>{row.when}</time>
+                    <svg class="dash" viewBox="0 0 24 24" aria-hidden="true">
+                      <path class="pen" pathLength="1" d={DENY_MARK_PATH} />
+                    </svg>
+                    <div class="copy">
+                      <p class="who">{row.denial.line}</p>
+                      <p class="command">{row.denial.command}</p>
+                    </div>
+                  </div>
+                {:else if !filed}
                   <div class="row" title={row.title} in:arrive|global={{ play: primed }}>
                     <time class="when" datetime={row.iso || undefined}>{row.when}</time>
                     <span class="disc" aria-hidden="true">{row.mark}</span>
@@ -440,7 +459,7 @@
                     </div>
                   </div>
                 {/if}
-                {#if approval}
+                {#if approval && approval.effect_class !== "destructive"}
                   {@render approvalSlot(approval)}
                 {/if}
               </li>
@@ -741,6 +760,29 @@
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
     color: var(--ink-3);
+    overflow-wrap: anywhere;
+  }
+
+  .denial .dash {
+    width: 24px;
+    height: 24px;
+    justify-self: center;
+  }
+
+  .denial .pen {
+    fill: none;
+    stroke: var(--pen);
+    stroke-width: 1.75px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .command {
+    margin-top: 2px;
+    font-family: var(--font-machine);
+    font-size: var(--t-micro);
+    line-height: var(--lh-micro);
+    color: var(--ink-2);
     overflow-wrap: anywhere;
   }
 

@@ -80,6 +80,26 @@ export interface EventRow {
   kind: string;
   thread_id: string;
   idempotency_key: string;
+  payload: string;
+}
+
+/** Phase 1 C1. A destructive effect is this row, never a card. */
+export interface DestructiveDenial {
+  line: string;
+  command: string;
+}
+
+export function destructiveDenial(payload: string): DestructiveDenial | null {
+  let body: { policy?: string; line?: string; command?: string };
+  try {
+    body = JSON.parse(payload) as { policy?: string; line?: string; command?: string };
+  } catch {
+    return null;
+  }
+  if (body.policy !== "c1" || !body.line || !body.command) {
+    return null;
+  }
+  return { line: body.line, command: body.command };
 }
 
 export interface Snapshot {
@@ -292,7 +312,7 @@ export async function emitPush(forced = false): Promise<void> {
       kind: "repo.push",
       payload: {
         repo: "DasVR/NIL",
-        ref: "phase0",
+        ref: forced ? "phase0" : "phase0 @ a41c9e2",
         pr: forced ? "" : "#212 handoff: release lock on refresh",
         purpose: forced
           ? ""

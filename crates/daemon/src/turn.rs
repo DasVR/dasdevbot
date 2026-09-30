@@ -137,6 +137,37 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
     } else {
         EffectClass::External
     };
+    // Phase 1 C1: a destructive effect is denied. There is no card and no hold.
+    if class == EffectClass::Destructive {
+        let command = format!("git push --force origin {}", prepared.evidence_ref);
+        let line = format!(
+            "{} wanted to force-push {}. Destructive actions are off in this build.",
+            prepared.agent_name, prepared.evidence_ref
+        );
+        let payload = json!({
+            "job_id": job.id,
+            "effect_class": class.as_str(),
+            "outcome": "deny",
+            "policy": "c1",
+            "line": line,
+            "command": command,
+        })
+        .to_string();
+        store.append_at(
+            wall_ms(),
+            "runtime",
+            kind::JOB_FAILED,
+            &payload,
+            &format!("c1-deny:{}", job.id),
+            Some(&prepared.thread_id),
+        )?;
+        store.add_spend(
+            &prepared.agent_id,
+            tokens_i64(completion.input_tokens, completion.output_tokens),
+        )?;
+        store.fail_leased(&job.id, &app.worker_id)?;
+        return Ok(());
+    }
     let grant = store.has_grant(&prepared.agent_id, class.as_str())?;
     let outcome = decide(
         GateInput {
@@ -241,6 +272,7 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
 
 struct Prepared {
     agent_id: String,
+    agent_name: String,
     persona: String,
     project: String,
     user_message: String,
@@ -332,6 +364,7 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
     };
     Ok(Some(Prepared {
         agent_id: agent.id,
+        agent_name: agent.name,
         persona: agent.persona,
         project: agent.project,
         user_message: format!(

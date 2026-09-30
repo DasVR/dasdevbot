@@ -431,7 +431,7 @@
   }
 
   async function onApproveClick(): Promise<void> {
-    if (locked || approveSeal || denyOpen || !pending) {
+    if (locked || approveSeal || denyOpen || !pending || effect === "destructive") {
       return;
     }
     approveSeal = true;
@@ -544,7 +544,14 @@
   }
 
   function startHold(kind: HoldKind): void {
-    if (locked || denyOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
+    if (
+      locked ||
+      denyOpen ||
+      !pending ||
+      effect === "destructive" ||
+      !seenArmed ||
+      document.activeElement !== cardEl
+    ) {
       return;
     }
     cancelAnimationFrame(holdFrame);
@@ -1190,7 +1197,7 @@
     white-space: pre-wrap;
     padding: 12px 14px;
     border-radius: var(--r-sm);
-    background: color-mix(in oklab, var(--paper-raised) 94%, transparent);
+    background: rgb(251 249 245 / 0.94);
     box-shadow: 0 0 0 1px var(--hairline);
   }
 
@@ -1368,6 +1375,7 @@
     border-radius: var(--r-md);
     border: 0;
     background: var(--paper-raised);
+    font: inherit;
     box-shadow: inset 0 1px 2px rgb(var(--shade) / 0.08), 0 0 0 1px var(--hairline-strong);
     padding: 0 12px;
     color: var(--ink-1);
