@@ -782,10 +782,7 @@ mod tests {
             serde_json::from_str(denied["payload"].as_str().unwrap()).unwrap();
         assert_eq!(body["policy"], "c1");
         assert_eq!(body["effect_class"], "destructive");
-        assert_eq!(
-            body["line"],
-            "Reviewer wanted to force-push phase0. Destructive actions are off in this build."
-        );
+        assert_eq!(body["line"], "Destructive actions are off in this build.");
         assert_eq!(body["command"], "git push --force origin phase0");
     }
 

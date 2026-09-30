@@ -252,95 +252,6 @@
     };
   }
 
-  function pinOverlay(stage: HTMLElement): () => void {
-    const column = stage.closest("main");
-    if (!column) {
-      return () => {};
-    }
-    const place = () => {
-      const box = column.getBoundingClientRect();
-      stage.style.setProperty("--overlay-left", `${box.left}px`);
-      stage.style.setProperty("--overlay-width", `${box.width}px`);
-    };
-    place();
-    const observer = new ResizeObserver(place);
-    observer.observe(column);
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, { passive: true });
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place);
-    };
-  }
-
-  function flipSlot(node: HTMLElement): () => void {
-    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    let first = node.getBoundingClientRect();
-    let over = node.classList.contains("over");
-    let flying = false;
-    const remember = () => {
-      if (flying) {
-        return;
-      }
-      first = node.getBoundingClientRect();
-    };
-    const observer = new ResizeObserver(remember);
-    observer.observe(node);
-    const classes = new MutationObserver(() => {
-      const nextOver = node.classList.contains("over");
-      if (nextOver === over) {
-        return;
-      }
-      const origin = first;
-      over = nextOver;
-      const last = node.getBoundingClientRect();
-      const dx = origin.left - last.left;
-      const dy = origin.top - last.top;
-      if (motion.matches || (Math.abs(dx) < 1 && Math.abs(dy) < 1)) {
-        first = last;
-        if (!over) {
-          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
-        }
-        return;
-      }
-      flying = true;
-      if (!nextOver) {
-        node.style.zIndex = "4";
-        node.style.position = "relative";
-      }
-      node.style.transition = "none";
-      node.style.transform = `translate(${dx}px, ${dy}px)`;
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          node.style.transition = "transform var(--dur-stage) var(--ease-out)";
-          node.style.transform = "translate(0px, 0px)";
-        });
-      });
-      const done = (event: TransitionEvent) => {
-        if (event.propertyName !== "transform") {
-          return;
-        }
-        node.removeEventListener("transitionend", done);
-        node.style.transition = "";
-        node.style.transform = "";
-        node.style.zIndex = "";
-        node.style.position = "";
-        flying = false;
-        if (!over) {
-          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
-        }
-        first = node.getBoundingClientRect();
-      };
-      node.addEventListener("transitionend", done);
-    });
-    classes.observe(node, { attributes: true, attributeFilter: ["class"] });
-    return () => {
-      observer.disconnect();
-      classes.disconnect();
-    };
-  }
-
   onMount(() => {
     void refresh();
     const clock = setInterval(() => {
@@ -359,7 +270,7 @@
 <svelte:window onkeydown={onWindowKey} />
 
 {#snippet approvalSlot(approval: Approval)}
-  <div class={["slot", approval.status === "pending" && "over"]} {@attach flipSlot}>
+  <div class="slot">
     {#key approval.id}
       <ApprovalCard
         approval={approval}
@@ -432,7 +343,7 @@
 
       <main>
         <p class="section">Stream</p>
-        <div class="stage" {@attach pinOverlay}>
+        <div class="stage">
           <ol class="stream">
             {#each stream as row (row.id)}
               {@const approval = row.receipt ?? (row.pendingHere ? pending : null)}
@@ -803,27 +714,10 @@
   }
 
   .slot {
+    width: 520px;
+    max-width: 100%;
     margin-top: 14px;
     scroll-margin-bottom: 16px;
-  }
-
-  .slot.over {
-    position: fixed;
-    z-index: 4;
-    left: var(--overlay-left, 0px);
-    width: var(--overlay-width, 100%);
-    bottom: 16px;
-    display: flex;
-    justify-content: center;
-    margin-top: 0;
-    padding: 0 28px;
-    pointer-events: none;
-    box-sizing: border-box;
-  }
-
-  .slot.over :global(article.card) {
-    width: min(520px, 100%);
-    pointer-events: auto;
   }
 
   .quiet-empty {

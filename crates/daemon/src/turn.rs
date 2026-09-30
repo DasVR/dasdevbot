@@ -140,10 +140,7 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
     // Phase 1 C1: a destructive effect is denied. There is no card and no hold.
     if class == EffectClass::Destructive {
         let command = format!("git push --force origin {}", prepared.evidence_ref);
-        let line = format!(
-            "{} wanted to force-push {}. Destructive actions are off in this build.",
-            prepared.agent_name, prepared.evidence_ref
-        );
+        let line = "Destructive actions are off in this build.";
         let payload = json!({
             "job_id": job.id,
             "effect_class": class.as_str(),
@@ -272,7 +269,6 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
 
 struct Prepared {
     agent_id: String,
-    agent_name: String,
     persona: String,
     project: String,
     user_message: String,
@@ -364,7 +360,6 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
     };
     Ok(Some(Prepared {
         agent_id: agent.id,
-        agent_name: agent.name,
         persona: agent.persona,
         project: agent.project,
         user_message: format!(

@@ -7,6 +7,7 @@
     effectAsk,
     effectLabel,
     effectWhy,
+    confirmWindowsHello,
     formatDecisionStamp,
     formatTokens,
     formatUsd,
@@ -85,6 +86,9 @@
   let reason = $state("");
   let strike = $state(0);
   let checkOffset = $state(1);
+  /** 1 hides the ink clip. 0 is the filled Approve control. */
+  let inkClip = $state(1);
+  let confirming = $state(false);
   let committing = $state<Decision | null>(null);
 
   type HoldKind = "approve" | "deny";
@@ -92,7 +96,6 @@
   let holdFrame = 0;
   let morphTimer = 0;
   let holdSealed = false;
-  let approveSeal = false;
 
   const locked = $derived(busy || committing !== null);
   const duration = $derived(holdDurationMs(effect, holdMs));
@@ -420,6 +423,7 @@
     if (!ok) {
       committing = null;
       checkOffset = 1;
+      inkClip = 1;
       clearMorph();
       return;
     }
@@ -430,24 +434,28 @@
     scheduleMorph(measureSettled());
   }
 
-  async function onApproveClick(): Promise<void> {
-    if (locked || approveSeal || denyOpen || !pending || effect === "destructive") {
+  function showApproveProgress(progress: number): void {
+    const snapped = reducedMotion.current ? (progress >= 1 ? 0 : 1) : 1 - progress;
+    checkOffset = snapped;
+    inkClip = snapped;
+  }
+
+  async function confirmHelloThenSettle(): Promise<void> {
+    confirming = true;
+    inkClip = 0;
+    checkOffset = 0;
+    const verified = await confirmWindowsHello();
+    if (!verified) {
+      confirming = false;
+      holdSealed = false;
+      checkOffset = 1;
+      inkClip = 1;
       return;
     }
-    approveSeal = true;
-    const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
-    await animateNumber(
-      1,
-      0,
-      drawMs,
-      (value) => {
-        checkOffset = value;
-      },
-      tokenEase("--ease-draw"),
-    );
     committing = "approve";
     await settleDecision("approve");
-    approveSeal = false;
+    confirming = false;
+    holdSealed = false;
   }
 
   async function confirmDeny(): Promise<void> {
@@ -501,6 +509,7 @@
     if (reducedMotion.current) {
       if (kind === "approve") {
         checkOffset = 1;
+        inkClip = 1;
       } else {
         strike = 0;
       }
@@ -513,6 +522,7 @@
       (value) => {
         if (kind === "approve") {
           checkOffset = 1 - value;
+          inkClip = 1 - value;
         } else {
           strike = value;
         }
@@ -522,7 +532,7 @@
   }
 
   function cancelHold(): void {
-    if (!holdKind || holdSealed) {
+    if (!holdKind || holdSealed || confirming) {
       return;
     }
     const kind = holdKind;
@@ -535,22 +545,24 @@
     holdKind = null;
     holdSealed = true;
     if (kind === "approve") {
-      committing = "approve";
-      void settleDecision("approve");
+      void confirmHelloThenSettle();
       return;
     }
     strike = 1;
     openDeny();
   }
 
-  function startHold(kind: HoldKind): void {
+  function startHold(kind: HoldKind, source: "key" | "pointer" = "key"): void {
     if (
       locked ||
+      confirming ||
       denyOpen ||
       !pending ||
       effect === "destructive" ||
       !seenArmed ||
-      document.activeElement !== cardEl
+      (source === "key" &&
+        document.activeElement !== cardEl &&
+        !cardEl?.contains(document.activeElement))
     ) {
       return;
     }
@@ -565,7 +577,7 @@
       }
       const progress = Math.min(1, (now - start) / ms);
       if (kind === "approve") {
-        checkOffset = 1 - progress;
+        showApproveProgress(progress);
       } else {
         strike = progress;
       }
@@ -612,7 +624,11 @@
 
   function onWindowKeyup(event: KeyboardEvent): void {
     const released =
-      event.key === "Enter" || event.key === "Backspace" || event.key === "Meta" || event.key === "Control";
+      event.key === "Enter" ||
+      event.key === " " ||
+      event.key === "Backspace" ||
+      event.key === "Meta" ||
+      event.key === "Control";
     if (!released) {
       return;
     }
@@ -627,9 +643,11 @@
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
-    if (!seenArmed || locked) {
-      event.preventDefault();
+    event.preventDefault();
+    if (event.repeat || !seenArmed || locked || confirming) {
+      return;
     }
+    startHold("approve", "key");
   }
 
   async function onUndoClick(): Promise<void> {
@@ -646,6 +664,7 @@
     reason = "";
     strike = 0;
     checkOffset = 1;
+    inkClip = 1;
     committing = null;
     await tick();
     if (!cardEl) {
@@ -658,6 +677,7 @@
 <svelte:window onkeydown={onWindowKeydown} onkeyup={onWindowKeyup} />
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+{#if effect !== "destructive"}
 <article
   {@attach bindCard}
   class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
@@ -677,12 +697,15 @@
   onfocusout={() => {
     queueMicrotask(() => {
       syncFocus();
-      if (document.activeElement !== cardEl) {
+      if (cardEl && !cardEl.contains(document.activeElement)) {
         cancelHold();
       }
     });
   }}
 >
+  {#if floating}
+    <div class="lift" aria-hidden="true"></div>
+  {/if}
   {#if pending}
     {#if effect === "read"}
       <p class="risk-read">Read</p>
@@ -789,7 +812,7 @@
       <div class="actions">
         {#if denyOpen}
           <button class="deny" type="button" disabled={locked} onclick={back}>Back</button>
-          <button class="approve" type="button" disabled={locked} onclick={() => void confirmDeny()}>
+          <button class="approve solid" type="button" disabled={locked} onclick={() => void confirmDeny()}>
             Deny draft
           </button>
         {:else}
@@ -797,22 +820,50 @@
             class="approve"
             type="button"
             disabled={busy}
+            onpointerdown={(event) => {
+              if (event.button !== 0) {
+                return;
+              }
+              startHold("approve", "pointer");
+            }}
+            onpointerup={cancelHold}
+            onpointerleave={cancelHold}
+            onpointercancel={cancelHold}
             onkeydown={onApproveKeydown}
-            onclick={() => void onApproveClick()}
           >
-            {#if holdKind === "approve" || checkOffset < 1}
-              <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
-                <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
-              </svg>
-            {/if}
-            Approve draft
+            <span class="face">
+              {#if holdKind === "approve" || checkOffset < 1}
+                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
+                </svg>
+              {/if}
+              Approve draft
+            </span>
+            <span
+              class="ink"
+              aria-hidden="true"
+              style:clip-path={`inset(0px ${(inkClip * 100).toFixed(3)}% 0px 0px)`}
+            >
+              {#if holdKind === "approve" || checkOffset < 1}
+                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
+                </svg>
+              {/if}
+              Approve draft
+            </span>
           </button>
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
         {/if}
       </div>
 
       <div class="quiet">
-        <p>Hold to decide. Nothing posts until the 6s undo closes.</p>
+        <p>
+          {#if confirming}
+            Confirm with Windows Hello
+          {:else}
+            Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.
+          {/if}
+        </p>
         {#snippet modifier()}
           <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
         {/snippet}
@@ -873,10 +924,13 @@
     </div>
   {/if}
 </article>
+{/if}
 
 <style>
   .card {
     position: relative;
+    width: 520px;
+    max-width: 100%;
     color: var(--ink-1);
     transition:
       background-color var(--dur-soft) var(--ease-in-out),
@@ -891,8 +945,17 @@
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border-radius: var(--r-xl);
-    box-shadow: var(--glass-edge), var(--shadow-float);
-    padding: var(--s-2) var(--s-2) var(--s-5);
+    box-shadow: var(--glass-edge);
+    padding: var(--s-2) var(--s-2) 16px;
+  }
+
+  .lift {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: var(--shadow-float);
+    pointer-events: none;
+    z-index: -1;
   }
 
   .card.glass.receipt {
@@ -941,6 +1004,8 @@
   }
 
   .risk {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -956,11 +1021,6 @@
 
   .card[data-risk="write_local"] .risk {
     color: var(--risk-write-local);
-  }
-
-  .card[data-risk="destructive"] .risk {
-    color: var(--risk-destructive);
-    background: var(--risk-destructive-bg);
   }
 
   .risk-read {
@@ -1241,18 +1301,39 @@
       border-color var(--dur-fast) var(--ease-out);
   }
 
-  .approve {
-    background: var(--ink-1);
-    color: var(--paper-raised);
-    border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
-  }
-
+  .approve,
   .deny {
     background: var(--convex), var(--paper-raised);
     color: var(--ink-1);
     border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    box-shadow:
+      var(--highlight-top),
+      0 1px 2px rgb(var(--shade) / 0.1),
+      0 6px 14px -6px rgb(var(--shade) / 0.18);
+  }
+
+  .approve.solid {
+    background: var(--ink-1);
+    color: var(--paper-raised);
+    border-color: var(--ink-1);
+  }
+
+  .face {
+    position: relative;
+    z-index: 0;
+  }
+
+  .ink {
+    position: absolute;
+    inset: -1.5px;
+    border-radius: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0)), var(--ink-1);
+    color: var(--paper-raised);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16);
   }
 
   button:hover:not(:disabled) {
@@ -1260,16 +1341,26 @@
     transition-duration: var(--dur-fast);
   }
 
-  .approve:hover:not(:disabled) {
+  .approve:hover:not(:disabled),
+  .deny:hover:not(:disabled) {
+    border-color: var(--ink-1);
+    box-shadow:
+      var(--highlight-top),
+      0 1px 2px rgb(var(--shade) / 0.1),
+      0 6px 14px -6px rgb(var(--shade) / 0.18);
+  }
+
+  .approve.solid:hover:not(:disabled) {
     box-shadow: var(--highlight-top), var(--shadow-float);
   }
 
-  .deny:hover:not(:disabled) {
+  .approve:active:not(:disabled) {
+    background: var(--paper-sunken);
     border-color: var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    box-shadow: var(--shadow-press);
   }
 
-  .approve:active:not(:disabled) {
+  .approve.solid:active:not(:disabled) {
     background: var(--ink-press);
     border-color: var(--ink-press);
     box-shadow: var(--shadow-press);
@@ -1297,7 +1388,11 @@
     outline-offset: 2px;
   }
 
-  .approve .pen {
+  .approve .face .pen {
+    stroke: var(--pen);
+  }
+
+  .approve .ink .pen {
     stroke: var(--paper-raised);
   }
 
@@ -1309,7 +1404,7 @@
   }
 
   .quiet {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     display: flex;
     justify-content: center;
     align-items: baseline;
@@ -1522,19 +1617,26 @@
     }
 
     button:active:not(:disabled) {
-      box-shadow: var(--highlight-top), var(--shadow-puff);
+      box-shadow:
+        var(--highlight-top),
+        0 1px 2px rgb(var(--shade) / 0.1),
+        0 6px 14px -6px rgb(var(--shade) / 0.18);
     }
 
-    .approve:active:not(:disabled) {
-      background: var(--ink-press);
-      border-color: var(--ink-press);
-      box-shadow: var(--highlight-top), var(--shadow-puff);
+    .approve:active:not(:disabled),
+    .deny:active:not(:disabled) {
+      background: var(--paper-sunken);
+      border-color: var(--ink-1);
+      box-shadow:
+        var(--highlight-top),
+        0 1px 2px rgb(var(--shade) / 0.1),
+        0 6px 14px -6px rgb(var(--shade) / 0.18);
       transition: none;
     }
 
-    .deny:active:not(:disabled) {
-      background: var(--paper-sunken);
-      box-shadow: var(--highlight-top), var(--shadow-puff);
+    .approve.solid:active:not(:disabled) {
+      background: var(--ink-press);
+      border-color: var(--ink-press);
       transition: none;
     }
   }
@@ -1544,7 +1646,7 @@
       background: var(--glass-fill-solid);
       -webkit-backdrop-filter: none;
       backdrop-filter: none;
-      box-shadow: var(--glass-edge), var(--shadow-float);
+      box-shadow: var(--glass-edge);
     }
   }
 </style>

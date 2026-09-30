@@ -1,7 +1,8 @@
 /**
- * Focus the pending card, then mouse-click Approve.
- * The hold hint stays in the layout (visibility hidden) so the button does not
- * move between mousedown and mouseup, and the click records the approval.
+ * Focus the pending card, then hold Approve for the 600ms ink fill.
+ * A one-frame click must not post. The hold hint stays in the layout
+ * (visibility hidden) so the button does not move between pointerdown and
+ * pointerup. After the hold, Windows Hello is the platform authenticator.
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -153,10 +154,10 @@ function snapshot(status) {
 }
 
 const port = await freePort();
-const origin = `http://127.0.0.1:${port}`;
+const origin = `http://localhost:${port}`;
 const preview = spawn(
   process.execPath,
-  [viteBin, "preview", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+  [viteBin, "preview", "--host", "localhost", "--port", String(port), "--strictPort"],
   { cwd: desktop, stdio: ["ignore", "pipe", "pipe"] },
 );
 drain(preview.stdout);
@@ -168,6 +169,26 @@ try {
   browser = await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 1440, height: 1200 } });
   const page = await context.newPage();
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+      automaticPresenceSimulation: true,
+    },
+  });
+  await page.addInitScript(() => {
+    const credentialsApi = navigator.credentials;
+    const create = credentialsApi.create.bind(credentialsApi);
+    credentialsApi.create = async (options) => {
+      window.__helloCalls = (window.__helloCalls ?? 0) + 1;
+      return create(options);
+    };
+  });
   let phase = "pending";
   let posted = null;
   await page.route("**/v1/**", async (route) => {
@@ -209,7 +230,8 @@ try {
   if (!hintBefore || hintBefore.height < 10) {
     throw new Error("hold hint does not reserve a line before the click");
   }
-  await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2);
+  const point = { x: before.x + before.width / 2, y: before.y + before.height / 2 };
+  await page.mouse.move(point.x, point.y);
   await page.mouse.down();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve())));
   const during = await button.boundingBox();
@@ -226,7 +248,30 @@ try {
   if (!hintDuring || Math.abs(hintDuring.height - hintBefore.height) > 1) {
     throw new Error("hold hint dropped its box when the card lost focus");
   }
-  await page.locator("article.card .receipt b.approved", { hasText: "Approved" }).waitFor({ timeout: 4000 });
+  await page.waitForTimeout(400);
+  if (posted !== null) {
+    throw new Error("a one-frame click posted a decision");
+  }
+  if ((await page.locator("article.card .receipt").count()) !== 0) {
+    throw new Error("a one-frame click filed the receipt");
+  }
+  await page.locator(".hold-hint.armed").waitFor({ timeout: 4000 });
+  const held = await button.boundingBox();
+  if (!held) {
+    throw new Error("Approve draft left the card before the hold");
+  }
+  await page.mouse.move(held.x + held.width / 2, held.y + held.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(800);
+  await page.mouse.up();
+  await page.locator("article.card .receipt b.approved", { hasText: "Approved" }).waitFor({ timeout: 8000 });
+  const helloCalls = await page.evaluate(() => window.__helloCalls ?? 0);
+  if (helloCalls < 1) {
+    throw new Error("the hold committed without calling the platform authenticator");
+  }
+  if ((await page.getByRole("button", { name: "Confirm" }).count()) !== 0) {
+    throw new Error("an in-app Confirm button was drawn for Windows Hello");
+  }
   if (posted?.decision !== "approve") {
     throw new Error(`decision was ${posted?.decision ?? "not posted"}`);
   }
