@@ -95,7 +95,7 @@
   }
 
   .primary:active {
-    background: var(--ink-press);
+    box-shadow: var(--shadow-press);
   }
 
   .quiet {

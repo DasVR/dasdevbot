@@ -12,3 +12,9 @@ data/
 *.sqlite-shm
 .env
 *.log
+.env*
+.env.*
+*.db
+*.pem
+*.key
+*.token

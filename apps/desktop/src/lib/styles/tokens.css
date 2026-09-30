@@ -16,7 +16,6 @@
 
   /* ink — warm near-black, never #000 */
   --ink-1: #2B2723; /* oklch(27.6% 0.009 67)  14.1:1 on raised · 13.3 on base · 12.1 on sunken */
-  --ink-press: #1E1B18; /* warm, one step below ink-1: pressed fill on ink buttons only (all motion modes). Never text, never #000 */
   --ink-2: #5A5249; /* oklch(44.4% 0.018 71)   7.3 / 6.9 / 6.2 */
   --ink-3: #6D6458; /* oklch(50.8% 0.022 75)   5.5 / 5.2 / 4.7 — metadata, never below 11px */
 

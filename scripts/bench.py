@@ -6,6 +6,7 @@ import shutil
 import socket
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -13,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = ROOT / "target" / "release" / "dasdevbotd"
+BIN = Path(os.environ.get("DASDEVBOTD_BIN", ROOT / "target" / "release" / "dasdevbotd"))
 RUNS = 7
 
 
@@ -23,14 +24,14 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def wait_health(port: int, timeout: float = 5.0) -> None:
+def wait_health(port: int, timeout: float = 15.0) -> str:
     url = f"http://127.0.0.1:{port}/v1/health"
     deadline = time.perf_counter() + timeout
     while time.perf_counter() < deadline:
         try:
             with urllib.request.urlopen(url, timeout=0.2) as response:
                 if response.status == 200:
-                    return
+                    return response.read().decode()
         except (urllib.error.URLError, TimeoutError, ConnectionError):
             time.sleep(0.005)
     raise SystemExit(f"health check failed on {port}")
@@ -82,7 +83,8 @@ def rss_scenario() -> dict[str, dict[str, str]]:
         stderr=subprocess.DEVNULL,
     )
     try:
-        wait_health(port)
+        health = wait_health(port)
+        print(f"health {health.strip()}")
         time.sleep(0.2)
         after_start = rss_kb(proc.pid)
         time.sleep(60)
@@ -112,8 +114,12 @@ def rss_scenario() -> dict[str, dict[str, str]]:
 
 
 def main() -> None:
+    global BIN
+    if len(sys.argv) > 1:
+        BIN = Path(sys.argv[1])
     if not BIN.is_file():
         raise SystemExit(f"missing {BIN}; cargo build --release first")
+    print(f"bin {BIN}")
     unstripped = BIN.stat().st_size
     stripped_path = Path(tempfile.mkdtemp(prefix="dasdevbot-strip-")) / "dasdevbotd"
     shutil.copy(BIN, stripped_path)
