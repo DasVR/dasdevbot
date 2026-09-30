@@ -272,12 +272,18 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    fn assert_handler<F>(_handler: F)
+    where
+        F: Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+    {
+    }
+
     #[test]
     fn the_handler_registers_the_decision_commands() {
-        let _handler = tauri::generate_handler![
+        assert_handler(tauri::generate_handler![
             super::sign_decision,
             super::undo_decision,
             super::set_secret
-        ];
+        ]);
     }
 }
