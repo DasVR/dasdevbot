@@ -18,6 +18,27 @@
         "title": "dasdevbot",
         "width": 1120,
         "height": 760
+      },
+      {
+        "label": "card",
+        "title": "dasdevbot card",
+        "width": 480,
+        "height": 640,
+        "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "dasdevbot settings",
+        "width": 720,
+        "height": 560,
+        "visible": false
+      },
+      {
+        "label": "voice",
+        "title": "dasdevbot voice",
+        "width": 420,
+        "height": 240,
+        "visible": false
       }
     ]
   }

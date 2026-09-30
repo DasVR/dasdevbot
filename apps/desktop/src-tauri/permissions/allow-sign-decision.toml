@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-sign-decision"
+description = "Sign an approval from the card window."
+commands.allow = ["sign_decision"]

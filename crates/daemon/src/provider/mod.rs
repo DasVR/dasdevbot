@@ -16,9 +16,6 @@ use crate::secrets::{
 pub use claude::{parse_sha256_list, ClaudeCli};
 pub use ollama::{OllamaCloud, OllamaLocal, OLLAMA_BUSY_MAX_MS};
 
-/// Tokens reserved before a provider call. A turn whose agent cannot cover this does not call.
-pub const RESERVE_TOKENS: u64 = 256;
-
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub model: String,
@@ -186,8 +183,8 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<Completion, ProviderError>;
     fn id(&self) -> &'static str;
     fn detail(&self) -> String;
-    /// Tokens one attempt can spend. The admission ledger reserves this before the
-    /// attempt. This daemon reports the estimate and does not reserve it.
+    /// Tokens one attempt can spend. The admission ledger reserves this before
+    /// every attempt, including the first and each retry.
     fn attempt_worst_case(&self, req: &CompletionRequest) -> u64 {
         attempt_worst_case_tokens(req, 0)
     }

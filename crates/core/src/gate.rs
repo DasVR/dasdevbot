@@ -42,6 +42,10 @@ pub struct Policy {
     pub auto_approve_write_local: bool,
     pub auto_approve_external: bool,
     pub auto_approve_destructive: bool,
+    /// Phase 1 denies destructive outright. Phase 0 leaves this off.
+    pub deny_destructive: bool,
+    /// Phase 1 denies the external tier until Windows Hello is the production verifier.
+    pub deny_external: bool,
 }
 
 impl Policy {
@@ -51,6 +55,22 @@ impl Policy {
             auto_approve_write_local: false,
             auto_approve_external: false,
             auto_approve_destructive: false,
+            deny_destructive: false,
+            deny_external: false,
+        }
+    }
+
+    /// Phase 1 auto-approves nothing above read.
+    /// Destructive is never asked. External stays denied until Windows Hello
+    /// is the production verifier on the shipping build.
+    pub fn phase1() -> Self {
+        Self {
+            auto_approve_read: true,
+            auto_approve_write_local: false,
+            auto_approve_external: false,
+            auto_approve_destructive: false,
+            deny_destructive: true,
+            deny_external: true,
         }
     }
 
@@ -74,14 +94,16 @@ pub struct GateInput {
 
 /// One gate for every effect. A tainted turn cannot auto-approve external or destructive work.
 pub fn decide(input: GateInput, policy: Policy) -> GateOutcome {
+    if policy.deny_external && matches!(input.class, EffectClass::External) {
+        return GateOutcome::Deny;
+    }
+    if policy.deny_destructive && matches!(input.class, EffectClass::Destructive) {
+        return GateOutcome::Deny;
+    }
     if !input.grant || !input.budget_remaining {
         return GateOutcome::Deny;
     }
-    let taint_blocks = input.tainted
-        && matches!(
-            input.class,
-            EffectClass::External | EffectClass::Destructive
-        );
+    let taint_blocks = input.tainted && !matches!(input.class, EffectClass::Read);
     if policy.auto_approves(input.class) && !taint_blocks {
         GateOutcome::Allow
     } else {
@@ -150,6 +172,33 @@ mod tests {
         assert_eq!(
             decide(input(EffectClass::Destructive, true), policy),
             GateOutcome::Ask
+        );
+    }
+
+    #[test]
+    fn phase1_denies_destructive_and_taint_blocks_above_read() {
+        let policy = Policy::phase1();
+        assert_eq!(
+            decide(input(EffectClass::Destructive, false), policy),
+            GateOutcome::Deny
+        );
+        assert_eq!(
+            decide(input(EffectClass::External, false), policy),
+            GateOutcome::Deny
+        );
+        assert_eq!(
+            decide(input(EffectClass::Read, true), policy),
+            GateOutcome::Allow
+        );
+        let mut open = Policy::phase1();
+        open.auto_approve_write_local = true;
+        assert_eq!(
+            decide(input(EffectClass::WriteLocal, true), open),
+            GateOutcome::Ask
+        );
+        assert_eq!(
+            decide(input(EffectClass::WriteLocal, false), open),
+            GateOutcome::Allow
         );
     }
 }

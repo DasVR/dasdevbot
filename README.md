@@ -2,7 +2,9 @@
 
 A clean-room, local-first runtime for AI teammates. An agent is a row — persona, memory namespace, budget — woken into a shared daemon only when an event arrives. Idle teammates cost nothing because they are not processes.
 
-This branch is **phase 0**: the spike that has to work before the daemon language is treated as settled. It is Rust. `serve` binds a local iroh endpoint. Nothing here is copied from openbot.
+This branch is **phase 0**, plus the phase 1 backend in `docs/phase1.md`. It is Rust. `serve` binds a local iroh endpoint. Nothing here is copied from openbot.
+
+HTTP can read a pending card and cannot approve or undo it. Decisions are Tauri IPC from the card window. Roles are `server` (leader), `leader`, `worker`, `executor`, `device`, and `display`. The role is the daemon's own configuration. Mutating HTTP requires a bearer token. `--allow-remote` is refused until Phase 1 or TLS.
 
 ## Phase 0 choices
 
@@ -10,7 +12,7 @@ This branch is **phase 0**: the spike that has to work before the daemon languag
 - **The client is Svelte 5 + Vite**, served by the daemon from `apps/desktop/dist`. `apps/desktop/src-tauri` is the Tauri 2 scaffold and is not built here.
 - **`crates/sync` links iroh 1.3 behind the `p2p` feature, which is on by default.** `serve` binds an endpoint with relays and port mapping off and prints the node id. It does not dial anyone. `cargo build --release --no-default-features -p dasdevbotd` leaves iroh out. Both sizes are in `BENCHMARKS.md`.
 - **One shared worker** blocks on a channel. Inserting a job sends a wake. There is no timer and no per-agent thread.
-- **Provider.** `serve` calls Ollama Cloud at the pinned host `https://ollama.com` (`/api/chat`). The key lives in the OS keychain (`dasdevbotd secret set ollama`), not in the environment, unless `--dev-env-secrets` is passed. That flag is refused on the server role. `ollama-local` is optional and talks only to `127.0.0.1:11434`. `claude-cli` runs the pinned Claude Code CLI with tools disabled. Pass `--claude-home` so the CLI's HOME is that directory and not the operator's home. On Ubuntu the `dasdevbot` service user holds only the Claude login; log in once with `sudo -u dasdevbot -H env CLAUDE_CONFIG_DIR=/var/lib/dasdevbot/claude-config claude`, the config dir the daemon gives the CLI (see `deploy/ubuntu`). `serve` on the server role requires `--claude-sha256` of the native ELF and refuses a binary whose digest differs. The mock provider is for tests. The health payload and the ledger line name which provider ran.
+- **Provider.** `serve` calls Ollama Cloud at the pinned host `https://ollama.com` (`/api/chat`). The key lives in the OS keychain (`dasdevbotd secret set ollama`), not in the environment, unless `--dev-env-secrets` is passed. That flag is refused on the server role. `ollama-local` is optional and talks only to `127.0.0.1:11434`. `claude-cli` runs the pinned Claude Code CLI with tools disabled. Pass `--claude-home` so the CLI's HOME is that directory and not the operator's home. On Ubuntu the `dasdevbot` service user holds only the Claude login; log in once with `sudo -u dasdevbot -H env CLAUDE_CONFIG_DIR=/var/lib/dasdevbot/claude-config claude`, the config dir the daemon gives the CLI (see `deploy/ubuntu`). `serve` on the server role requires `--claude-sha256` of the native ELF and refuses a binary whose digest differs. The mock provider is for tests. The health payload and the ledger line name which provider ran. Each attempt reserves that provider's worst-case estimate on the admission ledger before the call.
 - **Approving does not post.** The decision is an event. The external effect is not executed.
 - **License** is FSL-1.1-ALv2. See [License](#license).
 
@@ -55,7 +57,7 @@ From another shell, against a running daemon:
 ./target/release/dasdevbotd emit --repo DasVR/NIL --ref phase0
 ```
 
-Useful flags: `--bind`, `--data` (default `data/dasdevbot.sqlite`), `--web`, `--role server|device|display`, `--token`. The role is recorded; phase 0 behavior does not change with it. The bind stays on loopback. `--allow-remote` is refused until Phase 1 or TLS, including together with `--web`.
+Useful flags: `--bind`, `--data` (default `data/dasdevbot.sqlite`), `--web`, `--role`, `--token`, `--provider ollama|ollama-local|claude-cli`, `--model`, `--claude-home`, `--claude-sha256`, `--dev-env-secrets`. The process binds loopback only. `--allow-remote` is refused until Phase 1 or TLS, including together with `--web`. `serve` mints a bearer when `--token` and `DASDEVBOT_TOKEN` are absent and writes it beside the database.
 
 `serve` mints a bearer of at least 32 random bytes, writes it to `<data>.token` (mode 0600), and does not put it in any HTML it serves. The API does not return it, and the daemon does not log it. Send it only in the `Authorization` header. A request that puts the bearer in the URL or query string is rejected. `emit` reads the token file, or `--token`. The Tauri shell reads that file and passes the bearer to the webview through an init script (`window.__DASDEVBOT_TOKEN`) and the `session_token` IPC command.
 Store an Ollama Cloud key with `dasdevbotd secret set ollama` before `serve`. `smoke-model --provider ollama` skips when that key is missing. `--dev-env-secrets` reads `OLLAMA_API_KEY` for a local check and is refused when the role is `server`.

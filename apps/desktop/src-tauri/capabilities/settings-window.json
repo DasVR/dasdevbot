@@ -1,0 +1,5 @@
+{
+  "identifier": "settings-window",
+  "windows": ["settings"],
+  "permissions": ["allow-set-secret"]
+}

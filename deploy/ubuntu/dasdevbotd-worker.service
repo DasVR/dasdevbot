@@ -1,0 +1,21 @@
+# Optional worker. Shares the executor's SQLite. Does not write the ledger.
+# Start the executor unit first. Do not add a second executor.
+
+[Unit]
+Description=dasdevbot worker
+After=dasdevbotd.service
+
+[Service]
+Type=simple
+User=dasdevbot
+Group=dasdevbot
+ExecStart=/usr/local/bin/dasdevbotd serve --role worker --bind 127.0.0.1:8788 --data /var/lib/dasdevbot/dasdevbot.sqlite
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dasdevbot
+
+[Install]
+WantedBy=multi-user.target

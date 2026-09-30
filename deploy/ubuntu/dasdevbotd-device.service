@@ -1,0 +1,31 @@
+# Device daemon. Chats stay in this SQLite and are not replicated.
+# This unit does not bind a public address and does not share the server database.
+# Hardened the same way as the executor unit. ProtectHome still allows the
+# device database through ReadWritePaths.
+
+[Unit]
+Description=dasdevbot device
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+Environment=HOME=%h
+ExecStart=/usr/local/bin/dasdevbotd serve --role device --bind 127.0.0.1:8790 --data %h/.local/share/dasdevbot/device.sqlite
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=%h/.local/share/dasdevbot
+PrivateTmp=true
+UMask=0077
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=default.target

@@ -151,6 +151,54 @@ The largest named crate is `netlink_packet_route` (559.6 KiB of `.text`). It is 
 
 iroh does not blow either budget. Stripped size is 13.2 MiB under 20 MiB. Idle RSS with the endpoint up is 15.9 MiB under 25 MiB.
 
+## Phase 1
+
+Same machine, same release profile, `p2p` on. This build adds the admission ledger, teammate harness, keyring, and blake3. Provider during the RSS run was **mock**.
+
+```bash
+cargo build --release -p dasdevbotd
+python3 scripts/bench.py target/release/dasdevbotd
+```
+
+Release compile of this tree: `Finished release profile [optimized] target(s) in 1m 29s`.
+
+Health captured during the RSS run:
+
+```text
+sync=iroh endpoint_id=93a151a9d6c1b357f286e0982aff31dfd50864e0d4b0697a329873d1cd688adf provider=mock
+```
+
+| | Stripped bytes | Stripped MiB | Idle RSS after 60 s | Cold start median |
+|---|---:|---:|---:|---:|
+| Phase 1, `p2p` on | 7,201,400 | 6.87 | 9552 KiB (9.33 MiB) | 53.416 ms |
+
+Against the round 2 `p2p` binary (7,146,824 bytes, 9276 KiB idle): stripped size +54,576 bytes (+0.05 MiB), idle RSS +276 KiB (+0.27 MiB).
+
+Unstripped file: 12,090,088 bytes (11.53 MiB).
+
+**20 MB on disk: pass.** 7,201,400 is under 20 × 1024² (20,971,520).
+
+**25 MB idle: pass**, with the endpoint up. 9552 KiB is 9,781,248 bytes, under 25 × 1024² (26,214,400).
+
+| When | VmRSS | VmHWM | RssAnon | RssFile | ps RSS |
+|---|---:|---:|---:|---:|---:|
+| After health, then 0.2 s | 9424 | 9424 | 2116 | 2220 | 9424 |
+| After 60 s idle, endpoint still up | 9552 | 9552 | 2120 | 2344 | 9552 |
+| After one mock `repo.push` | 9624 | 9624 | 2128 | 2344 | 9624 |
+
+Cold start, seven runs, milliseconds, process start until health 200:
+
+```text
+67.293
+53.416
+37.938
+48.425
+47.753
+59.262
+63.825
+median_ms 53.416
+```
+
 ## Round 1 baseline (kept)
 
 Measured before iroh was linked. Same profile, same script, binary was `target/release/dasdevbotd` with `crates/sync` as a stub. Do not treat the round 2 rows as a re-run of these samples.

@@ -1,0 +1,5 @@
+{
+  "identifier": "card-window",
+  "windows": ["card"],
+  "permissions": ["allow-sign-decision", "allow-undo-decision"]
+}

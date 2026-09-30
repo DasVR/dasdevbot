@@ -1,12 +1,15 @@
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use dasdevbot_core::{authorize_secret_name, parse_role, SecretRoleError};
 use dasdevbotd::{
-    audit_dev_env, open_provider, parse_sha256_list, plan_secret_set, prompt_secret_from_tty,
-    read_piped_secret, serve, session_token_path, url_exposes_bearer, CommandKind, Config, Error,
-    KeyringHandle, ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource,
+    audit_dev_env, audit_key_path, open_provider, parse_sha256_list, plan_secret_set,
+    prompt_secret_from_tty, read_piped_secret, role_path, serve, session_token_path,
+    url_exposes_bearer, CommandKind, CompletionRequest, Config, Error, KeyringHandle,
+    ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource, Store,
 };
 
 fn main() -> ExitCode {
@@ -50,6 +53,7 @@ fn run() -> Result<(), Error> {
     }
 }
 
+#[derive(Debug)]
 struct Flags {
     bind: String,
     data: PathBuf,
@@ -121,9 +125,12 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             other => return Err(Error::BadRequest(format!("unknown argument {other}"))),
         }
     }
-    if !matches!(role.as_str(), "device" | "server" | "display") {
+    if !matches!(
+        role.as_str(),
+        "device" | "server" | "display" | "leader" | "worker" | "executor"
+    ) {
         return Err(Error::BadRequest(
-            "role must be device, server, or display".into(),
+            "role must be device, server, display, leader, worker, or executor".into(),
         ));
     }
     if !web_set {
@@ -218,7 +225,7 @@ fn smoke_model(args: Vec<String>) -> Result<(), Error> {
     };
     let started = Instant::now();
     match provider.complete(
-        &dasdevbotd::CompletionRequest {
+        &CompletionRequest {
             model: String::new(),
             system: String::new(),
             user: "Reply with the single word ok.".into(),
@@ -262,7 +269,9 @@ fn secret_command(args: Vec<String>) -> Result<(), Error> {
 }
 
 fn secret_set(args: Vec<String>) -> Result<(), Error> {
-    let plan = plan_secret_set(&args).map_err(|err| Error::BadRequest(err.to_string()))?;
+    let (data, rest) = split_data_flag(args)?;
+    let plan = plan_secret_set(&rest).map_err(|err| Error::BadRequest(err.to_string()))?;
+    authorize_cli_secret(&data, &plan.name)?;
     let secret = match plan.source {
         SecretSource::Tty => {
             prompt_secret_from_tty("secret: ").map_err(|err| Error::BadRequest(err.to_string()))?
@@ -274,12 +283,66 @@ fn secret_set(args: Vec<String>) -> Result<(), Error> {
     KeyringHandle
         .set(&plan.name, &secret)
         .map_err(|err| Error::BadRequest(err.to_string()))?;
+    record_secret_audit(&data, &plan.name, dasdevbotd::secrets::last4(&secret))?;
     eprintln!("stored secret {}", plan.name);
+    Ok(())
+}
+
+fn split_data_flag(args: Vec<String>) -> Result<(PathBuf, Vec<String>), Error> {
+    let mut data = PathBuf::from("data/dasdevbot.sqlite");
+    let mut rest = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--data" {
+            let value = iter
+                .next()
+                .ok_or_else(|| Error::BadRequest("--data needs a value".into()))?;
+            data = PathBuf::from(value);
+        } else {
+            rest.push(arg);
+        }
+    }
+    Ok((data, rest))
+}
+
+fn authorize_cli_secret(data: &Path, name: &str) -> Result<(), Error> {
+    let role_text = fs::read_to_string(role_path(data)).unwrap_or_default();
+    let Some(role) = parse_role(role_text.trim()) else {
+        return Err(Error::Forbidden("daemon role is not configured".into()));
+    };
+    authorize_secret_name(role, name).map_err(|err| match err {
+        SecretRoleError::NotAllowed => {
+            Error::Forbidden("secret name is not on this role's allowlist".into())
+        }
+        SecretRoleError::ExecutorOnly => {
+            Error::Forbidden("only the executor may store a GitHub credential".into())
+        }
+    })
+}
+
+fn record_secret_audit(data: &Path, name: &str, last4: String) -> Result<(), Error> {
+    let mut store = Store::open(data)?;
+    let seed = if audit_key_path(data).exists() {
+        let text = fs::read_to_string(audit_key_path(data))?;
+        dasdevbotd::signature_seed(text.trim())?
+    } else {
+        return Err(Error::Forbidden(
+            "audit key is missing; start the daemon before storing a secret".into(),
+        ));
+    };
+    let payload = serde_json::json!({"name": name, "last4": last4}).to_string();
+    dasdevbotd::append_audit(&mut store, "secret.set", &payload, &seed)?;
     Ok(())
 }
 
 fn emit(args: Vec<String>) -> Result<(), Error> {
     let flags = flags(args)?;
+    let token = emit_token(&flags)?;
+    if url_exposes_bearer(&flags.url, &token) {
+        return Err(Error::BadRequest(
+            "bearer token must be sent only in the Authorization header".into(),
+        ));
+    }
     let endpoint = format!("{}/v1/events", flags.url.trim_end_matches('/'));
     let body = serde_json::json!({
         "source": "cli",
@@ -336,12 +399,12 @@ fn ensure_loopback(bind: &str) -> Result<(), Error> {
 fn print_help() {
     eprintln!(
         "\
-dasdevbotd — phase 0 spike
+dasdevbotd — phase 1
 
 Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
-                  [--web apps/desktop/dist] [--role server|device|display]
-                  [--token TOKEN]
+                  [--web apps/desktop/dist] [--token TOKEN]
+                  [--role server|leader|worker|executor|device|display]
                   [--provider ollama|ollama-local|claude-cli] [--model NAME]
                   [--claude-home PATH] [--claude-sha256 HEX] [--dev-env-secrets]
   dasdevbotd smoke-model --provider ollama|ollama-local|claude-cli [--model NAME]
@@ -367,8 +430,45 @@ CLAUDE_CONFIG_DIR. `--claude-sha256` is the hex digest of the native ELF.
 as the service user with CLAUDE_CONFIG_DIR set to that dir. See deploy/ubuntu.
 The mock provider is for tests.
 
+The role is the daemon's own configuration. It is written next to the
+database and is not taken from a webview. serve mints a bearer of at least
+32 bytes when --token and DASDEVBOT_TOKEN are absent, and writes it next to
+the database as <data>.token (mode 0600). HTTP cannot approve a card.
+Decisions are Tauri IPC only.
+
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.
 "
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_remote_is_refused() {
+        let err = flags(vec!["--allow-remote".into()]).unwrap_err();
+        assert!(err.to_string().contains("allow-remote"), "{err}");
+        let err = ensure_loopback("0.0.0.0:8787").unwrap_err();
+        assert!(err.to_string().contains("non-loopback"), "{err}");
+    }
+
+    #[test]
+    fn secret_set_github_fails_on_the_device_role() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-secret-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("device.sqlite");
+        fs::write(role_path(&data), "device").unwrap();
+        let err = secret_set(vec![
+            "--data".into(),
+            data.display().to_string(),
+            "github".into(),
+        ])
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("executor") || err.to_string().contains("GitHub"),
+            "{err}"
+        );
+    }
 }
