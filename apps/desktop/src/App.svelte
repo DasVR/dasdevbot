@@ -4,6 +4,7 @@
   import { linear } from "svelte/easing";
   import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
+  import { tokenEase, tokenMs } from "./lib/cssTokens";
   import { QUIET_LINE_PATH } from "./lib/pen";
   import {
     decide,
@@ -161,64 +162,6 @@
     void onundo(target.id);
   }
 
-  function cubicBezier(x1: number, y1: number, x2: number, y2: number): (t: number) => number {
-    const cx = 3 * x1;
-    const bx = 3 * (x2 - x1) - cx;
-    const ax = 1 - cx - bx;
-    const cy = 3 * y1;
-    const by = 3 * (y2 - y1) - cy;
-    const ay = 1 - cy - by;
-    const sampleX = (t: number) => ((ax * t + bx) * t + cx) * t;
-    const sampleY = (t: number) => ((ay * t + by) * t + cy) * t;
-    const sampleDX = (t: number) => (3 * ax * t + 2 * bx) * t + cx;
-    const solveX = (x: number) => {
-      let guess = x;
-      for (let i = 0; i < 8; i += 1) {
-        const error = sampleX(guess) - x;
-        if (Math.abs(error) < 1e-6) {
-          return guess;
-        }
-        const slope = sampleDX(guess);
-        if (Math.abs(slope) < 1e-6) {
-          break;
-        }
-        guess -= error / slope;
-      }
-      let lo = 0;
-      let hi = 1;
-      guess = x;
-      for (let i = 0; i < 24; i += 1) {
-        const xEst = sampleX(guess);
-        if (Math.abs(xEst - x) < 1e-6) {
-          return guess;
-        }
-        if (xEst < x) {
-          lo = guess;
-        } else {
-          hi = guess;
-        }
-        guess = (lo + hi) / 2;
-      }
-      return guess;
-    };
-    return (x: number) => sampleY(solveX(x));
-  }
-
-  const easeOut = cubicBezier(0.22, 1, 0.36, 1);
-
-  function tokenMs(name: string, fallback: number): number {
-    const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    const match = /^(-?\d*\.?\d+)(ms|s)?$/.exec(raw);
-    if (!match) {
-      return fallback;
-    }
-    const value = Number(match[1]);
-    if (!Number.isFinite(value)) {
-      return fallback;
-    }
-    return match[2] === "s" ? value * 1000 : value;
-  }
-
   function prefersReducedMotion(): boolean {
     return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
@@ -231,11 +174,12 @@
     }
     if (prefersReducedMotion()) {
       return {
-        duration: 160,
+        duration: tokenMs("--dur-soft", 160),
         easing: linear,
         css: (t) => `opacity: ${t};`,
       };
     }
+    const easeOut = tokenEase("--ease-out");
     return {
       duration: tokenMs("--dur-soft", 360),
       easing: easeOut,
@@ -249,6 +193,7 @@
     const dx = coords.from.left - coords.to.left;
     const dy = coords.from.top - coords.to.top;
     const moved = Math.abs(dx) >= 1 || Math.abs(dy) >= 1;
+    const easeOut = tokenEase("--ease-out");
     const duration = prefersReducedMotion() || !moved ? 0 : tokenMs("--dur-soft", 360);
     const base = flip(node, coords, { duration, easing: easeOut });
     const css = base.css;
@@ -404,14 +349,18 @@
           <div class="agent" data-status={reviewer.status}>
             <div class="agent-row">
               <h2>{reviewer.name}</h2>
-              <span class="agent-status">{reviewer.status}</span>
+              {#if reviewer.status === "working"}
+                <span class="agent-status">{reviewer.status}</span>
+              {:else if reviewer.status === "blocked"}
+                <span class="agent-status need">
+                  <span class="need-dot" aria-hidden="true"></span>
+                  {reviewer.status}
+                </span>
+              {/if}
             </div>
             <p class="project">{reviewer.project}</p>
             <p class="budget">{reviewer.tokens_spent} / {reviewer.token_cap} tok</p>
             <p class="persona">{reviewer.persona.trim()}</p>
-            {#if reviewer.status === "working"}
-              <div class="scan" aria-hidden="true"></div>
-            {/if}
           </div>
         {:else}
           <p class="muted">No agents stored.</p>
@@ -495,8 +444,8 @@
     margin: 0 auto;
     background: var(--paper-raised);
     border: 1px solid var(--hairline);
-    border-radius: var(--r-2xl);
-    box-shadow: var(--shadow-float);
+    /* Flat hairline. Radius 0 is the stream/roster rule; there is no zero token. */
+    border-radius: 0;
     overflow: hidden;
   }
 
@@ -576,9 +525,8 @@
     overflow: hidden;
     padding: var(--s-3);
     border: 1px solid var(--hairline);
-    border-radius: var(--r-lg);
+    border-radius: 0;
     background: var(--paper-raised);
-    box-shadow: var(--shadow-puff);
   }
 
   .agent-row {
@@ -595,7 +543,6 @@
     letter-spacing: var(--track-tight);
   }
 
-  .agent-status,
   .project,
   .budget,
   .hint,
@@ -603,6 +550,22 @@
   .persona {
     color: var(--ink-2);
     font-size: var(--t-meta);
+  }
+
+  .agent-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    color: var(--ink-3);
+    font-size: var(--t-meta);
+  }
+
+  .need-dot {
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border-radius: var(--r-pill);
+    background: var(--risk-external);
   }
 
   .persona {
@@ -617,28 +580,6 @@
   .budget {
     margin-top: var(--s-2);
     color: var(--ink-1);
-  }
-
-  .scan {
-    margin-top: var(--s-3);
-    height: 2px;
-    overflow: hidden;
-    background: var(--hairline);
-  }
-
-  .scan::after {
-    content: "";
-    display: block;
-    height: 100%;
-    width: 35%;
-    background: var(--ink-1);
-    animation: scan 1.1s linear infinite;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .scan::after {
-      animation: none;
-    }
   }
 
   .sim-row {

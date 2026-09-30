@@ -17,6 +17,7 @@
     type Approval,
     type Decision,
   } from "./api";
+  import { tokenMs } from "./cssTokens";
   import { CHECK_PATH, CHEVRON_PATH, DENY_MARK_PATH, STRIKE_PATH, arrowFromId, type ArrowMark } from "./pen";
 
   interface Props {
@@ -348,7 +349,7 @@
       node.style.overflow = "";
       node.style.opacity = "0";
       void node.offsetHeight;
-      node.style.transition = "opacity 160ms linear";
+      node.style.transition = "opacity var(--dur-soft) linear";
       node.style.opacity = "1";
       morphTimer = window.setTimeout(() => finishMorph(to), 180);
       return;
@@ -400,13 +401,13 @@
       return;
     }
     committing = "approve";
-    const drawMs = reducedMotion.current ? 0 : 300;
+    const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
     await animateNumber(1, 0, drawMs, (value) => {
       checkOffset = value;
     });
     if (reducedMotion.current) {
       checkOffset = 0;
-      await wait(120);
+      await wait(tokenMs("--dur-base", 120));
     }
     await settleDecision("approve");
   }
@@ -417,12 +418,12 @@
     }
     committing = "deny";
     if (strike < 1) {
-      const drawMs = reducedMotion.current ? 0 : 300;
+      const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
       await animateNumber(strike, 1, drawMs, (value) => {
         strike = value;
       });
       if (reducedMotion.current) {
-        await wait(120);
+        await wait(tokenMs("--dur-base", 120));
       }
     }
     await settleDecision("deny", reason);
@@ -875,7 +876,7 @@
   .dot {
     width: 7px;
     height: 7px;
-    border-radius: 50%;
+    border-radius: var(--r-pill);
     background: currentColor;
     flex: none;
   }
@@ -988,7 +989,7 @@
     font-size: 12px;
     line-height: 1.6;
     color: var(--ink-1);
-    background: rgb(237 231 221 / 0.94);
+    background: color-mix(in oklab, var(--paper-sunken) 94%, transparent);
     border-radius: var(--r-sm);
     padding: 10px 12px;
     display: grid;
@@ -1076,13 +1077,13 @@
     white-space: pre-wrap;
     padding: 12px 14px;
     border-radius: var(--r-sm);
-    background: rgb(251 249 245 / 0.94);
+    background: color-mix(in oklab, var(--paper-raised) 94%, transparent);
     box-shadow: 0 0 0 1px var(--hairline);
   }
 
   .draft code {
     font-family: var(--font-machine);
-    font-size: 12.5px;
+    font-size: var(--t-meta);
   }
 
   .meta {
@@ -1121,25 +1122,17 @@
   }
 
   .approve {
-    background:
-      linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0)),
-      var(--ink-1);
+    background: var(--ink-1);
     color: var(--paper-raised);
     border: 1.5px solid var(--ink-1);
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.16),
-      0 1px 2px rgb(var(--shade) / 0.18),
-      0 6px 14px -6px rgb(var(--shade) / 0.35);
+    box-shadow: var(--highlight-top), var(--shadow-puff);
   }
 
   .deny {
     background: var(--convex), var(--paper-raised);
     color: var(--ink-1);
     border: 1.5px solid var(--ink-1);
-    box-shadow:
-      var(--highlight-top),
-      0 1px 2px rgb(var(--shade) / 0.1),
-      0 6px 14px -6px rgb(var(--shade) / 0.18);
+    box-shadow: var(--highlight-top), var(--shadow-puff);
   }
 
   button:hover:not(:disabled) {
@@ -1148,18 +1141,12 @@
   }
 
   .approve:hover:not(:disabled) {
-    box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.16),
-      0 2px 4px rgb(var(--shade) / 0.18),
-      0 10px 20px -8px rgb(var(--shade) / 0.4);
+    box-shadow: var(--highlight-top), var(--shadow-float);
   }
 
   .deny:hover:not(:disabled) {
     border-color: var(--ink-1);
-    box-shadow:
-      var(--highlight-top),
-      0 2px 3px rgb(var(--shade) / 0.16),
-      0 8px 16px -8px rgb(var(--shade) / 0.28);
+    box-shadow: var(--highlight-top), var(--shadow-puff);
   }
 
   .approve:active:not(:disabled),
@@ -1239,14 +1226,12 @@
     line-height: var(--lh-meta);
   }
 
-  .hold-hint {
+  .hold-hint,
+  .hold-hint.armed {
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
-    color: var(--ink-3);
-  }
-
-  .hold-hint.armed {
+    /* ink-3 is banned on glass. Both hint states stay ink-2. */
     color: var(--ink-2);
   }
 
@@ -1277,9 +1262,7 @@
     border-radius: var(--r-md);
     border: 0;
     background: var(--paper-raised);
-    box-shadow:
-      inset 0 1px 2px rgb(var(--shade) / 0.08),
-      0 0 0 1px var(--hairline-strong);
+    box-shadow: var(--shadow-press), 0 0 0 1px var(--hairline-strong);
     padding: 0 12px;
     color: var(--ink-1);
     font-size: var(--t-body);
@@ -1394,7 +1377,7 @@
 
     .draw,
     .arrow .draw {
-      animation: pen-fade 120ms linear both;
+      animation: pen-fade var(--dur-base) linear both;
       stroke-dashoffset: 0;
     }
 
