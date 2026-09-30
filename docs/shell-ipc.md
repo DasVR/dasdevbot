@@ -26,7 +26,18 @@ default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; f
 
 Unix: `<data>.shell.sock`, mode 0600. The daemon reads `SO_PEERCRED` and refuses a peer whose uid is not the daemon's euid. A failed `getsockopt` fails closed.
 
-Windows: `127.0.0.1` on an ephemeral port written to `<data>.shell.port`. There is no peer-cred check. The per-launch window secret and the bearer are the authentication.
+Windows: a named pipe `\\.\pipe\dasdevbot-<32 hex of blake3(absolute data path)>` (`shell_pipe_name`). There is no TCP listener.
+- The pipe's DACL is protected and grants `GENERIC_ALL` only to the daemon's user SID (`D:P(A;;GA;;;<sid>)`), and it has `PIPE_REJECT_REMOTE_CLIENTS`.
+- The first instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a process that grabbed the name first makes the daemon fail to start.
+- For each connection the daemon calls `GetNamedPipeClientProcessId`, opens that process's token, and compares its user SID with its own (`EqualSid`). Any failure means a foreign peer, which gets `unauthorized`.
+- The client opens the pipe with `SECURITY_IDENTIFICATION`, so the server can't impersonate it.
+- `write_private` applies the same owner-only protected DACL to `<data>.token`, `<data>.window-*`, the audit key and the tip sidecar.
+
+Known limits on Windows:
+- The client doesn't check who the pipe server is. If the daemon is down, a same-user squatter could answer.
+- A pid can be reused between `GetNamedPipeClientProcessId` and `OpenProcess`. That fails closed, or checks the reusing process, and the ACL already restricts who can connect.
+- Elevation and integrity level aren't compared.
+- Only the same-user pipe path has run, and only under Wine on Linux (test `the_named_pipe_serves_the_same_user`). The squatter refusal and the ACLs need a real Windows host.
 
 One JSON line in, one JSON line out: `{"ok":true,"result":...}` or `{"ok":false,"error":...}`.
 
@@ -38,15 +49,19 @@ Every line carries `token`, the bearer from `<data>.token`. The compare is const
 
 `prepare` issues the nonce an external signature must cover. Fields: `approval_id`, `decision`, `reason`, `purpose` (`decision` or `undo`), `window_secret`. The result is `{signature_required, tier, nonce, message, prompt, hello_enrolled}`. Internal cards return `{signature_required:false, tier:"internal"}` and do not get a nonce. The `prompt` string is `{decision} {action} on {target}`.
 
-`hello-enroll` asks Windows to open or create the non-exportable key `dasdevbot-approval` (`KeyCredentialManager`) and stores only `(blob_type, public_key)` in `hello_public_key`. The private key never leaves the platform. Other targets return `external tier is denied without Windows Hello`.
+`hello-enroll` asks Windows to open or create the non-exportable RSA-2048 key `dasdevbot-approval` (`KeyCredentialManager`). It stores only `(blob_type = X509SubjectPublicKeyInfo, SPKI)` in `hello_public_key`, writes `hello.enrolled`, and pins the fingerprint in the audit tip sidecar. A different key is refused until a `hello-reset`. The private key never leaves the platform. Other targets return `external tier is denied without Windows Hello`.
 
 `secret` fields: `name`, `value`, `window_secret`. The daemon audits `secret.set` before the keyring write.
 
+`hello-reset` fields: `reason` (non-empty), `window_secret` (must map to `settings`). The daemon asks the user to verify "reset the Windows Hello approval key", writes `hello.reset`, and then clears the enrolled key and its pin. A new key can enroll only after this.
+
 ## External versus internal
 
-Internal tiers stay on the Phase 1 Ed25519 `approval-key` seed. The daemon signs and verifies that seed. External cards never use it.
+**Phase 1 hard-denies external cards.** `decide`, `undo` and `prepare` refuse them for every signature, because `EXTERNAL_TIER_ENABLED` is `false`. The flow below is the design that is re-enabled after H1, H2 and `docs/hello-hardware-test.md` pass.
 
-On Windows, `sign_decision` / `undo_decision` send `decide` or `undo` first. If the daemon answers `external tier requires a Windows Hello signature`, the command calls `prepare`, enrolls when `hello_enrolled` is false, signs `message` with `sign_approval_message` (Hello consent uses `prompt`, then `RequestSignAsync`), and submits `client_signature` and `client_nonce`. The daemon checks the signature with CNG against the stored public key and consumes the nonce. A second Hello prompt can appear at commit.
+Internal tiers stay on the Phase 1 Ed25519 `approval-key` seed. The daemon signs and verifies that seed, so the signature proves only same-uid. That is accepted for Phase 1 and revisited in Phase 2. External cards never use it.
+
+On Windows, `sign_decision` / `undo_decision` send `decide` or `undo` first. If the daemon answers `external tier requires a Windows Hello signature`, the command calls `prepare`, enrolls when `hello_enrolled` is false, signs `message` with `sign_approval_message` (Hello consent uses `prompt`, then `RequestSignAsync`), and submits `client_signature` and `client_nonce`. The daemon checks the RSA PKCS#1 v1.5 / SHA-256 signature with CNG against the pinned public key and consumes the nonce. The daemon doesn't show its own Hello prompt.
 
 On Linux and every other target the stub denies the external tier. The seed cannot approve it.
 
