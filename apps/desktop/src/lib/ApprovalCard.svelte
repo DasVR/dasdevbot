@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
   import {
     SEEN_LOCK_MS,
@@ -18,6 +18,7 @@
     type Decision,
   } from "./api";
   import { tokenEase, tokenMs } from "./cssTokens";
+  import type { WindowsHello } from "./hello";
   import {
     CHECK_PATH,
     CHEVRON_PATH,
@@ -25,14 +26,8 @@
     DENY_MARK_PATH,
     ENTER_KEY_PATH,
     STRIKE_PATH,
-    arrowFromId,
-    type ArrowMark,
   } from "./pen";
 
-  /** Risk arrow waits after the card rise. No default-motion token is 120ms. */
-  const ARROW_DELAY = "120ms";
-  /** Arrow head draws after the shaft. No default token is 160ms. */
-  const ARROW_HEAD_DRAW = "160ms";
   /** Reduced-motion fades. tokens.css has no linear easing token. */
   const REDUCED_FADE_EASE = "linear";
   /** Evidence is off the 11 / 12.5 / 14 type ramp. */
@@ -49,6 +44,15 @@
     busy?: boolean;
     holdMs?: number;
     shortcutTarget?: boolean;
+    /** False while the sheet covers the card or it has not finished landing. */
+    seenEnabled?: boolean;
+    /** Daemon lost: the card stays, at 45%, with no actions. */
+    suspended?: boolean;
+    /** Set when a queue open finishes landing. The seen timer starts after this. */
+    landedAt?: number | null;
+    hello?: WindowsHello | null;
+    /** Quiet line after this receipt's undo window has closed. */
+    nextWaiting?: boolean;
     ondecide?: (decision: Decision, reason?: string) => Promise<boolean>;
     onundo?: () => Promise<boolean>;
   }
@@ -58,6 +62,11 @@
     busy = false,
     holdMs,
     shortcutTarget = false,
+    seenEnabled = true,
+    suspended = false,
+    landedAt = null,
+    hello = null,
+    nextWaiting = false,
     ondecide,
     onundo,
   }: Props = $props();
@@ -73,10 +82,18 @@
   const reasonId = $derived(`approval-reason-${approval.id}`);
 
   let cardEl = $state<HTMLElement | null>(null);
+  let evidenceEl: HTMLElement | null = null;
+  let cardRatio = 0;
+  let evidenceRatio = 0;
+  let windowBlurred = false;
+  let riseFrame = 0;
   let playRise = $state(false);
   let riseNoted = false;
-  let arrow = $state<ArrowMark | null>(null);
   let seenArmed = $state(false);
+  let seenPhase = $state<"held" | "idle" | "arming" | "armed">("idle");
+  let seenSince = $state(0);
+  let helloOpen = $state(false);
+  let helloBusy = $state(false);
   let cardFocused = $state(false);
   let denyOpen = $state(false);
   let reason = $state("");
@@ -90,8 +107,18 @@
   let holdFrame = 0;
   let morphTimer = 0;
   let holdSealed = false;
+  let syncSeenGate = (): void => {};
+  let lit = $state(false);
+  let lightFrame = 0;
+  let lightX = 0;
+  let lightY = 0;
+  let specI = $state<HTMLElement | null>(null);
+  let sheenI = $state<HTMLElement | null>(null);
+  let gatherI = $state<HTMLElement | null>(null);
 
-  const locked = $derived(busy || committing !== null);
+  const locked = $derived(busy || suspended || committing !== null || helloOpen);
+  const needsHello = $derived(hello != null && effect === "external");
+  const nextLine = "Next waiting · Alt↓";
   const duration = $derived(holdDurationMs(effect, holdMs));
   const showUndo = $derived(
     !pending &&
@@ -168,77 +195,221 @@
     return () => {
       window.clearTimeout(morphTimer);
       cancelAnimationFrame(holdFrame);
+      cancelAnimationFrame(lightFrame);
+      lightFrame = 0;
       if (cardEl === node) {
         cardEl = null;
       }
     };
   }
 
+  function paintLight(): void {
+    lightFrame = 0;
+    if (reducedMotion.current) {
+      return;
+    }
+    const ySpec = Math.min(lightY, 40) * 0.35;
+    const ySheen = Math.min(lightY, 30) * 0.15;
+    if (specI) {
+      specI.style.transform = `translate(${lightX}px, ${ySpec}px)`;
+    }
+    if (sheenI) {
+      sheenI.style.transform = `translate(${lightX}px, ${ySheen}px)`;
+    }
+    if (gatherI) {
+      gatherI.style.transform = `translate(${lightX}px, ${lightY}px)`;
+    }
+  }
+
+  function onCardPointerEnter(): void {
+    if (!reducedMotion.current) {
+      lit = true;
+    }
+  }
+
+  function onCardPointerLeave(): void {
+    lit = false;
+  }
+
+  function onCardPointerMove(event: PointerEvent): void {
+    if (!cardEl || reducedMotion.current) {
+      return;
+    }
+    const rect = cardEl.getBoundingClientRect();
+    lightX = event.clientX - rect.left;
+    lightY = event.clientY - rect.top;
+    if (lightFrame === 0) {
+      lightFrame = requestAnimationFrame(paintLight);
+    }
+  }
+
+  function elementHidden(node: Element | null): boolean {
+    let current: Element | null = node;
+    while (current) {
+      if (current instanceof HTMLElement && current.inert) {
+        return true;
+      }
+      const style = getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden") {
+        return true;
+      }
+      const opacity = Number.parseFloat(style.opacity);
+      if (!(opacity > 0)) {
+        return true;
+      }
+      current = current.parentElement;
+    }
+    return node == null;
+  }
+
+  function surfaceOpen(): boolean {
+    return !windowBlurred && document.hasFocus() && !document.hidden;
+  }
+
+  /** Intersection plus computed style. Opacity or a class name alone is not enough. */
+  function cardReallyVisible(): boolean {
+    return (
+      surfaceOpen() &&
+      cardRatio >= 0.99 &&
+      evidenceRatio >= 0.99 &&
+      !elementHidden(cardEl) &&
+      !elementHidden(evidenceEl)
+    );
+  }
+
   function watchSeen(evidence: HTMLElement): () => void {
     const card = evidence.closest("article");
-    if (!card) {
-      return () => {};
-    }
-    let cardFull = false;
-    let evidenceVisible = false;
+    evidenceEl = evidence;
     let timer = 0;
-    const sync = () => {
+    const gate = { enabled: true, suspended: false };
+    const clearTimer = () => {
       window.clearTimeout(timer);
-      if (cardFull && evidenceVisible) {
-        timer = window.setTimeout(() => {
-          seenArmed = true;
-        }, SEEN_LOCK_MS);
-      } else {
-        seenArmed = false;
-      }
+      timer = 0;
     };
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const full = entry.intersectionRatio >= 0.99;
-          if (entry.target === card) {
-            cardFull = full;
-          }
-          if (entry.target === evidence) {
-            evidenceVisible = full;
-          }
-        }
+    const animationsRunning = () =>
+      (card?.getAnimations({ subtree: true }) ?? []).some((anim) => anim.playState === "running");
+    // Recheck only while a rise (or other) animation is in flight. Opacity starts at 0,
+    // and a CSS animation does not mutate an attribute the observer can see.
+    const scheduleRiseRecheck = () => {
+      if (riseFrame !== 0 || seenArmed || !animationsRunning()) {
+        return;
+      }
+      riseFrame = requestAnimationFrame(() => {
+        riseFrame = 0;
         sync();
-      },
-      { threshold: [0, 0.99, 1] },
-    );
-    observer.observe(card);
-    observer.observe(evidence);
+      });
+    };
+    // SEEN_LOCK_MS is the minimum visible dwell. Losing visibility clears it;
+    // a later sync does not resume a dwell that is already counting.
+    const sync = () => {
+      // The attachment host is an effect. Reading $state here would re-run it
+      // and restart the dwell every time the phase changes.
+      untrack(() => {
+      const visible = Boolean(card) && !gate.suspended && gate.enabled && cardReallyVisible();
+      if (!visible) {
+        clearTimer();
+        seenArmed = false;
+        seenSince = 0;
+        seenPhase = gate.suspended || !gate.enabled ? "held" : "idle";
+        if (holdKind) {
+          cancelHold();
+        }
+        scheduleRiseRecheck();
+        return;
+      }
+      if (timer !== 0 || seenArmed) {
+        return;
+      }
+      seenPhase = "arming";
+      seenSince = performance.now();
+      timer = window.setTimeout(() => {
+        timer = 0;
+        if (gate.suspended || !gate.enabled || !cardReallyVisible()) {
+          seenArmed = false;
+          seenSince = 0;
+          seenPhase = gate.suspended || !gate.enabled ? "held" : "idle";
+          scheduleRiseRecheck();
+          return;
+        }
+        seenArmed = true;
+        seenPhase = "armed";
+      }, SEEN_LOCK_MS);
+      });
+    };
+    let observer: IntersectionObserver | null = null;
+    if (card) {
+      observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.target === card) {
+              cardRatio = entry.intersectionRatio;
+            }
+            if (entry.target === evidence) {
+              evidenceRatio = entry.intersectionRatio;
+            }
+          }
+          sync();
+        },
+        { threshold: [0, 0.99, 1] },
+      );
+      observer.observe(card);
+      observer.observe(evidence);
+    }
+    const onHide = () => sync();
+    card?.addEventListener("animationstart", onHide);
+    card?.addEventListener("animationend", onHide);
+    card?.addEventListener("animationcancel", onHide);
+    document.addEventListener("visibilitychange", onHide);
+    const mutations = new MutationObserver(onHide);
+    let ancestor: Element | null = card;
+    while (ancestor) {
+      mutations.observe(ancestor, {
+        attributes: true,
+        attributeFilter: ["style", "class", "hidden", "inert"],
+      });
+      ancestor = ancestor.parentElement;
+    }
+    syncSeenGate = () => {
+      gate.enabled = seenEnabled;
+      gate.suspended = suspended;
+      sync();
+    };
+    syncSeenGate();
     return () => {
-      window.clearTimeout(timer);
-      observer.disconnect();
+      clearTimer();
+      cancelAnimationFrame(riseFrame);
+      riseFrame = 0;
+      observer?.disconnect();
+      mutations.disconnect();
+      card?.removeEventListener("animationstart", onHide);
+      card?.removeEventListener("animationend", onHide);
+      card?.removeEventListener("animationcancel", onHide);
+      document.removeEventListener("visibilitychange", onHide);
+      if (evidenceEl === evidence) {
+        evidenceEl = null;
+        cardRatio = 0;
+        evidenceRatio = 0;
+      }
+      syncSeenGate = () => {};
       seenArmed = false;
     };
   }
 
-  function watchArrow(strip: HTMLElement): () => void {
-    const card = strip.closest("article");
-    if (!card) {
-      return () => {};
-    }
-    const id = approval.id;
-    let current = "";
-    const measure = () => {
-      const next = arrowFromId(id);
-      const key = `${next.width}x${next.height}:${next.shaft}:${next.head}`;
-      if (key === current) {
-        return;
-      }
-      current = key;
-      arrow = next;
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(card);
-    return () => {
-      observer.disconnect();
-    };
+  function onSurfaceBlur(): void {
+    windowBlurred = true;
+    syncSeenGate();
   }
+
+  function onSurfaceFocus(): void {
+    windowBlurred = false;
+    syncSeenGate();
+  }
+
+  $effect(() => {
+    seenEnabled;
+    suspended;
+    syncSeenGate();
+  });
 
   function tickUndo(): () => void {
     nowMs = Date.now();
@@ -424,11 +595,49 @@
     scheduleMorph(measureSettled());
   }
 
-  async function onApproveClick(): Promise<void> {
-    if (locked || denyOpen || !pending) {
+  function cancelHello(): void {
+    helloOpen = false;
+    helloBusy = false;
+    committing = null;
+    checkOffset = 1;
+  }
+
+  async function confirmHello(): Promise<void> {
+    if (!hello || helloBusy) {
+      return;
+    }
+    helloBusy = true;
+    let ok = false;
+    try {
+      ok = await hello.confirm(approval.id);
+    } catch {
+      ok = false;
+    }
+    helloBusy = false;
+    helloOpen = false;
+    if (!ok) {
+      cancelHello();
+      return;
+    }
+    checkOffset = 1;
+    committing = "approve";
+    await settleDecision("approve");
+  }
+
+  async function beginApprove(): Promise<void> {
+    checkOffset = 1;
+    if (needsHello) {
+      helloOpen = true;
       return;
     }
     committing = "approve";
+    await settleDecision("approve");
+  }
+
+  async function onApproveClick(): Promise<void> {
+    if (locked || denyOpen || !pending || !seenArmed || suspended) {
+      return;
+    }
     const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
     await animateNumber(
       1,
@@ -443,7 +652,8 @@
       checkOffset = 0;
       await wait(tokenMs("--dur-base", 120));
     }
-    await settleDecision("approve");
+    checkOffset = 1;
+    await beginApprove();
   }
 
   async function confirmDeny(): Promise<void> {
@@ -518,9 +728,8 @@
     holdKind = null;
     holdSealed = true;
     if (kind === "approve") {
-      checkOffset = 0;
-      committing = "approve";
-      void settleDecision("approve");
+      checkOffset = 1;
+      void beginApprove();
       return;
     }
     strike = 1;
@@ -528,7 +737,7 @@
   }
 
   function startHold(kind: HoldKind): void {
-    if (locked || denyOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
+    if (locked || denyOpen || helloOpen || !pending || !seenArmed || suspended || document.activeElement !== cardEl) {
       return;
     }
     cancelAnimationFrame(holdFrame);
@@ -538,6 +747,11 @@
     const start = performance.now();
     const step = (now: number) => {
       if (holdKind !== kind) {
+        return;
+      }
+      syncSeenGate();
+      if (holdKind !== kind || !seenArmed || document.activeElement !== cardEl || !cardReallyVisible()) {
+        cancelHold();
         return;
       }
       const progress = Math.min(1, (now - start) / ms);
@@ -567,15 +781,23 @@
       return;
     }
     if (event.altKey && !event.metaKey && !event.ctrlKey && event.key === "ArrowDown" && shortcutTarget && pending) {
+      if (event.defaultPrevented) {
+        return;
+      }
       event.preventDefault();
       cardEl?.focus();
+    }
+  }
+
+  function onCardKeydown(event: KeyboardEvent): void {
+    if (event.repeat || isTextEntry(event.target)) {
       return;
     }
-    const chord = event.metaKey || event.ctrlKey;
-    if (!chord || event.altKey || !pending || denyOpen || locked) {
+    const chord = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+    if (!chord || !pending || denyOpen || locked) {
       return;
     }
-    if (document.activeElement !== cardEl || !seenArmed) {
+    if (document.activeElement !== cardEl || !seenArmed || !cardReallyVisible()) {
       return;
     }
     if (event.key === "Enter") {
@@ -632,14 +854,27 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} onkeyup={onWindowKeyup} />
+<svelte:window onkeydown={onWindowKeydown} onkeyup={onWindowKeyup} onblur={onSurfaceBlur} onfocus={onSurfaceFocus} />
 
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <article
   {@attach bindCard}
-  class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
-  style:--arrow-delay={ARROW_DELAY}
-  style:--arrow-head-draw={ARROW_HEAD_DRAW}
+  class={[
+    "card",
+    floating ? "glass" : "paper",
+    !pending && "receipt",
+    playRise && "rise",
+    suspended && "suspended",
+    lit && "lit",
+  ]}
+  data-approval-id={approval.id}
+  data-seen={pending ? seenPhase : undefined}
+  data-seen-since={pending && seenSince > 0 ? String(seenSince) : undefined}
+  data-landed-at={landedAt == null ? undefined : String(landedAt)}
+  data-hello={helloOpen ? "open" : "off"}
+  data-suspended={suspended ? "yes" : undefined}
+  data-next-waiting={!pending && nextWaiting && !showUndo ? "yes" : undefined}
   style:--reduced-fade={REDUCED_FADE_EASE}
   style:--evidence-size={EVIDENCE_SIZE}
   style:--monogram-size={MONOGRAM_SIZE}
@@ -650,6 +885,10 @@
   aria-labelledby={pending ? titleId : undefined}
   aria-label={pending ? undefined : word}
   aria-keyshortcuts={pending ? "Control+Enter Control+Backspace" : undefined}
+  onkeydown={onCardKeydown}
+  onpointerenter={onCardPointerEnter}
+  onpointerleave={onCardPointerLeave}
+  onpointermove={onCardPointerMove}
   onfocusin={syncFocus}
   onfocusout={() => {
     queueMicrotask(() => {
@@ -660,27 +899,30 @@
     });
   }}
 >
+  {#if floating}
+    <div class="contact" aria-hidden="true"></div>
+    <div class="restshadow" aria-hidden="true"></div>
+    <div class="lift" aria-hidden="true"></div>
+    <div class="grain" aria-hidden="true"></div>
+    <div class="gather" aria-hidden="true"><i bind:this={gatherI}></i></div>
+    <div class="paperize" aria-hidden="true"></div>
+    <div class="rim" aria-hidden="true"></div>
+    <div class="toplight" aria-hidden="true"></div>
+    <div class="edge" aria-hidden="true"></div>
+    <div class="spec" aria-hidden="true"><i bind:this={specI}></i></div>
+    <div class="sheen" aria-hidden="true"><i bind:this={sheenI}></i></div>
+  {/if}
   {#if pending}
     {#if effect === "read"}
       <p class="risk-read">Read</p>
     {:else if effect}
-      <div class="risk" role="note" {@attach watchArrow}>
+      <div class="risk" role="note">
         <span class="dot"></span>
         <span>{effectLabel(effect)}</span>
         {#if effectWhy(effect)}
           <span class="why">· {effectWhy(effect)}</span>
         {/if}
       </div>
-      {#if arrow}
-        <svg
-          class="arrow"
-          viewBox={`0 0 ${arrow.width} ${arrow.height}`}
-          aria-hidden="true"
-        >
-          <path class="pen trace shaft" pathLength="1" d={arrow.shaft} />
-          <path class="pen trace head" pathLength="1" d={arrow.head} />
-        </svg>
-      {/if}
     {/if}
 
     <div class="inner">
@@ -759,6 +1001,15 @@
         </div>
       {/if}
 
+      {#if helloOpen && !suspended}
+        <p class="hello-line">Confirm with Windows Hello</p>
+        <div class="hello-actions">
+          <button class="text-btn" type="button" disabled={helloBusy} onclick={cancelHello}>Cancel</button>
+          <button class="text-btn" type="button" disabled={helloBusy} onclick={() => void confirmHello()}>
+            Confirm
+          </button>
+        </div>
+      {:else if !suspended}
       <div class="actions">
         {#if denyOpen}
           <button class="deny" type="button" disabled={locked} onclick={back}>Back</button>
@@ -767,12 +1018,22 @@
           </button>
         {:else}
           <button
-            class="approve"
+            class={["approve", holdKind === "approve" && "holding"]}
             type="button"
             disabled={busy}
             onkeydown={onApproveKeydown}
             onclick={() => void onApproveClick()}
           >
+            <span
+              class="ink"
+              aria-hidden="true"
+              style:opacity={reducedMotion.current ? String(1 - (committing === "approve" ? 0 : checkOffset)) : "1"}
+              style:clip-path={reducedMotion.current
+                ? "none"
+                : `inset(0 ${((committing === "approve" ? 0 : checkOffset) * 100).toFixed(3)}% 0 0)`}
+            >
+              <span>{committing === "approve" ? "Approved" : "Approve draft"}</span>
+            </span>
             {#if holdKind === "approve" || checkOffset < 1}
               <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
                 <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
@@ -788,13 +1049,18 @@
               </span>
             </span>
           </button>
-          <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
+          <button class={["deny", holdKind === "deny" && "holding"]} type="button" disabled={busy} onclick={openDeny}>
+            Deny draft
+          </button>
         {/if}
       </div>
+      {/if}
 
       <div class="quiet">
-        <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && !denyOpen}
+        {#if !helloOpen}
+          <p>Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.</p>
+        {/if}
+        {#if !denyOpen && !helloOpen && !suspended}
           {#snippet modifier()}
             <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
           {/snippet}
@@ -808,7 +1074,7 @@
               <path d={DELETE_KEY_PATH} />
             </svg>
           {/snippet}
-          <p class={["hold-hint", seenArmed && "armed"]}>
+          <p class={["hold-hint", seenArmed && "armed", !cardFocused && "reserved"]} aria-hidden={!cardFocused}>
             {#if seenArmed}
               hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
             {:else}
@@ -841,6 +1107,9 @@
           {/if}
         </p>
         <p class="sub">{subline}</p>
+        {#if nextWaiting && !showUndo}
+          <p class="next-waiting">{nextLine}</p>
+        {/if}
       </div>
       {#if stamp || decisionShort}
         <p class="stamp">{stamp}{#if stamp && decisionShort}<br />{/if}{decisionShort}</p>
@@ -871,8 +1140,178 @@
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border-radius: var(--r-xl);
-    box-shadow: var(--glass-edge), var(--shadow-float);
-    padding: var(--s-2) var(--s-2) var(--s-5);
+    box-shadow: var(--glass-edge);
+    padding: var(--s-2) var(--s-2) 16px;
+  }
+
+  .lift,
+  .restshadow,
+  .contact,
+  .grain,
+  .gather,
+  .paperize,
+  .rim,
+  .toplight,
+  .edge,
+  .spec,
+  .sheen {
+    position: absolute;
+    border-radius: inherit;
+    pointer-events: none;
+  }
+
+  .lift,
+  .restshadow {
+    inset: 0;
+    z-index: -1;
+  }
+
+  .contact {
+    z-index: -1;
+  }
+
+  .lift {
+    box-shadow: var(--shadow-float);
+  }
+
+  .restshadow {
+    box-shadow: var(--shadow-press);
+  }
+
+  .contact {
+    left: 6%;
+    right: 6%;
+    top: auto;
+    bottom: -1px;
+    height: 14px;
+    border-radius: 50%;
+    opacity: 0;
+    background: radial-gradient(closest-side, rgb(var(--shade) / 0.22), rgb(var(--shade) / 0));
+  }
+
+  .grain,
+  .gather,
+  .paperize,
+  .rim,
+  .toplight,
+  .edge,
+  .spec,
+  .sheen {
+    inset: 0;
+  }
+
+  .grain {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.15' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .227 0 0 0 0 .157 0 0 0 0 .086 .42 0 0 0 -.17'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 254px 254px;
+    background-position: 7px 3px;
+    opacity: 0.55;
+  }
+
+  .paperize {
+    background: var(--convex), var(--paper-raised);
+    box-shadow: 0 0 0 1px var(--hairline);
+    opacity: 0;
+  }
+
+  .rim,
+  .edge {
+    padding: 1.5px;
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+
+  .rim {
+    background: linear-gradient(
+      180deg,
+      rgb(255 255 255 / 1) 0%,
+      rgb(255 255 255 / 0.62) 16%,
+      rgb(255 255 255 / 0.12) 46%,
+      rgb(255 255 255 / 0) 62%,
+      rgb(255 255 255 / 0.22) 100%
+    );
+  }
+
+  .toplight {
+    left: 22px;
+    right: 22px;
+    top: 0;
+    height: 1px;
+    z-index: 3;
+    background: linear-gradient(
+      90deg,
+      rgb(255 255 255 / 0),
+      rgb(255 255 255 / 1) 18%,
+      rgb(255 255 255 / 1) 82%,
+      rgb(255 255 255 / 0)
+    );
+  }
+
+  .edge {
+    z-index: 3;
+    opacity: 0;
+    background: linear-gradient(180deg, rgb(255 255 255 / 1), rgb(255 255 255 / 0.7) 30%, rgb(255 255 255 / 0.55) 100%);
+  }
+
+  .spec,
+  .sheen,
+  .gather {
+    overflow: hidden;
+    z-index: 3;
+    opacity: 0;
+    transition: opacity var(--dur-soft) var(--ease-out);
+  }
+
+  .gather {
+    z-index: 1;
+  }
+
+  .spec {
+    inset: -1px;
+    padding: 2px;
+  }
+
+  .spec i,
+  .sheen i,
+  .gather i {
+    position: absolute;
+    left: 0;
+    top: 0;
+    border-radius: 50%;
+    will-change: transform;
+  }
+
+  .spec i {
+    width: 360px;
+    height: 360px;
+    margin: -180px 0 0 -180px;
+    background: radial-gradient(closest-side, rgb(255 255 255 / 1), rgb(255 255 255 / 0.55) 40%, rgb(255 255 255 / 0));
+  }
+
+  .sheen i {
+    width: 300px;
+    height: 64px;
+    margin: -26px 0 0 -150px;
+    background: radial-gradient(
+      closest-side,
+      rgb(255 255 255 / 0.95),
+      rgb(255 255 255 / 0.35) 55%,
+      rgb(255 255 255 / 0)
+    );
+  }
+
+  .gather i {
+    width: 220px;
+    height: 220px;
+    margin: -110px 0 0 -110px;
+    background: radial-gradient(closest-side, rgb(255 255 255 / 0.42), rgb(255 255 255 / 0.12) 55%, rgb(255 255 255 / 0));
+  }
+
+  .card.lit > .spec,
+  .card.lit > .sheen,
+  .card.lit > .gather {
+    opacity: 1;
+    transition-duration: var(--dur-base);
   }
 
   .card.glass.receipt {
@@ -886,19 +1325,44 @@
     -webkit-backdrop-filter: blur(0px) saturate(100%);
     backdrop-filter: blur(0px) saturate(100%);
     border-radius: var(--r-md);
-    border: 1px solid var(--hairline);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
-    min-height: 52px;
-    padding: 10px 14px 10px 12px;
+    border: 0;
+    box-shadow: var(--highlight-top), 0 0 0 1px var(--hairline);
+    min-height: 58px;
+    padding: 10px 16px 10px 12px;
   }
 
   .card:focus-visible {
     outline: 2px solid var(--accent);
-    outline-offset: 2px;
+    outline-offset: 3px;
+  }
+
+  .card.suspended {
+    opacity: 0.45;
+    animation: none;
   }
 
   .card.rise {
     animation: rise var(--dur-stage) var(--ease-out) backwards;
+    animation-delay: 150ms;
+  }
+
+  .card.rise > .lift {
+    animation: lift-in var(--dur-stage) var(--ease-out) backwards;
+    animation-delay: 210ms;
+  }
+
+  .card.rise > .contact {
+    animation: contact-in 640ms var(--ease-out) backwards;
+    animation-delay: 150ms;
+  }
+
+  .card.rise > .edge {
+    animation: edge-in 760ms var(--ease-out) forwards;
+    animation-delay: 150ms;
+  }
+
+  .card.suspended.rise {
+    animation: none;
   }
 
   @keyframes rise {
@@ -910,6 +1374,39 @@
     }
   }
 
+  @keyframes lift-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @keyframes contact-in {
+    0% {
+      opacity: 0;
+    }
+    25% {
+      opacity: 1;
+    }
+    60% {
+      opacity: 0.7;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+
+  @keyframes edge-in {
+    0% {
+      opacity: 0;
+    }
+    45% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0.38;
+    }
+  }
+
   @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     .card.glass {
       background: var(--glass-fill-solid);
@@ -917,7 +1414,16 @@
   }
 
   .inner {
+    position: relative;
+    z-index: 1;
     padding: 0 var(--s-4);
+  }
+
+  .risk,
+  .risk-read,
+  .receipt {
+    position: relative;
+    z-index: 1;
   }
 
   .risk {
@@ -983,32 +1489,10 @@
     animation: draw var(--dur-draw) var(--ease-draw) both;
   }
 
-  .arrow .shaft {
-    stroke-dashoffset: 0;
-    animation: draw var(--dur-draw) var(--ease-draw) both;
-    animation-delay: calc(var(--dur-stage) + var(--arrow-delay));
-  }
-
-  .arrow .head {
-    stroke-dashoffset: 0;
-    animation: draw var(--arrow-head-draw) var(--ease-draw) both;
-    animation-delay: calc(var(--dur-stage) + var(--arrow-delay) + var(--dur-draw));
-  }
-
   @keyframes draw {
     from {
       stroke-dashoffset: 1;
     }
-  }
-
-  .arrow {
-    position: absolute;
-    right: 34px;
-    top: 38px;
-    width: 58px;
-    height: 46px;
-    overflow: visible;
-    pointer-events: none;
   }
 
   .card-head {
@@ -1016,7 +1500,6 @@
     gap: var(--s-3);
     align-items: flex-start;
     margin-top: var(--s-4);
-    padding-right: 70px;
   }
 
   .agent {
@@ -1060,11 +1543,11 @@
   }
 
   .block {
-    margin-top: var(--s-4);
+    margin-top: 14px;
   }
 
   h3 {
-    margin-bottom: var(--s-2);
+    margin-bottom: 6px;
     color: var(--ink-2);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
@@ -1076,9 +1559,9 @@
     font-size: var(--evidence-size);
     line-height: 1.6;
     color: var(--ink-1);
-    background: color-mix(in oklab, var(--paper-sunken) 94%, transparent);
+    background: rgb(237 231 221 / 0.94);
     border-radius: var(--r-sm);
-    padding: 10px 12px;
+    padding: 9px 12px;
     display: grid;
     grid-template-columns: auto 1fr;
     column-gap: 14px;
@@ -1175,9 +1658,9 @@
 
   .draft {
     white-space: pre-wrap;
-    padding: 12px 14px;
+    padding: 11px 14px;
     border-radius: var(--r-sm);
-    background: color-mix(in oklab, var(--paper-raised) 94%, transparent);
+    background: rgb(251 249 245 / 0.94);
     box-shadow: 0 0 0 1px var(--hairline);
   }
 
@@ -1187,7 +1670,7 @@
   }
 
   .meta {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
@@ -1198,7 +1681,7 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: var(--s-2);
-    margin-top: var(--s-5);
+    margin-top: 18px;
   }
 
   button {
@@ -1217,36 +1700,37 @@
     transition:
       transform var(--dur-base) var(--ease-out),
       box-shadow var(--dur-base) var(--ease-out),
-      background-color var(--dur-fast) var(--ease-out),
       border-color var(--dur-fast) var(--ease-out);
   }
 
-  .approve {
-    background: var(--ink-1);
-    color: var(--paper-raised);
-    border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
-  }
-
+  .approve,
   .deny {
     background: var(--convex), var(--paper-raised);
     color: var(--ink-1);
     border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    box-shadow: var(--highlight-top), 0 1px 2px rgb(var(--shade) / 0.1), 0 6px 14px -6px rgb(var(--shade) / 0.18);
+  }
+
+  .ink {
+    position: absolute;
+    inset: -1.5px;
+    border-radius: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0)), var(--ink-1);
+    color: var(--paper-raised);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16);
   }
 
   button:hover:not(:disabled) {
     transform: translateY(-1px);
-    transition-duration: var(--dur-fast);
   }
 
-  .approve:hover:not(:disabled) {
-    box-shadow: var(--highlight-top), var(--shadow-float);
-  }
-
+  .approve:hover:not(:disabled),
   .deny:hover:not(:disabled) {
-    border-color: var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    border-color: #1d1a17;
   }
 
   .approve:active:not(:disabled),
@@ -1254,7 +1738,8 @@
     box-shadow: var(--shadow-press);
   }
 
-  button:active:not(:disabled) {
+  button:active:not(:disabled),
+  button.holding:not(:disabled) {
     transform: scale(0.97, 0.955);
     box-shadow: var(--shadow-press);
     transition-duration: var(--dur-fast);
@@ -1314,7 +1799,7 @@
   }
 
   .quiet {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     display: flex;
     justify-content: center;
     align-items: baseline;
@@ -1336,6 +1821,10 @@
 
   .hold-hint.armed {
     color: var(--ink-2);
+  }
+
+  .hold-hint.reserved {
+    visibility: hidden;
   }
 
   .hold-hint kbd {
@@ -1425,10 +1914,48 @@
     color: var(--warning);
   }
 
-  .sub {
+  .sub,
+  .next-waiting,
+  .hello-line {
     color: var(--ink-3);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
+  }
+
+  .next-waiting,
+  .hello-line {
+    color: var(--ink-2);
+  }
+
+  .hello-line {
+    margin-top: var(--s-4);
+    text-align: center;
+  }
+
+  .hello-actions {
+    display: flex;
+    justify-content: center;
+    gap: var(--s-4);
+    margin-top: var(--s-3);
+  }
+
+  .text-btn {
+    height: auto;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    color: var(--ink-1);
+    font-size: var(--t-meta);
+    font-weight: var(--w-semibold);
+  }
+
+  .text-btn:hover:not(:disabled),
+  .text-btn:active:not(:disabled) {
+    transform: none;
+    box-shadow: none;
+    background: transparent;
   }
 
   .stamp {
@@ -1479,8 +2006,26 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .spec,
+    .sheen,
+    .gather {
+      display: none;
+    }
+
+    .edge {
+      animation: none;
+      opacity: 0.38;
+    }
+
     .card.rise {
-      animation: fade var(--dur-stage) var(--reduced-fade) both;
+      animation: fade 160ms var(--reduced-fade) both;
+      animation-delay: 0s;
+    }
+
+    .card.rise > .lift,
+    .card.rise > .contact,
+    .card.rise > .edge {
+      animation: none;
     }
 
     @keyframes fade {
@@ -1489,9 +2034,7 @@
       }
     }
 
-    .draw,
-    .arrow .shaft,
-    .arrow .head {
+    .draw {
       animation: pen-fade var(--dur-base) var(--reduced-fade) both;
       animation-delay: 0s;
       stroke-dashoffset: 0;

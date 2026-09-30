@@ -669,7 +669,11 @@ impl Store {
         Ok(out)
     }
 
+    /// Phase 1 C1. A destructive request cannot be approved; the decision is filed as this denial.
+    pub const DESTRUCTIVE_OFF: &str = "Destructive actions are off in this build.";
+
     /// Record approve or deny as pending-commit. The external effect waits for [`Self::commit_due`].
+    /// A destructive approval never records `approved`: the decision is refused and filed as denied.
     pub fn decide_approval(
         &mut self,
         approval_id: &str,
@@ -680,13 +684,20 @@ impl Store {
         if decision != "approve" && decision != "deny" {
             return Err(Error::BadRequest("decision must be approve or deny".into()));
         }
-        let reason = clean_reason(reason);
+        let mut decision = decision.to_string();
+        let mut reason = clean_reason(reason);
+        let mut refused = false;
+        let current = self.approval_decision_row(approval_id)?;
+        if current.effect_class == "destructive" {
+            decision = "deny".to_string();
+            reason = Some(Self::DESTRUCTIVE_OFF.to_string());
+            refused = true;
+        }
         let status = if decision == "approve" {
             "approved"
         } else {
             "denied"
         };
-        let current = self.approval_decision_row(approval_id)?;
         if current.status != "pending" {
             if current.status == "expired" {
                 return Err(Error::BadRequest(
@@ -699,6 +710,7 @@ impl Store {
                 executed: false,
                 committed: current.committed != 0,
                 undo_until: undo_until_ms(current.committed, current.commit_due_ms),
+                refused: current.effect_class == "destructive",
             });
         }
         let commit_due = wall_ms.saturating_add(UNDO_WINDOW_MS);
@@ -752,6 +764,7 @@ impl Store {
             executed: false,
             committed: false,
             undo_until: Some(commit_due),
+            refused,
         })
     }
 
@@ -809,6 +822,7 @@ impl Store {
             executed: false,
             committed: false,
             undo_until: None,
+            refused: false,
         })
     }
 
@@ -948,7 +962,7 @@ impl Store {
     fn approval_decision_row(&self, approval_id: &str) -> Result<DecisionRow> {
         self.conn
             .query_row(
-                "SELECT status, job_id, thread_id, decision_event_id, commit_due_ms, committed
+                "SELECT status, job_id, thread_id, decision_event_id, commit_due_ms, committed, effect_class
                  FROM approvals WHERE id = ?1",
                 [approval_id],
                 |row| {
@@ -959,6 +973,7 @@ impl Store {
                         decision_event_id: row.get(3)?,
                         commit_due_ms: row.get(4)?,
                         committed: row.get(5)?,
+                        effect_class: row.get(6)?,
                     })
                 },
             )
@@ -979,6 +994,8 @@ pub struct DecisionRecord {
     pub executed: bool,
     pub committed: bool,
     pub undo_until: Option<u64>,
+    /// True when the caller asked to decide a destructive request. The row is filed denied.
+    pub refused: bool,
 }
 
 struct DecisionRow {
@@ -989,6 +1006,7 @@ struct DecisionRow {
     decision_event_id: Option<String>,
     commit_due_ms: Option<i64>,
     committed: i64,
+    effect_class: String,
 }
 
 fn undo_until_ms(committed: i64, commit_due_ms: Option<i64>) -> Option<u64> {
