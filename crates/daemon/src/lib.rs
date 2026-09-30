@@ -6,7 +6,7 @@ mod store;
 mod turn;
 
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -132,13 +132,37 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn persist_token(data: &Path, token: &str) -> Result<()> {
-    let path = session_token_path(data);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+/// The directory that holds the sqlite file. A bare filename lives in `.`.
+fn data_dir(data: &Path) -> PathBuf {
+    match data.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
     }
+}
+
+/// Ignore every name in the data directory. An existing `.gitignore` is left
+/// untouched, including one at the repo root.
+pub(crate) fn ensure_data_gitignore(data: &Path) -> Result<()> {
+    let dir = data_dir(data);
+    if dir != Path::new(".") {
+        fs::create_dir_all(&dir)?;
+    }
+    let ignore = dir.join(".gitignore");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    match options.open(&ignore) {
+        Ok(mut file) => {
+            file.write_all(b"*\n")?;
+            Ok(())
+        }
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn persist_token(data: &Path, token: &str) -> Result<()> {
+    ensure_data_gitignore(data)?;
+    let path = session_token_path(data);
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -202,5 +226,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.token, supplied);
+    }
+
+    #[test]
+    fn data_dir_gets_a_star_gitignore_unless_one_exists() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-ignore-{}", uuid::Uuid::new_v4()));
+        let fresh = dir.join("fresh");
+        Store::open(&fresh.join("db.sqlite")).unwrap();
+        let written = fs::read_to_string(fresh.join(".gitignore")).unwrap();
+        assert_eq!(written, "*\n");
+
+        let kept = dir.join("kept");
+        fs::create_dir_all(&kept).unwrap();
+        fs::write(kept.join(".gitignore"), "keep-me\n").unwrap();
+        Store::open(&kept.join("db.sqlite")).unwrap();
+        assert_eq!(
+            fs::read_to_string(kept.join(".gitignore")).unwrap(),
+            "keep-me\n"
+        );
     }
 }

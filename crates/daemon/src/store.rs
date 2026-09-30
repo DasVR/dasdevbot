@@ -139,11 +139,7 @@ pub struct NewApproval {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
+        crate::ensure_data_gitignore(path)?;
         let conn = Connection::open(path)?;
         Self::from_conn(conn)
     }
