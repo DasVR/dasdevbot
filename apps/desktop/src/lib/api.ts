@@ -21,6 +21,10 @@ export interface Agent {
 
 export interface Evidence {
   repo: string;
+  /** Mock `pr` row, e.g. `#212 handoff: release lock on refresh`. Empty when there is no PR. */
+  pr?: string;
+  /** Digits of the leading `#n` on `pr`. */
+  pr_number?: string;
   ref: string;
   event_id: string;
   kind: string;
@@ -289,6 +293,10 @@ export async function emitPush(forced = false): Promise<void> {
       payload: {
         repo: "DasVR/NIL",
         ref: "phase0",
+        pr: forced ? "" : "#212 handoff: release lock on refresh",
+        purpose: forced
+          ? ""
+          : "Leave one review comment flagging an unhandled error path in the session handoff.",
         subject: "simulated push",
         note: "phase 0 attaches no diff",
         forced,

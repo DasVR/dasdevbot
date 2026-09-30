@@ -92,7 +92,7 @@
       return latest;
     }, null);
   });
-  // Pending is waiting on a human. A decided, uncommitted approval is filing: ink-3, no dot.
+  // Pending is waiting on a human. During undo the roster is ink-3 "approved · undo Ns", no dot.
   const waitingOnHuman = $derived(
     (snapshot?.approvals ?? []).some(
       (approval) => approval.agent_id === reviewer?.id && approval.status === "pending",
@@ -395,7 +395,7 @@
               {#if reviewer.status === "working"}
                 <span class="agent-status">{reviewer.status}</span>
               {:else if filingUndo && filingSeconds > 0}
-                <span class="agent-status">filing · undo {filingSeconds}s</span>
+                <span class="agent-status">{filingUndo.status === "denied" ? "denied" : "approved"} · undo {filingSeconds}s</span>
               {:else if reviewer.status === "blocked" && !filingUndo}
                 <span class="agent-status need">
                   <span class="need-dot" aria-hidden="true"></span>

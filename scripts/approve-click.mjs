@@ -78,22 +78,25 @@ function approval(status) {
     thread_id: "thread_click",
     effect_class: "external",
     action: "post_pr_comment",
-    purpose: "Leave a note on the pull request.",
-    draft: "Please refresh() the branch before review.",
+    purpose: "Leave one review comment flagging an unhandled error path in the session handoff.",
+    draft:
+      "If refresh() rejects on a 401, the handoff lock is never released. Wrap it in try/finally so the next session can take the lock.",
     evidence: {
       repo: "DasVR/NIL",
+      pr: "#212 handoff: release lock on refresh",
+      pr_number: "212",
       ref: "phase0",
       event_id: "ev_abcdef",
       kind: "repo.push",
     },
-    evidence_text: "repo DasVR/NIL",
+    evidence_text: "repo DasVR/NIL\npr #212 handoff: release lock on refresh\nref phase0\nevent ev_abcdef",
     status,
     provider: "mock",
-    model: "mock-review-v0",
+    model: "reviewer-small",
     usage_kind: "estimated",
-    input_tokens: 1200,
-    output_tokens: 80,
-    micro_usd: 0,
+    input_tokens: 2418,
+    output_tokens: 212,
+    micro_usd: 431,
     created_at: now,
     expires_at: null,
     decided_at: status === "pending" ? null : now,
@@ -213,7 +216,8 @@ try {
   const hintDuring = await hint.boundingBox();
   const visibility = await hint.evaluate((el) => getComputedStyle(el).visibility);
   await page.mouse.up();
-  if (!during || Math.abs(during.y - before.y) > 1 || Math.abs(during.x - before.x) > 1) {
+  // The press squash moves the box a few pixels. The hint-unmount bug moved it ~24px.
+  if (!during || Math.abs(during.y - before.y) > 8 || Math.abs(during.x - before.x) > 8) {
     throw new Error(`Approve moved on mousedown: ${JSON.stringify(before)} -> ${JSON.stringify(during)}`);
   }
   if (visibility !== "hidden") {

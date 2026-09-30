@@ -142,8 +142,19 @@
     if (approval.status === "expired") {
       return "Reviewer will ask again on the next push.";
     }
+    const repo = approval.evidence.repo;
+    const prNumber = approval.evidence.pr_number ?? "";
+    if (showUndo && approval.status === "approved" && repo && prNumber) {
+      return `Posts to ${repo} #${prNumber} when undo closes. Nothing is posted yet.`;
+    }
+    if (showUndo && approval.status === "denied") {
+      return "Nothing will post. Undo brings the draft back.";
+    }
     if (approval.status === "denied" && approval.reason) {
       return `Reason: ${approval.reason}`;
+    }
+    if (approval.status === "denied") {
+      return "Undo closed. Nothing was posted.";
     }
     return "Decision recorded. Nothing posted (demo).";
   });
@@ -464,6 +475,19 @@
 
   function openDeny(): void {
     denyOpen = true;
+    if (strike >= 1) {
+      return;
+    }
+    const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
+    void animateNumber(
+      strike,
+      1,
+      drawMs,
+      (value) => {
+        strike = value;
+      },
+      tokenEase("--ease-draw"),
+    );
   }
 
   function back(): void {
@@ -691,6 +715,10 @@
         <dl class="evidence" {@attach watchSeen}>
           <dt>repo</dt>
           <dd>{approval.evidence.repo}</dd>
+          {#if approval.evidence.pr}
+            <dt>pr</dt>
+            <dd>{approval.evidence.pr}</dd>
+          {/if}
           <dt>ref</dt>
           <dd>{approval.evidence.ref}</dd>
           <dt>event</dt>
@@ -740,7 +768,7 @@
             class="field"
             type="text"
             autocomplete="off"
-            placeholder="Optional"
+            placeholder="Not worth a comment on a phase-0 branch"
             onkeydown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -777,7 +805,7 @@
       </div>
 
       <div class="quiet">
-        <p>Records your decision. Nothing is posted in this demo.</p>
+        <p>Hold to decide. Nothing posts until the 6s undo closes.</p>
         {#snippet modifier()}
           <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
         {/snippet}
@@ -1061,7 +1089,7 @@
     font-size: var(--evidence-size);
     line-height: 1.6;
     color: var(--ink-1);
-    background: color-mix(in oklab, var(--paper-sunken) 94%, transparent);
+    background: rgb(237 231 221 / 0.94);
     border-radius: var(--r-sm);
     padding: 10px 12px;
     display: grid;
@@ -1340,7 +1368,7 @@
     border-radius: var(--r-md);
     border: 0;
     background: var(--paper-raised);
-    box-shadow: var(--shadow-press), 0 0 0 1px var(--hairline-strong);
+    box-shadow: inset 0 1px 2px rgb(var(--shade) / 0.08), 0 0 0 1px var(--hairline-strong);
     padding: 0 12px;
     color: var(--ink-1);
     font-size: var(--t-body);
@@ -1349,6 +1377,11 @@
 
   .field::placeholder {
     color: var(--ink-2);
+  }
+
+  .field:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .receipt {
@@ -1495,6 +1528,15 @@
       background: var(--paper-sunken);
       box-shadow: var(--highlight-top), var(--shadow-puff);
       transition: none;
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .card.glass {
+      background: var(--glass-fill-solid);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: var(--glass-edge), var(--shadow-float);
     }
   }
 </style>

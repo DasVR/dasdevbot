@@ -58,22 +58,20 @@ impl Default for MockProvider {
 }
 
 impl LlmProvider for MockProvider {
-    fn complete(&self, req: &CompletionRequest) -> Result<Completion, ProviderError> {
+    fn complete(&self, _req: &CompletionRequest) -> Result<Completion, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let text = mock_draft();
-        let input_tokens = estimate_tokens(&req.system) + estimate_tokens(&req.user);
-        let output_tokens = estimate_tokens(&text);
+        // Hold-scene line from 2a-approval-hold: mock · reviewer-small · 2,418 in / 212 out · $0.000431
         Ok(Completion {
             text,
-            model: "mock-review-v0".into(),
+            model: "reviewer-small".into(),
             provider: "mock".into(),
             usage_kind: "estimated".into(),
-            input_tokens,
-            output_tokens,
-            micro_usd: 0,
-            note:
-                "mock provider; XAI_API_KEY is unset; token counts are char/4 estimates; no charge"
-                    .into(),
+            input_tokens: 2_418,
+            output_tokens: 212,
+            micro_usd: 431,
+            note: "mock provider; XAI_API_KEY is unset; the hold scene uses the look mock's labeled line"
+                .into(),
         })
     }
 
@@ -227,15 +225,6 @@ pub fn price_xai(model: &str, input_tokens: u64, output_tokens: u64) -> (i64, St
     }
 }
 
-pub fn estimate_tokens(text: &str) -> u64 {
-    let chars = text.chars().count() as u64;
-    if chars == 0 {
-        0
-    } else {
-        chars.div_ceil(4)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn mock_provider_is_labeled_and_does_not_invent_a_charge() {
+    fn mock_provider_uses_the_hold_scene_line() {
         let provider = MockProvider::new();
         let done = provider
             .complete(&CompletionRequest {
@@ -267,10 +256,12 @@ mod tests {
             })
             .unwrap();
         assert_eq!(done.provider, "mock");
+        assert_eq!(done.model, "reviewer-small");
         assert_eq!(done.usage_kind, "estimated");
-        assert_eq!(done.micro_usd, 0);
+        assert_eq!(done.input_tokens, 2_418);
+        assert_eq!(done.output_tokens, 212);
+        assert_eq!(done.micro_usd, 431);
         assert!(done.text.contains("refresh()"));
-        assert!(done.input_tokens >= 2);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 

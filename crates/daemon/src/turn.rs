@@ -305,6 +305,31 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
         .get("ref")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let pr = payload
+        .get("pr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let evidence = if pr.is_empty() {
+        format!("repo {repo}\nref {reference}\nevent {event_id}")
+    } else {
+        format!("repo {repo}\npr {pr}\nref {reference}\nevent {event_id}")
+    };
+    let stated_purpose = payload
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string);
+    let purpose = if forced {
+        format!("Force-push {reference}. This rewrites the remote branch.")
+    } else if let Some(line) = stated_purpose {
+        line
+    } else {
+        format!(
+            "Post a review comment on {repo} at {reference}. Nothing is sent until you approve, and phase 0 does not send it at all."
+        )
+    };
     Ok(Some(Prepared {
         agent_id: agent.id,
         persona: agent.persona,
@@ -313,14 +338,12 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
             "Event kind: {kind_name}\nPayload:\n{}",
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
         ),
-        evidence: format!("repo {repo}\nref {reference}\nevent {event_id}"),
+        evidence,
         evidence_repo: repo.to_string(),
         evidence_ref: reference.to_string(),
         evidence_event_id: event_id.to_string(),
         evidence_kind: kind_name.to_string(),
-        purpose: format!(
-            "Post a review comment on {repo} at {reference}. Nothing is sent until you approve, and phase 0 does not send it at all."
-        ),
+        purpose,
         thread_id,
         tainted,
         forced,

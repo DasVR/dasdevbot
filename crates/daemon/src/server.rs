@@ -332,12 +332,15 @@ fn remember(
 }
 
 fn evidence_view(row: &crate::store::ApprovalRow) -> EvidenceView {
+    let (pr, pr_number) = pr_from_evidence(&row.evidence);
     if !row.evidence_repo.is_empty()
         || !row.evidence_ref.is_empty()
         || !row.evidence_event_id.is_empty()
     {
         return EvidenceView {
             repo: row.evidence_repo.clone(),
+            pr,
+            pr_number,
             git_ref: row.evidence_ref.clone(),
             event_id: row.evidence_event_id.clone(),
             kind: row.evidence_kind.clone(),
@@ -357,10 +360,30 @@ fn evidence_view(row: &crate::store::ApprovalRow) -> EvidenceView {
     }
     EvidenceView {
         repo,
+        pr,
+        pr_number,
         git_ref,
         event_id,
         kind: String::new(),
     }
+}
+
+/// `pr` line from the stored evidence text. The number is the leading `#n`.
+fn pr_from_evidence(text: &str) -> (String, String) {
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("pr ") else {
+            continue;
+        };
+        let pr = rest.trim().to_string();
+        let digits = pr
+            .strip_prefix('#')
+            .unwrap_or("")
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        return (pr, digits);
+    }
+    (String::new(), String::new())
 }
 
 fn optional_ms(value: Option<i64>, include: bool) -> Option<u64> {
@@ -527,7 +550,13 @@ mod tests {
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
-                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0",
+                    "pr": "#212 handoff: release lock on refresh",
+                    "purpose": "Leave one review comment flagging an unhandled error path in the session handoff.",
+                    "subject": "simulated push"
+                },
                 "idempotency_key": "ipc-push-1"
             }))
             .unwrap()
@@ -541,7 +570,13 @@ mod tests {
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
-                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0",
+                    "pr": "#212 handoff: release lock on refresh",
+                    "purpose": "Leave one review comment flagging an unhandled error path in the session handoff.",
+                    "subject": "simulated push"
+                },
                 "idempotency_key": "ipc-push-1"
             }))
             .unwrap()
@@ -583,7 +618,21 @@ mod tests {
         assert!(reviewer["tokens_spent"].as_u64().unwrap() > 0);
         assert!(!snap["ledger"].as_array().unwrap().is_empty());
         assert_eq!(snap["ledger"][0]["usage_kind"], "estimated");
-        assert_eq!(snap["ledger"][0]["micro_usd"], 0);
+        assert_eq!(snap["ledger"][0]["model"], "reviewer-small");
+        assert_eq!(snap["ledger"][0]["micro_usd"], 431);
+        assert_eq!(approval["model"], "reviewer-small");
+        assert_eq!(approval["input_tokens"], 2418);
+        assert_eq!(approval["output_tokens"], 212);
+        assert_eq!(approval["micro_usd"], 431);
+        assert_eq!(
+            approval["evidence"]["pr"],
+            "#212 handoff: release lock on refresh"
+        );
+        assert_eq!(approval["evidence"]["pr_number"], "212");
+        assert_eq!(
+            approval["purpose"],
+            "Leave one review comment flagging an unhandled error path in the session handoff."
+        );
 
         let decision = agent
             .post(&format!(

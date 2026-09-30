@@ -74,6 +74,12 @@ pub struct UndoResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceView {
     pub repo: String,
+    /// Pull-request line, mock order `repo`, `pr`, `ref`, `event`. Empty when the ask has no PR.
+    #[serde(default)]
+    pub pr: String,
+    /// Digits from the leading `#n` in `pr`, used in the undo subline.
+    #[serde(default)]
+    pub pr_number: String,
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub event_id: String,
