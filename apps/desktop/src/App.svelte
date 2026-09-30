@@ -4,6 +4,7 @@
   import { linear } from "svelte/easing";
   import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
+  import { QUIET_LINE_PATH } from "./lib/pen";
   import {
     decide,
     emitPush,
@@ -97,10 +98,10 @@
     }
   }
 
-  async function simulate(): Promise<void> {
+  async function simulate(forced = false): Promise<void> {
     busy = true;
     try {
-      await emitPush();
+      await emitPush(forced);
       await refresh();
     } catch (err) {
       error = err instanceof Error ? err.message : "The event was not accepted.";
@@ -373,10 +374,12 @@
         />
       {/key}
     {:else}
-      <div class="empty">
-        <h2>Nothing is waiting.</h2>
-        <p>A push wakes Reviewer. The turn drafts a comment and asks before any external effect. Approving records the decision and does not post it.</p>
-      </div>
+      <p class="quiet-empty">
+        <svg class="quiet-line" viewBox="0 0 104 10" aria-hidden="true">
+          <path class="pen draw" pathLength="1" d={QUIET_LINE_PATH} />
+        </svg>
+        Nothing is waiting.
+      </p>
     {/if}
   </div>
 {/snippet}
@@ -421,9 +424,14 @@
           <p class="muted">No agents stored.</p>
         {/if}
 
-        <button class="simulate" type="button" disabled={busy} onclick={() => void simulate()}>
-          {busy ? "Waking Reviewer" : "Simulate repo.push"}
-        </button>
+        <div class="sim-row">
+          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(false)}>
+            {busy ? "Waking Reviewer" : "Simulate repo.push"}
+          </button>
+          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(true)}>
+            {busy ? "Waking Reviewer" : "Simulate force push"}
+          </button>
+        </div>
         <p class="hint">Reviewer is a stored row. It runs only when this event wakes it.</p>
       </aside>
 
@@ -632,9 +640,15 @@
     }
   }
 
+  .sim-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-2);
+    margin-top: var(--s-4);
+  }
+
   .simulate {
     width: 100%;
-    margin-top: var(--s-4);
     height: 40px;
     border-radius: var(--r-md);
     border: 1.5px solid var(--ink-1);
@@ -780,20 +794,49 @@
     pointer-events: auto;
   }
 
-  .empty {
-    padding: var(--s-5);
-    border: 1px solid var(--hairline);
-    border-radius: var(--r-lg);
-    background: var(--paper-raised);
-    box-shadow: var(--shadow-puff);
+  .quiet-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s-2);
+    margin-top: var(--s-3);
+    color: var(--ink-2);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
   }
 
-  .empty h2 {
-    font-size: var(--t-display);
-    line-height: var(--lh-display);
+  .quiet-line {
+    width: 104px;
+    height: 10px;
+    overflow: visible;
   }
 
-  .empty p,
+  .quiet-empty .pen {
+    fill: none;
+    stroke: var(--pen);
+    stroke-width: var(--pen-width);
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .quiet-empty .draw {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    animation: draw-quiet var(--dur-draw) var(--ease-draw) both;
+  }
+
+  @keyframes draw-quiet {
+    from {
+      stroke-dashoffset: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .quiet-empty .draw {
+      animation: none;
+    }
+  }
+
   .muted {
     margin-top: var(--s-2);
     color: var(--ink-2);

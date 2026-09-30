@@ -269,6 +269,7 @@
     cardEl.style.height = "";
     cardEl.style.transition = "";
     cardEl.style.overflow = "";
+    cardEl.style.opacity = "";
   }
 
   function lockHeight(): number {
@@ -281,37 +282,94 @@
     return from;
   }
 
-  /** Intrinsic height after the content swap. A locked height makes scrollHeight lie. */
-  function measureUnlocked(): number {
+  /**
+   * Final paper/glass height. Measuring the live card catches padding mid-transition
+   * (68px) and the later clear snaps to 60.
+   */
+  function measureSettled(): number {
     if (!cardEl) {
       return 0;
     }
-    const locked = cardEl.style.height;
-    cardEl.style.height = "auto";
-    const next = cardEl.offsetHeight;
-    cardEl.style.height = locked;
+    const live = cardEl;
+    const clone = live.cloneNode(true);
+    if (!(clone instanceof HTMLElement) || !live.parentElement) {
+      return live.offsetHeight;
+    }
+    clone.style.transition = "none";
+    clone.style.animation = "none";
+    clone.style.height = "auto";
+    clone.style.width = `${live.offsetWidth}px`;
+    clone.style.position = "absolute";
+    clone.style.left = "0";
+    clone.style.top = "0";
+    clone.style.visibility = "hidden";
+    clone.style.pointerEvents = "none";
+    live.parentElement.appendChild(clone);
+    const next = clone.offsetHeight;
+    clone.remove();
     return next;
   }
 
-  function scheduleMorph(to: number, delay: number, duration: string): void {
-    window.clearTimeout(morphTimer);
-    const apply = () => {
-      if (!cardEl) {
-        return;
-      }
-      if (reducedMotion.current) {
-        clearMorph();
-        return;
-      }
-      cardEl.style.transition = `height ${duration} var(--ease-out)`;
-      cardEl.style.height = `${to}px`;
-      morphTimer = window.setTimeout(() => clearMorph(), 700);
-    };
-    if (delay <= 0) {
-      apply();
+  function finishMorph(to: number, tries = 0): void {
+    if (!cardEl) {
       return;
     }
-    morphTimer = window.setTimeout(apply, delay);
+    const node = cardEl;
+    const locked = node.style.height;
+    node.style.transition = "none";
+    node.style.height = "auto";
+    const settled = node.offsetHeight;
+    if (Math.abs(settled - to) <= 1 || tries >= 8) {
+      node.style.height = "";
+      node.style.overflow = "";
+      node.style.opacity = "";
+      void node.offsetHeight;
+      node.style.transition = "";
+      return;
+    }
+    node.style.height = locked || `${to}px`;
+    void node.offsetHeight;
+    node.style.transition = "";
+    morphTimer = window.setTimeout(() => finishMorph(to, tries + 1), 50);
+  }
+
+  function scheduleMorph(to: number): void {
+    window.clearTimeout(morphTimer);
+    if (!cardEl || to <= 0) {
+      clearMorph();
+      return;
+    }
+    const node = cardEl;
+    if (reducedMotion.current) {
+      // Rise fill owns opacity. Clear it so the receipt can fade in.
+      node.style.animation = "none";
+      node.style.transition = "none";
+      node.style.height = `${to}px`;
+      node.style.overflow = "";
+      node.style.opacity = "0";
+      void node.offsetHeight;
+      node.style.transition = "opacity 160ms linear";
+      node.style.opacity = "1";
+      morphTimer = window.setTimeout(() => finishMorph(to), 180);
+      return;
+    }
+    node.style.overflow = "hidden";
+    node.style.transition =
+      "height var(--dur-soft) var(--ease-out), background-color var(--dur-soft) var(--ease-in-out), box-shadow var(--dur-soft) var(--ease-in-out), border-radius var(--dur-soft) var(--ease-in-out), backdrop-filter var(--dur-soft) var(--ease-in-out)";
+    node.style.height = `${to}px`;
+    const done = (event: TransitionEvent) => {
+      if (event.target !== node || event.propertyName !== "height") {
+        return;
+      }
+      node.removeEventListener("transitionend", done);
+      window.clearTimeout(morphTimer);
+      finishMorph(to);
+    };
+    node.addEventListener("transitionend", done);
+    morphTimer = window.setTimeout(() => {
+      node.removeEventListener("transitionend", done);
+      finishMorph(to);
+    }, 480);
   }
 
   async function runDecide(decision: Decision, note?: string): Promise<boolean> {
@@ -334,8 +392,7 @@
     if (!cardEl) {
       return;
     }
-    const to = measureUnlocked();
-    scheduleMorph(to, reducedMotion.current ? 0 : 360, "var(--dur-stage)");
+    scheduleMorph(measureSettled());
   }
 
   async function onApproveClick(): Promise<void> {
@@ -524,7 +581,7 @@
     if (!cardEl) {
       return;
     }
-    scheduleMorph(measureUnlocked(), 0, "var(--dur-soft)");
+    scheduleMorph(measureSettled());
   }
 </script>
 
