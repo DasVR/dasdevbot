@@ -111,7 +111,6 @@ impl ClaudeCli {
     ) -> Result<Self, ProviderError> {
         let bin = resolve_executable(bin)?;
         let claude_home = require_claude_home(claude_home)?;
-        require_native_elf(&bin)?;
         warn_install_owner(&bin);
         let identity = file_identity(&bin)?;
         let (memfd, sha256) = snapshot_memfd(&bin)?;
@@ -484,12 +483,21 @@ fn snapshot_memfd(path: &Path) -> Result<(File, [u8; 32]), ProviderError> {
     let mut memfd = unsafe { File::from_raw_fd(raw) };
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
+    let mut checked_magic = false;
     loop {
         let read = source.read(&mut buf).map_err(|err| {
             ProviderError::Failed(format!("claude CLI could not be hashed ({})", err.kind()))
         })?;
         if read == 0 {
             break;
+        }
+        if !checked_magic {
+            if read < 4 || buf[..4] != *b"\x7fELF" {
+                return Err(ProviderError::Failed(
+                    "refusing a claude script target; only a native ELF binary is accepted".into(),
+                ));
+            }
+            checked_magic = true;
         }
         hasher.update(&buf[..read]);
         memfd.write_all(&buf[..read]).map_err(|err| {
@@ -498,6 +506,11 @@ fn snapshot_memfd(path: &Path) -> Result<(File, [u8; 32]), ProviderError> {
                 err.kind()
             ))
         })?;
+    }
+    if !checked_magic {
+        return Err(ProviderError::Failed(
+            "refusing a claude script target; only a native ELF binary is accepted".into(),
+        ));
     }
     memfd.seek(SeekFrom::Start(0)).map_err(|err| {
         ProviderError::Failed(format!(
@@ -527,22 +540,6 @@ fn snapshot_memfd(path: &Path) -> Result<(File, [u8; 32]), ProviderError> {
         ));
     }
     Ok((memfd, hasher.finalize().into()))
-}
-
-fn require_native_elf(path: &Path) -> Result<(), ProviderError> {
-    let mut file = File::open(path).map_err(|err| {
-        ProviderError::Failed(format!("claude CLI could not be read ({})", err.kind()))
-    })?;
-    let mut header = [0u8; 4];
-    let read = file.read(&mut header).map_err(|err| {
-        ProviderError::Failed(format!("claude CLI could not be read ({})", err.kind()))
-    })?;
-    if read >= 4 && header == *b"\x7fELF" {
-        return Ok(());
-    }
-    Err(ProviderError::Failed(
-        "refusing a claude script target; only a native ELF binary is accepted".into(),
-    ))
 }
 
 fn exec_path(memfd: &File) -> PathBuf {
@@ -1844,6 +1841,27 @@ mod tests {
         fs::write(&js, "console.log('2.1.285')\n").unwrap();
         let err = ClaudeCli::open(js, None, home, &[]).unwrap_err();
         assert!(err.to_string().contains("native ELF"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn elf_magic_is_checked_on_the_snapshotted_bytes() {
+        let dir =
+            std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let script = dir.join("claude");
+        fs::write(&script, "#!/bin/sh\necho 2.1.285\n").unwrap();
+        let err = snapshot_memfd(&script).unwrap_err();
+        assert!(err.to_string().contains("native ELF"), "{err}");
+        let empty = dir.join("empty");
+        fs::write(&empty, b"").unwrap();
+        let err = snapshot_memfd(&empty).unwrap_err();
+        assert!(err.to_string().contains("native ELF"), "{err}");
+        let elf = write_cli(&dir, "mode=ok\n");
+        let (mut memfd, _) = snapshot_memfd(&elf).unwrap();
+        let mut header = [0u8; 4];
+        memfd.read_exact(&mut header).unwrap();
+        assert_eq!(header, *b"\x7fELF");
         let _ = fs::remove_dir_all(&dir);
     }
 
