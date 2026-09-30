@@ -1,0 +1,53 @@
+{
+  "timezone": "America/New_York",
+  "viewport": "1280x800",
+  "deviceScaleFactor": 2,
+  "checks": [
+    {
+      "id": 1,
+      "result": "PASS",
+      "evidence": "rows ap_old → ap_mid → ap_new then ap_old → ap_mid → ap_new; label \"expires 1:52\" held as \"expires 1:52\"; Alt+Down ap_old → ap_mid → ap_new → ap_new"
+    },
+    {
+      "id": 2,
+      "result": "PASS",
+      "evidence": "before sheet armed; during sheet held/held since=cleared; arming since 5480 landed 5480 click 4895; still arming at +250ms; armed after 818ms; agent builder; switch 4917 focus 5470; active ap_new; gap -0.44px"
+    },
+    {
+      "id": 8,
+      "result": "PASS",
+      "evidence": "sheet destructive rows 0; thread \"11:40 AM Destructive actions are off in this build. git push --force origin phase0\"; waiting count 3"
+    },
+    {
+      "id": 9,
+      "result": "PASS",
+      "evidence": "dots 3 waiting 3 tray \"3\"; tray rgb(43, 39, 35) on rgba(0, 0, 0, 0); ink rgb(43, 39, 35); dot rgb(138, 90, 18)"
+    },
+    {
+      "id": 3,
+      "result": "PASS",
+      "evidence": "checkboxes/approve-all 0; pair ap_a → ap_b; next-line during undo 0; ap_b mounted during/after 0/0; receipt card ap_a"
+    },
+    {
+      "id": 4,
+      "result": "PASS",
+      "evidence": "sheet lines [\"Nothing is waiting on you.\"]; toast \"Nothing is waiting on you.\"; sheet after Alt+Down 0"
+    },
+    {
+      "id": 5,
+      "result": "PASS",
+      "evidence": "rows held ap_old → ap_mid → ap_new; \"Showing what was waiting at 11:52 AM. Your decisions are saved.\"; opacity 0.45; actions 0; alerts 0"
+    },
+    {
+      "id": 6,
+      "result": "PASS",
+      "evidence": "index held ap_exp → ap_keep → ap_exp → ap_keep; \"Expired · Reviewer will ask again on the next push.\"; ring rgb(125, 87, 25) 0px 0px 0px 1.5px inset; next open done ap_exp waiting ap_keep"
+    },
+    {
+      "id": 7,
+      "result": "PASS",
+      "evidence": "rows ap_h1 → ap_h2 then ap_h1 → ap_h2; hello off; alerts 0"
+    }
+  ],
+  "pageErrors": []
+}

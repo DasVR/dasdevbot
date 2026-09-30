@@ -133,6 +133,59 @@ function receiptSnapshot() {
   });
 }
 
+function queueSnapshot() {
+  const now = Date.now();
+  const oldest = approval("pending");
+  oldest.id = "ap_queue_old";
+  oldest.created_at = Date.UTC(2026, 8, 30, 15, 14);
+  oldest.expires_at = now + 111_200;
+  oldest.evidence.ref = "212";
+  const newer = approval("pending");
+  newer.id = "ap_queue_new";
+  newer.created_at = Date.UTC(2026, 8, 30, 15, 40);
+  newer.expires_at = now + 15 * 60 * 1000;
+  const destructive = approval("pending");
+  destructive.id = "ap_queue_dest";
+  destructive.effect_class = "destructive";
+  destructive.action = "force_push";
+  destructive.draft = "git push --force origin phase0";
+  destructive.created_at = Date.UTC(2026, 8, 30, 15, 20);
+  destructive.expires_at = now + 15 * 60 * 1000;
+  return snapshot({
+    status: "blocked",
+    approvals: [newer, destructive, oldest],
+    events: [
+      eventRow("ev_old", "approval.requested", "approval-requested:ap_queue_old", "1759240800000:0:node"),
+      eventRow("ev_new", "approval.requested", "approval-requested:ap_queue_new", "1759242000000:0:node"),
+      eventRow("ev_dest", "approval.requested", "approval-requested:ap_queue_dest", "1759241400000:0:node"),
+    ],
+    ledger: [ledgerLine()],
+  });
+}
+
+function nextWaitingSnapshot() {
+  const now = Date.now();
+  const decided = approval("approved");
+  decided.id = "ap_decided";
+  decided.committed = true;
+  decided.undo_until = null;
+  decided.decided_at = now - 10_000;
+  decided.created_at = now - 60_000;
+  const waiting = approval("pending");
+  waiting.id = "ap_still";
+  waiting.created_at = now - 30_000;
+  waiting.expires_at = now + 15 * 60 * 1000;
+  return snapshot({
+    status: "blocked",
+    approvals: [decided, waiting],
+    events: [
+      eventRow("ev_decided", "approval.requested", "approval-requested:ap_decided", "1759241000000:0:node"),
+      eventRow("ev_still", "approval.requested", "approval-requested:ap_still", "1759241600000:0:node"),
+    ],
+    ledger: [ledgerLine()],
+  });
+}
+
 function snapshot({ status, approvals, events, ledger }) {
   return {
     protocol: 1,
@@ -353,6 +406,36 @@ try {
       },
     ],
     ["receipt", receiptSnapshot(), async () => page.locator("article.card .receipt").waitFor()],
+    [
+      "queue",
+      queueSnapshot(),
+      async () => {
+        await page.getByRole("button", { name: /^Review / }).click();
+        await page.getByRole("heading", { name: "Review", exact: true }).waitFor();
+        await page.getByText(/^expires \d+:\d{2}$/).waitFor();
+        await page.getByText("Destructive actions are off in this build.").waitFor();
+      },
+    ],
+    [
+      "hello",
+      waitingSnapshot(),
+      async () => {
+        const card = page.locator("article.card");
+        await card.waitFor();
+        await card.focus();
+        await page.locator(".hold-hint.armed").waitFor({ timeout: 4000 });
+        // The card is position:fixed; a hit-tested click misses the button. The DOM click still runs the handler.
+        await page.locator("article.card button.approve").evaluate((button) => {
+          button.click();
+        });
+        await page.getByText("Confirm with Windows Hello").waitFor({ timeout: 4000 });
+      },
+    ],
+    [
+      "next-waiting",
+      nextWaitingSnapshot(),
+      async () => page.getByText("Next waiting · Alt↓").waitFor(),
+    ],
   ];
 
   const audits = [];

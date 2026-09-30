@@ -18,6 +18,7 @@
     type Decision,
   } from "./api";
   import { tokenEase, tokenMs } from "./cssTokens";
+  import type { WindowsHello } from "./hello";
   import {
     CHECK_PATH,
     CHEVRON_PATH,
@@ -49,6 +50,15 @@
     busy?: boolean;
     holdMs?: number;
     shortcutTarget?: boolean;
+    /** False while the sheet covers the card or it has not finished landing. */
+    seenEnabled?: boolean;
+    /** Daemon lost: the card stays, at 45%, with no actions. */
+    suspended?: boolean;
+    /** Set when a queue open finishes landing. The seen timer starts after this. */
+    landedAt?: number | null;
+    hello?: WindowsHello | null;
+    /** Quiet line after this receipt's undo window has closed. */
+    nextWaiting?: boolean;
     ondecide?: (decision: Decision, reason?: string) => Promise<boolean>;
     onundo?: () => Promise<boolean>;
   }
@@ -58,6 +68,11 @@
     busy = false,
     holdMs,
     shortcutTarget = false,
+    seenEnabled = true,
+    suspended = false,
+    landedAt = null,
+    hello = null,
+    nextWaiting = false,
     ondecide,
     onundo,
   }: Props = $props();
@@ -77,6 +92,10 @@
   let riseNoted = false;
   let arrow = $state<ArrowMark | null>(null);
   let seenArmed = $state(false);
+  let seenPhase = $state<"held" | "idle" | "arming" | "armed">("idle");
+  let seenSince = $state(0);
+  let helloOpen = $state(false);
+  let helloBusy = $state(false);
   let cardFocused = $state(false);
   let denyOpen = $state(false);
   let reason = $state("");
@@ -90,8 +109,11 @@
   let holdFrame = 0;
   let morphTimer = 0;
   let holdSealed = false;
+  let syncSeenGate = (): void => {};
 
-  const locked = $derived(busy || committing !== null);
+  const locked = $derived(busy || suspended || committing !== null || helloOpen);
+  const needsHello = $derived(hello != null && effect === "external");
+  const nextLine = "Next waiting · Alt↓";
   const duration = $derived(holdDurationMs(effect, holdMs));
   const showUndo = $derived(
     !pending &&
@@ -176,45 +198,73 @@
 
   function watchSeen(evidence: HTMLElement): () => void {
     const card = evidence.closest("article");
-    if (!card) {
-      return () => {};
-    }
     let cardFull = false;
     let evidenceVisible = false;
     let timer = 0;
-    const sync = () => {
+    const gate = { enabled: true, suspended: false };
+    const clearTimer = () => {
       window.clearTimeout(timer);
-      if (cardFull && evidenceVisible) {
-        timer = window.setTimeout(() => {
-          seenArmed = true;
-        }, SEEN_LOCK_MS);
-      } else {
-        seenArmed = false;
-      }
+      timer = 0;
     };
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const full = entry.intersectionRatio >= 0.99;
-          if (entry.target === card) {
-            cardFull = full;
-          }
-          if (entry.target === evidence) {
-            evidenceVisible = full;
-          }
+    // The 800ms dwell starts only when the card is fully on screen AND the
+    // parent has released the gate (sheet closed, landing scroll finished).
+    const sync = () => {
+      clearTimer();
+      if (!card || gate.suspended || !gate.enabled || !cardFull || !evidenceVisible) {
+        seenArmed = false;
+        seenSince = 0;
+        seenPhase = gate.suspended || !gate.enabled ? "held" : "idle";
+        return;
+      }
+      seenPhase = "arming";
+      seenSince = performance.now();
+      timer = window.setTimeout(() => {
+        if (gate.suspended || !gate.enabled || !cardFull || !evidenceVisible) {
+          return;
         }
-        sync();
-      },
-      { threshold: [0, 0.99, 1] },
-    );
-    observer.observe(card);
-    observer.observe(evidence);
+        seenArmed = true;
+        seenPhase = "armed";
+      }, SEEN_LOCK_MS);
+    };
+    let observer: IntersectionObserver | null = null;
+    if (card) {
+      observer = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            const full = entry.intersectionRatio >= 0.99;
+            if (entry.target === card) {
+              cardFull = full;
+            }
+            if (entry.target === evidence) {
+              evidenceVisible = full;
+            }
+          }
+          sync();
+        },
+        { threshold: [0, 0.99, 1] },
+      );
+      observer.observe(card);
+      observer.observe(evidence);
+    }
+    syncSeenGate = () => {
+      gate.enabled = seenEnabled;
+      gate.suspended = suspended;
+      sync();
+    };
+    syncSeenGate();
     return () => {
-      window.clearTimeout(timer);
-      observer.disconnect();
+      clearTimer();
+      observer?.disconnect();
+      syncSeenGate = () => {};
       seenArmed = false;
     };
   }
+
+  $effect(() => {
+    seenEnabled;
+    suspended;
+    syncSeenGate();
+  });
 
   function watchArrow(strip: HTMLElement): () => void {
     const card = strip.closest("article");
@@ -424,11 +474,47 @@
     scheduleMorph(measureSettled());
   }
 
-  async function onApproveClick(): Promise<void> {
-    if (locked || denyOpen || !pending) {
+  function cancelHello(): void {
+    helloOpen = false;
+    helloBusy = false;
+    committing = null;
+    checkOffset = 1;
+  }
+
+  async function confirmHello(): Promise<void> {
+    if (!hello || helloBusy) {
+      return;
+    }
+    helloBusy = true;
+    let ok = false;
+    try {
+      ok = await hello.confirm(approval.id);
+    } catch {
+      ok = false;
+    }
+    helloBusy = false;
+    helloOpen = false;
+    if (!ok) {
+      cancelHello();
       return;
     }
     committing = "approve";
+    await settleDecision("approve");
+  }
+
+  async function beginApprove(): Promise<void> {
+    if (needsHello) {
+      helloOpen = true;
+      return;
+    }
+    committing = "approve";
+    await settleDecision("approve");
+  }
+
+  async function onApproveClick(): Promise<void> {
+    if (locked || denyOpen || !pending || !seenArmed || suspended) {
+      return;
+    }
     const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
     await animateNumber(
       1,
@@ -443,7 +529,7 @@
       checkOffset = 0;
       await wait(tokenMs("--dur-base", 120));
     }
-    await settleDecision("approve");
+    await beginApprove();
   }
 
   async function confirmDeny(): Promise<void> {
@@ -519,8 +605,7 @@
     holdSealed = true;
     if (kind === "approve") {
       checkOffset = 0;
-      committing = "approve";
-      void settleDecision("approve");
+      void beginApprove();
       return;
     }
     strike = 1;
@@ -528,7 +613,7 @@
   }
 
   function startHold(kind: HoldKind): void {
-    if (locked || denyOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
+    if (locked || denyOpen || helloOpen || !pending || !seenArmed || suspended || document.activeElement !== cardEl) {
       return;
     }
     cancelAnimationFrame(holdFrame);
@@ -567,6 +652,9 @@
       return;
     }
     if (event.altKey && !event.metaKey && !event.ctrlKey && event.key === "ArrowDown" && shortcutTarget && pending) {
+      if (event.defaultPrevented) {
+        return;
+      }
       event.preventDefault();
       cardEl?.focus();
       return;
@@ -637,7 +725,14 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <article
   {@attach bindCard}
-  class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
+  class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise", suspended && "suspended"]}
+  data-approval-id={approval.id}
+  data-seen={pending ? seenPhase : undefined}
+  data-seen-since={pending && seenSince > 0 ? String(seenSince) : undefined}
+  data-landed-at={landedAt == null ? undefined : String(landedAt)}
+  data-hello={helloOpen ? "open" : "off"}
+  data-suspended={suspended ? "yes" : undefined}
+  data-next-waiting={!pending && nextWaiting && !showUndo ? "yes" : undefined}
   style:--arrow-delay={ARROW_DELAY}
   style:--arrow-head-draw={ARROW_HEAD_DRAW}
   style:--reduced-fade={REDUCED_FADE_EASE}
@@ -759,6 +854,15 @@
         </div>
       {/if}
 
+      {#if helloOpen && !suspended}
+        <p class="hello-line">Confirm with Windows Hello</p>
+        <div class="hello-actions">
+          <button class="text-btn" type="button" disabled={helloBusy} onclick={cancelHello}>Cancel</button>
+          <button class="text-btn" type="button" disabled={helloBusy} onclick={() => void confirmHello()}>
+            Confirm
+          </button>
+        </div>
+      {:else if !suspended}
       <div class="actions">
         {#if denyOpen}
           <button class="deny" type="button" disabled={locked} onclick={back}>Back</button>
@@ -791,10 +895,11 @@
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
         {/if}
       </div>
+      {/if}
 
       <div class="quiet">
         <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && !denyOpen}
+        {#if cardFocused && !denyOpen && !helloOpen && !suspended}
           {#snippet modifier()}
             <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
           {/snippet}
@@ -841,6 +946,9 @@
           {/if}
         </p>
         <p class="sub">{subline}</p>
+        {#if nextWaiting && !showUndo}
+          <p class="next-waiting">{nextLine}</p>
+        {/if}
       </div>
       {#if stamp || decisionShort}
         <p class="stamp">{stamp}{#if stamp && decisionShort}<br />{/if}{decisionShort}</p>
@@ -897,8 +1005,17 @@
     outline-offset: 2px;
   }
 
+  .card.suspended {
+    opacity: 0.45;
+    animation: none;
+  }
+
   .card.rise {
     animation: rise var(--dur-stage) var(--ease-out) backwards;
+  }
+
+  .card.suspended.rise {
+    animation: none;
   }
 
   @keyframes rise {
@@ -1431,10 +1548,48 @@
     color: var(--warning);
   }
 
-  .sub {
+  .sub,
+  .next-waiting,
+  .hello-line {
     color: var(--ink-3);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
+  }
+
+  .next-waiting,
+  .hello-line {
+    color: var(--ink-2);
+  }
+
+  .hello-line {
+    margin-top: var(--s-4);
+    text-align: center;
+  }
+
+  .hello-actions {
+    display: flex;
+    justify-content: center;
+    gap: var(--s-4);
+    margin-top: var(--s-3);
+  }
+
+  .text-btn {
+    height: auto;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    color: var(--ink-1);
+    font-size: var(--t-meta);
+    font-weight: var(--w-semibold);
+  }
+
+  .text-btn:hover:not(:disabled),
+  .text-btn:active:not(:disabled) {
+    transform: none;
+    box-shadow: none;
+    background: transparent;
   }
 
   .stamp {
