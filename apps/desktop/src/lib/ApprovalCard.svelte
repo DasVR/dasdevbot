@@ -1300,7 +1300,7 @@
   }
 
   .what b.approved {
-    color: var(--success);
+    color: var(--ink-1);
   }
 
   .what b.denied {

@@ -9,13 +9,33 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import net from "node:net";
 
 const require = createRequire(new URL("../apps/desktop/package.json", import.meta.url));
 const { chromium } = require("playwright");
 
 const desktop = fileURLToPath(new URL("../apps/desktop/", import.meta.url));
 const viteBin = fileURLToPath(new URL("../apps/desktop/node_modules/vite/bin/vite.js", import.meta.url));
-const port = Number(process.env.FONT_PROOF_PORT ?? 4173);
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("could not bind a local port"));
+        return;
+      }
+      const chosen = address.port;
+      server.close((err) => (err ? reject(err) : resolve(chosen)));
+    });
+  });
+}
+
+const port = process.env.FONT_PROOF_PORT ? Number(process.env.FONT_PROOF_PORT) : await freePort();
 const origin = `http://127.0.0.1:${port}`;
 
 const blockedHosts = ["fonts.googleapis.com", "fonts.gstatic.com", "cdn.jsdelivr.net", "fontsource.org"];
@@ -28,33 +48,47 @@ function launchBrowser() {
   return chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
 }
 
-function waitForPreview(child) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("vite preview did not start")), 30000);
-    const onData = (buf) => {
-      const text = buf.toString();
-      if (text.includes("Local:") || text.includes(origin)) {
-        clearTimeout(timer);
-        resolve();
-      }
-    };
-    child.stdout.on("data", onData);
-    child.stderr.on("data", onData);
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`vite preview exited ${code}`));
-    });
-  });
+function drain(stream) {
+  stream.on("data", () => {});
 }
 
-const preview = spawn(process.execPath, [viteBin, "preview", "--host", "127.0.0.1", "--port", String(port), "--strictPort"], {
-  cwd: desktop,
-  stdio: ["ignore", "pipe", "pipe"],
-});
+async function waitForHttp(url, child) {
+  const deadline = Date.now() + 30_000;
+  let exited = null;
+  child.on("exit", (code) => {
+    exited = code ?? 0;
+  });
+  while (Date.now() < deadline) {
+    if (exited !== null) {
+      throw new Error(`vite preview exited ${exited}`);
+    }
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(1000) });
+      if (response.status < 500) {
+        return;
+      }
+    } catch {
+      // Preview is not accepting connections yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`preview did not respond at ${url}`);
+}
+
+const preview = spawn(
+  process.execPath,
+  [viteBin, "preview", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+  {
+    cwd: desktop,
+    stdio: ["ignore", "pipe", "pipe"],
+  },
+);
+drain(preview.stdout);
+drain(preview.stderr);
 
 let browser;
 try {
-  await waitForPreview(preview);
+  await waitForHttp(origin, preview);
   browser = await launchBrowser();
   const page = await browser.newPage();
   const fontRequests = [];
