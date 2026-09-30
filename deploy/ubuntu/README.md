@@ -9,11 +9,31 @@ sudo useradd --system --create-home --home-dir /var/lib/dasdevbot --shell /usr/s
 sudo install -d -m 0700 -o dasdevbot -g dasdevbot /var/lib/dasdevbot
 ```
 
-The shell is `nologin`. `sudo -u dasdevbot -H` runs a command as that user and sets `HOME` to the passwd home, so the login does not need an interactive shell.
+The shell is `nologin`. `sudo -u dasdevbot -H` runs a command as that user and sets `HOME` to the passwd home, so the login does not need an interactive shell. The daemon allows this passwd home only because the uid is below 1000 and `pw_shell` is `nologin` or `false`. A login shell such as bash is refused.
 
-Install the Claude Code CLI on a root-owned path, for example `/usr/local/bin/claude`. A user-owned npm `cli.js` is refused unless its interpreter can be hashed as well, and the daemon warns when the resolved binary or a parent directory is not root-owned, or when a parent directory is group or world writable.
+## Native Claude Code binary
 
-`--claude-home` must be mode `0700` and owned by the daemon uid. A normal user's home and `$HOME` are refused. A system account (uid below 1000) may use its own passwd home, which is this directory.
+Install the official native build, not npm. The native installer produces one ELF. An npm `cli.js` is a script and the daemon refuses it.
+
+The current install docs (https://code.claude.com/docs/en/setup) accept a version on the native installer. `minimumVersion` is only a floor. Pin the exact build, then copy that ELF to a root-owned path. The installer keeps its launcher at `~/.local/bin/claude`, a symlink into `~/.local/share/claude/versions/`. Do not point the daemon at that user-owned path.
+
+```sh
+curl -fsSL https://claude.ai/install.sh | bash -s 2.1.285
+sudo install -m 0755 -o root -g root \
+  "$(readlink -f "$HOME/.local/bin/claude")" /usr/local/bin/claude
+```
+
+`/opt/claude/claude` is the same kind of root-owned path. The daemon warns when the resolved binary or a parent directory is not root-owned, or when a parent directory is group or world writable.
+
+Native installs auto-update unless that is turned off. Official docs: `DISABLE_AUTOUPDATER=1` stops only the background check, and `claude update` / `claude install` still run. `DISABLE_UPDATES=1` blocks those paths as well. The daemon sets both in the CLI's environment. Do not treat `minimumVersion` as a pin.
+
+Compute the digest the service requires and substitute it in `dasdevbotd.service`:
+
+```sh
+sha256sum /usr/local/bin/claude
+```
+
+`--claude-home` must be mode `0700` and owned by the daemon uid. A normal user's home and `$HOME` are refused.
 
 ## One-time Claude login
 
@@ -31,7 +51,7 @@ Do not copy `~/.claude` from a personal account into that home.
 
 `--setting-sources` stays `project,local`. The Claude Code CLI documents that flag as a comma-separated list of `user`, `project`, and `local` only. There is no empty or `none` value, and an empty string was reported broken from CLI 2.1.59 onward. The pin is 2.1.285, so `user` is omitted and `project,local` remains. The private cwd keeps project and local files from being read out of `/tmp`.
 
-Record the binary's SHA-256 and pass it with `--claude-sha256` once the live install is known. A later change to those bytes fails closed. The digest recorded at startup is never replaced.
+`serve` on the server role requires `--claude-sha256`. A digest that does not match the native ELF fails closed. The digest recorded at startup is never replaced.
 
 ```sh
 sudo install -m 644 deploy/ubuntu/dasdevbotd.service /etc/systemd/system/dasdevbotd.service

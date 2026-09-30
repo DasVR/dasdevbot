@@ -7,7 +7,8 @@ Type=simple
 User=dasdevbot
 Group=dasdevbot
 Environment=HOME=/var/lib/dasdevbot
-ExecStart=/usr/local/bin/dasdevbotd serve --provider claude-cli --claude-home /var/lib/dasdevbot --data /var/lib/dasdevbot/dasdevbot.sqlite
+# Replace the digest with the output of: sha256sum /usr/local/bin/claude
+ExecStart=/usr/local/bin/dasdevbotd serve --provider claude-cli --claude-home /var/lib/dasdevbot --claude-sha256 0000000000000000000000000000000000000000000000000000000000000000 --data /var/lib/dasdevbot/dasdevbot.sqlite
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

@@ -111,41 +111,27 @@ impl ClaudeCli {
     ) -> Result<Self, ProviderError> {
         let bin = resolve_executable(bin)?;
         let claude_home = require_claude_home(claude_home)?;
-        let targets = hashed_targets(&bin)?;
+        require_native_elf(&bin)?;
         warn_install_owner(&bin);
-        let mut files = Vec::new();
-        let mut memfd = None;
-        for (index, path) in targets.iter().enumerate() {
-            let identity = file_identity(path)?;
-            let (snapshot, sha256) = if index == 0 {
-                let (file, sha256) = snapshot_memfd(path)?;
-                (Some(file), sha256)
-            } else {
-                (None, sha256_file(path)?)
-            };
-            if let Some(expected) = expected_sha256.get(index) {
-                if expected != &sha256 {
-                    return Err(ProviderError::Failed(
-                        "claude CLI sha256 does not match claude_sha256".into(),
-                    ));
-                }
+        let identity = file_identity(&bin)?;
+        let (memfd, sha256) = snapshot_memfd(&bin)?;
+        if let Some(expected) = expected_sha256.first() {
+            if expected != &sha256 {
+                return Err(ProviderError::Failed(
+                    "claude CLI sha256 does not match claude_sha256".into(),
+                ));
             }
-            if index == 0 {
-                memfd = snapshot;
-            }
-            files.push(HashedFile {
-                path: path.clone(),
-                identity,
-                sha256,
-            });
         }
-        if expected_sha256.len() > files.len() {
+        if expected_sha256.len() > 1 {
             return Err(ProviderError::Failed(
                 "claude_sha256 has more digests than the resolved binary".into(),
             ));
         }
-        let memfd = memfd
-            .ok_or_else(|| ProviderError::Failed("claude CLI could not be snapshotted".into()))?;
+        let files = vec![HashedFile {
+            path: bin.clone(),
+            identity,
+            sha256,
+        }];
         ensure_version(&exec_path(&memfd), &claude_home)?;
         Ok(Self {
             checked: Mutex::new(PinStamp { files }),
@@ -355,22 +341,45 @@ fn require_claude_home(path: PathBuf) -> Result<PathBuf, ProviderError> {
     Ok(canonical)
 }
 
-/// A normal user's home and `$HOME` are refused. A system account (uid below 1000)
-/// may use its own passwd home: that is the dedicated `dasdevbot` login directory.
+/// A normal user's home and `$HOME` are refused. A system account may use its own
+/// passwd home only when its uid is below 1000 and `pw_shell` is `nologin` or `false`.
 fn personal_home_rejected(canonical: &Path) -> bool {
     let euid = unsafe { libc::geteuid() };
     let ruid = unsafe { libc::getuid() };
-    let own = passwd_home(euid).and_then(|path| fs::canonicalize(path).ok());
-    let real = passwd_home(ruid).and_then(|path| fs::canonicalize(path).ok());
+    let own = passwd_account(euid);
+    let real = passwd_account(ruid);
+    let own_home = own
+        .as_ref()
+        .and_then(|account| fs::canonicalize(&account.home).ok());
+    let real_home = real
+        .as_ref()
+        .and_then(|account| fs::canonicalize(&account.home).ok());
     let env = std::env::var_os("HOME").and_then(|path| fs::canonicalize(path).ok());
-    let is_own = own.as_deref() == Some(canonical);
-    if is_own && ruid == euid && euid < 1000 {
+    let is_own = own_home.as_deref() == Some(canonical);
+    let shell = own.as_ref().map(|account| account.shell.as_str());
+    if is_own && service_home_exception(euid, ruid, shell) {
         return false;
     }
-    is_own || real.as_deref() == Some(canonical) || env.as_deref() == Some(canonical)
+    is_own || real_home.as_deref() == Some(canonical) || env.as_deref() == Some(canonical)
 }
 
-fn passwd_home(uid: u32) -> Option<PathBuf> {
+fn service_home_exception(euid: u32, ruid: u32, shell: Option<&str>) -> bool {
+    ruid == euid && euid < 1000 && shell.is_some_and(shell_is_nologin_or_false)
+}
+
+fn shell_is_nologin_or_false(shell: &str) -> bool {
+    match Path::new(shell).file_name().and_then(|name| name.to_str()) {
+        Some("nologin" | "false") => true,
+        Some(_) | None => false,
+    }
+}
+
+struct PasswdAccount {
+    home: PathBuf,
+    shell: String,
+}
+
+fn passwd_account(uid: u32) -> Option<PasswdAccount> {
     let mut pwd = unsafe { std::mem::zeroed::<libc::passwd>() };
     let mut buf = vec![0u8; 16 * 1024];
     let mut result = std::ptr::null_mut();
@@ -386,8 +395,15 @@ fn passwd_home(uid: u32) -> Option<PathBuf> {
     if rc != 0 || result.is_null() {
         return None;
     }
-    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
-    dir.to_str().ok().map(PathBuf::from)
+    let home = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) }
+        .to_str()
+        .ok()
+        .map(PathBuf::from)?;
+    let shell = unsafe { std::ffi::CStr::from_ptr(pwd.pw_shell) }
+        .to_str()
+        .ok()?
+        .to_string();
+    Some(PasswdAccount { home, shell })
 }
 
 fn warn_install_owner(path: &Path) {
@@ -502,107 +518,35 @@ fn snapshot_memfd(path: &Path) -> Result<(File, [u8; 32]), ProviderError> {
             "claude CLI snapshot could not be sealed".into(),
         ));
     }
+    // CLOEXEC stays set. exec of /proc/self/fd/N loads the ELF, then the kernel
+    // closes this fd, so the CLI and its descendants do not inherit the snapshot.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
         return Err(ProviderError::Failed(
-            "claude CLI snapshot could not be kept for exec".into(),
+            "claude CLI snapshot could not be marked close-on-exec".into(),
         ));
     }
     Ok((memfd, hasher.finalize().into()))
 }
 
-fn exec_path(memfd: &File) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}", memfd.as_raw_fd()))
-}
-
-fn hashed_targets(bin: &Path) -> Result<Vec<PathBuf>, ProviderError> {
-    let mut targets = vec![bin.to_path_buf()];
-    let mut current = bin.to_path_buf();
-    for _ in 0..4 {
-        match script_interpreter(&current)? {
-            Some(next) => {
-                if targets.iter().any(|path| path == &next) {
-                    return Err(ProviderError::Failed(
-                        "refusing a claude script target whose interpreter loops".into(),
-                    ));
-                }
-                targets.push(next.clone());
-                current = next;
-            }
-            None => return Ok(targets),
-        }
-    }
-    Err(ProviderError::Failed(
-        "refusing a claude script target whose interpreter could not be hashed".into(),
-    ))
-}
-
-fn script_interpreter(path: &Path) -> Result<Option<PathBuf>, ProviderError> {
+fn require_native_elf(path: &Path) -> Result<(), ProviderError> {
     let mut file = File::open(path).map_err(|err| {
         ProviderError::Failed(format!("claude CLI could not be read ({})", err.kind()))
     })?;
-    let mut header = [0u8; 256];
+    let mut header = [0u8; 4];
     let read = file.read(&mut header).map_err(|err| {
         ProviderError::Failed(format!("claude CLI could not be read ({})", err.kind()))
     })?;
-    if read >= 4 && &header[..4] == b"\x7fELF" {
-        return Ok(None);
-    }
-    if read < 2 || &header[..2] != b"#!" {
-        if path
-            .extension()
-            .is_some_and(|ext| ext == "js" || ext == "mjs" || ext == "cjs")
-        {
-            return Err(ProviderError::Failed(
-                "refusing a claude script target whose interpreter could not be hashed".into(),
-            ));
-        }
-        return Ok(None);
-    }
-    let text = String::from_utf8_lossy(&header[..read]);
-    let line = text.lines().next().unwrap_or("").trim();
-    let rest = line.trim_start_matches("#!").trim();
-    let mut parts = rest.split_whitespace();
-    let first = parts.next().ok_or_else(|| {
-        ProviderError::Failed(
-            "refusing a claude script target whose interpreter could not be hashed".into(),
-        )
-    })?;
-    if first == "/usr/bin/env" || first.ends_with("/env") {
-        let program = parts.next().ok_or_else(|| {
-            ProviderError::Failed(
-                "refusing a claude script target whose interpreter could not be hashed".into(),
-            )
-        })?;
-        return Ok(Some(resolve_on_child_path(program)?));
-    }
-    let interpreter = PathBuf::from(first);
-    if !interpreter.is_file() {
-        return Err(ProviderError::Failed(
-            "refusing a claude script target whose interpreter could not be hashed".into(),
-        ));
-    }
-    fs::canonicalize(&interpreter).map(Some).map_err(|_| {
-        ProviderError::Failed(
-            "refusing a claude script target whose interpreter could not be hashed".into(),
-        )
-    })
-}
-
-fn resolve_on_child_path(name: &str) -> Result<PathBuf, ProviderError> {
-    for dir in CLAUDE_CHILD_PATH.split(':') {
-        let full = Path::new(dir).join(name);
-        if full.is_file() {
-            return fs::canonicalize(&full).map_err(|_| {
-                ProviderError::Failed(
-                    "refusing a claude script target whose interpreter could not be hashed".into(),
-                )
-            });
-        }
+    if read >= 4 && header == *b"\x7fELF" {
+        return Ok(());
     }
     Err(ProviderError::Failed(
-        "refusing a claude script target whose interpreter could not be hashed".into(),
+        "refusing a claude script target; only a native ELF binary is accepted".into(),
     ))
+}
+
+fn exec_path(memfd: &File) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", memfd.as_raw_fd()))
 }
 
 fn version_output(bin: &Path, claude_home: &Path) -> Result<Output, ProviderError> {
@@ -614,6 +558,17 @@ fn version_output(bin: &Path, claude_home: &Path) -> Result<Output, ProviderErro
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        // pre_exec forces fork. The snapshot fd is inherited across the fork and
+        // closed on exec because it is CLOEXEC, including in any descendant.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
         for (key, value) in child_env(claude_home) {
             cmd.env(key, value);
         }
@@ -1102,8 +1057,8 @@ fn parse_rate_event(value: &Value) -> Option<RateObservation> {
     })
 }
 
-/// Hex SHA-256 digests, one per resolved file, in path order. A single digest
-/// applies to the `claude` path. Further digests apply to shebang interpreters.
+/// Hex SHA-256 of the native Claude ELF. One digest is accepted. A second digest
+/// fails because a script interpreter is not part of the pin.
 pub fn parse_sha256_list(text: &str) -> Result<Vec<[u8; 32]>, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -1165,11 +1120,35 @@ mod tests {
     use crate::provider::{start_log, take_log};
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Stdio};
+    use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
-    fn write_cli(dir: &Path, body: &str) -> PathBuf {
+    fn fake_claude_elf() -> &'static Path {
+        static ELF: OnceLock<PathBuf> = OnceLock::new();
+        ELF.get_or_init(|| {
+            let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fake_claude.c");
+            let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fake-claude");
+            let status = Command::new("cc")
+                .args(["-O2", "-o"])
+                .arg(&out)
+                .arg(&src)
+                .status()
+                .expect("cc");
+            assert!(status.success(), "fake claude failed to compile");
+            out
+        })
+        .as_path()
+    }
+
+    fn write_cli(dir: &Path, config: &str) -> PathBuf {
         let bin = dir.join("claude");
-        fs::write(&bin, body).unwrap();
+        let mut bytes = fs::read(fake_claude_elf()).unwrap();
+        bytes.extend_from_slice(b"\nDASDEVBOT_FAKE_CFG\n");
+        bytes.extend_from_slice(config.as_bytes());
+        if !config.ends_with('\n') {
+            bytes.push(b'\n');
+        }
+        fs::write(&bin, &bytes).unwrap();
         let mut perms = fs::metadata(&bin).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&bin, perms).unwrap();
@@ -1460,13 +1439,7 @@ mod tests {
             std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         let ran = dir.join("ran");
-        let bin = write_cli(
-            &dir,
-            &format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"9.9.9\"; exit 0; fi\ntouch '{}'\n",
-                ran.display()
-            ),
-        );
+        let bin = write_cli(&dir, &format!("mode=bad_version\nran={}\n", ran.display()));
         let home = dir.join("claude-home");
         private_home(&home);
         let err = ClaudeCli::open(bin.clone(), None, home, &[]).unwrap_err();
@@ -1521,41 +1494,17 @@ mod tests {
         let cwd_file = dir.join("cwd");
         let prompt_copy = dir.join("prompt-copy");
         let mode_file = dir.join("mode");
-        let script = format!(
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "2.1.285 (Claude Code)"
-  exit 0
-fi
-cat >/dev/null
-if [ "$DISABLE_AUTOUPDATER" != "1" ] || [ "$DISABLE_UPDATES" != "1" ] || [ "$PATH" != "/usr/bin:/bin" ]; then
-  touch "{executed}"
-  exit 2
-fi
-if [ -n "$OLLAMA_API_KEY" ] || [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$DASDEVBOT_TOKEN" ] || [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-  touch "{executed}"
-  exit 2
-fi
-prompt=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--system-prompt-file" ]; then prompt="$arg"; fi
-  prev="$arg"
-done
-printf '%s\0' "$@" > "{argv}"
-pwd > "{cwd}"
-stat -c '%a %u' . > "{mode}"
-cp "$prompt" "{prompt_copy}"
-printf '%s\n' '{{"type":"rate_limit_event","rate_limit_info":{{"status":"allowed","resetsAt":1700000000,"utilization":0.1}}}}'
-printf '%s\n' '{{"type":"result","result":"ok","usage":{{"input_tokens":2,"output_tokens":1}}}}'
-"#,
-            executed = executed.display(),
-            argv = argv_file.display(),
-            cwd = cwd_file.display(),
-            mode = mode_file.display(),
-            prompt_copy = prompt_copy.display(),
+        let leak = dir.join("memfd-leaked");
+        let config = format!(
+            "mode=argv\nexecuted={}\nargv={}\ncwd={}\nmode_file={}\nprompt_copy={}\nleak={}\n",
+            executed.display(),
+            argv_file.display(),
+            cwd_file.display(),
+            mode_file.display(),
+            prompt_copy.display(),
+            leak.display(),
         );
-        let bin = write_cli(&dir, &script);
+        let bin = write_cli(&dir, &config);
         let cli = open_at(&dir, bin);
         let resolved = cli.checked.lock().expect("stamp").files[0].path.clone();
         assert!(resolved.is_absolute());
@@ -1602,6 +1551,7 @@ printf '%s\n' '{{"type":"result","result":"ok","usage":{{"input_tokens":2,"outpu
         assert!(logs
             .iter()
             .all(|line| !line.contains("Reply with the single word ok.")));
+        assert!(!leak.exists(), "snapshot fd was inherited");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1612,28 +1562,12 @@ printf '%s\n' '{{"type":"result","result":"ok","usage":{{"input_tokens":2,"outpu
         fs::create_dir(&dir).unwrap();
         let pidfile = dir.join("grandchild.pid");
         let survived = dir.join("survived");
-        let script = format!(
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "2.1.285 (Claude Code)"
-  exit 0
-fi
-sh -c 'echo $$ > "{pidfile}"; sleep 30; touch "{survived}"' &
-i=0
-while [ ! -s "{pidfile}" ]; do
-  i=$((i + 1))
-  if [ "$i" -gt 100 ]; then
-    exit 3
-  fi
-  sleep 0.05
-done
-printf '%s\n' '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"SENTINEL_TOOL_BODY"}}}}]}}}}'
-wait
-"#,
-            pidfile = pidfile.display(),
-            survived = survived.display(),
+        let config = format!(
+            "mode=grandchild\npidfile={}\nsurvived={}\n",
+            pidfile.display(),
+            survived.display(),
         );
-        let bin = write_cli(&dir, &script);
+        let bin = write_cli(&dir, &config);
         let cli = open_at(&dir, bin);
         start_log();
         let started = Instant::now();
@@ -1674,8 +1608,8 @@ wait
         let _ = fs::remove_dir_all(&dir);
     }
 
-    fn ok_script() -> &'static str {
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"2.1.285 (Claude Code)\"; exit 0; fi\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n"
+    fn ok_config(leak: &Path) -> String {
+        format!("mode=ok\nleak={}\n", leak.display())
     }
 
     fn sample_request(user: &str) -> CompletionRequest {
@@ -1693,16 +1627,10 @@ wait
             std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         let ran = dir.join("ran");
-        let bin = write_cli(&dir, ok_script());
+        let bin = write_cli(&dir, &ok_config(&dir.join("memfd-leaked")));
         let cli = open_at(&dir, bin.clone());
         let digest = cli.checked.lock().expect("stamp").files[0].sha256;
-        write_cli(
-            &dir,
-            &format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"9.9.9\"; exit 0; fi\ntouch '{}'\n",
-                ran.display()
-            ),
-        );
+        write_cli(&dir, &format!("mode=bad_version\nran={}\n", ran.display()));
         set_mtime(&bin, 1_700_000_000);
         let err = cli
             .complete(&sample_request("should not run"), &mut no_charge)
@@ -1730,7 +1658,8 @@ wait
         let dir =
             std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
-        let bin = write_cli(&dir, ok_script());
+        let leak = dir.join("memfd-leaked");
+        let bin = write_cli(&dir, &ok_config(&leak));
         let cli = open_at(&dir, bin.clone());
         let digest = cli.checked.lock().expect("stamp").files[0].sha256;
         set_mtime(&bin, 1_700_000_000);
@@ -1741,6 +1670,7 @@ wait
             )
             .unwrap();
         assert_eq!(completion.text, "ok");
+        assert!(!leak.exists(), "snapshot fd was inherited");
         assert_eq!(cli.checked.lock().expect("stamp").files[0].sha256, digest);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1752,7 +1682,7 @@ wait
         fs::create_dir(&dir).unwrap();
         let home = dir.join("claude-home");
         private_home(&home);
-        let bin = write_cli(&dir, ok_script());
+        let bin = write_cli(&dir, "mode=ok\n");
         let err = ClaudeCli::open(bin.clone(), None, home.clone(), &[[0x11; 32]]).unwrap_err();
         assert!(
             err.to_string().contains("does not match claude_sha256"),
@@ -1761,11 +1691,7 @@ wait
         let digest = sha256_file(&bin).unwrap();
         let cli = ClaudeCli::open(bin.clone(), None, home.clone(), &[digest]).unwrap();
         assert_eq!(cli.checked.lock().expect("stamp").files[0].sha256, digest);
-        let targets = hashed_targets(&fs::canonicalize(&bin).unwrap()).unwrap();
-        assert!(targets.len() >= 2, "{targets:?}");
-        let interpreter = sha256_file(&targets[1]).unwrap();
-        ClaudeCli::open(bin.clone(), None, home.clone(), &[digest, interpreter]).unwrap();
-        let err = ClaudeCli::open(bin, None, home, &[digest, interpreter, digest]).unwrap_err();
+        let err = ClaudeCli::open(bin, None, home, &[digest, digest]).unwrap_err();
         assert!(
             err.to_string()
                 .contains("more digests than the resolved binary"),
@@ -1785,7 +1711,7 @@ wait
         let dir =
             std::env::temp_dir().join(format!("dasdevbot-claude-owner-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
-        let bin = write_cli(&dir, "#!/bin/sh\necho 2.1.285\n");
+        let bin = write_cli(&dir, "mode=ok\n");
         start_log();
         warn_install_owner(&bin);
         let logs = take_log();
@@ -1838,37 +1764,14 @@ wait
         let cwd_file = state.join("cwd");
         let mode_file = state.join("mode");
         let prompt_copy = state.join("prompt-copy");
-        let script = format!(
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "2.1.285 (Claude Code)"
-  exit 0
-fi
-cat >/dev/null
-prompt=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--system-prompt-file" ]; then prompt="$arg"; fi
-  prev="$arg"
-done
-pwd > "{cwd}"
-stat -c '%a %u' . > "{mode}"
-cp "$prompt" "{prompt_copy}"
-dir=$(pwd)
-while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-  if [ -f "$dir/CLAUDE.md" ]; then
-    touch "{found}"
-  fi
-  dir=$(dirname "$dir")
-done
-printf '%s\n' '{{"type":"result","result":"ok","usage":{{"input_tokens":1,"output_tokens":1}}}}'
-"#,
-            cwd = cwd_file.display(),
-            mode = mode_file.display(),
-            prompt_copy = prompt_copy.display(),
-            found = found_file.display(),
+        let config = format!(
+            "mode=cwd\ncwd={}\nmode_file={}\nprompt_copy={}\nfound={}\n",
+            cwd_file.display(),
+            mode_file.display(),
+            prompt_copy.display(),
+            found_file.display(),
         );
-        let bin = write_cli(&state, &script);
+        let bin = write_cli(&state, &config);
         let cli = ClaudeCli::open(bin, None, home, &[]).unwrap();
         let completion = cli
             .complete(
@@ -1927,20 +1830,44 @@ printf '%s\n' '{{"type":"result","result":"ok","usage":{{"input_tokens":1,"outpu
     }
 
     #[test]
-    fn a_script_without_a_hashable_interpreter_is_refused() {
+    fn a_script_target_is_refused() {
         let dir =
             std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         let home = dir.join("claude-home");
         private_home(&home);
-        let bin = write_cli(&dir, "#!/no/such/claude-interpreter\necho 2.1.285\n");
+        let bin = dir.join("claude");
+        fs::write(&bin, "#!/bin/sh\necho 2.1.285\n").unwrap();
         let err = ClaudeCli::open(bin, None, home.clone(), &[]).unwrap_err();
-        assert!(err.to_string().contains("interpreter"), "{err}");
+        assert!(err.to_string().contains("native ELF"), "{err}");
         let js = dir.join("cli.js");
         fs::write(&js, "console.log('2.1.285')\n").unwrap();
         let err = ClaudeCli::open(js, None, home, &[]).unwrap_err();
-        assert!(err.to_string().contains("interpreter"), "{err}");
+        assert!(err.to_string().contains("native ELF"), "{err}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn service_home_exception_requires_a_nologin_shell() {
+        assert!(service_home_exception(42, 42, Some("/usr/sbin/nologin")));
+        assert!(service_home_exception(42, 42, Some("/bin/false")));
+        assert!(service_home_exception(42, 42, Some("nologin")));
+        assert!(!service_home_exception(42, 42, Some("/bin/bash")));
+        assert!(!service_home_exception(
+            42,
+            42,
+            Some("/usr/sbin/nologin.sh")
+        ));
+        assert!(!service_home_exception(
+            1000,
+            1000,
+            Some("/usr/sbin/nologin")
+        ));
+        assert!(!service_home_exception(42, 0, Some("/usr/sbin/nologin")));
+        assert!(!service_home_exception(42, 42, None));
+        assert!(shell_is_nologin_or_false("/sbin/nologin"));
+        assert!(shell_is_nologin_or_false("/usr/bin/false"));
+        assert!(!shell_is_nologin_or_false("/bin/sh"));
     }
 
     #[test]
@@ -1960,42 +1887,10 @@ printf '%s\n' '{{"type":"result","result":"ok","usage":{{"input_tokens":1,"outpu
         )
         .unwrap();
         let home_record = dir.join("child-home");
-        let script = format!(
-            r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "2.1.285 (Claude Code)"
-  exit 0
-fi
-printf '%s\n' "$HOME" > "{home_record}"
-sources=""
-settings=""
-prev=""
-for arg in "$@"; do
-  if [ "$prev" = "--setting-sources" ]; then sources="$arg"; fi
-  if [ "$prev" = "--settings" ]; then settings="$arg"; fi
-  prev="$arg"
-done
-user_on=1
-if [ -n "$sources" ]; then
-  user_on=0
-  case ",$sources," in
-    *,user,*) user_on=1 ;;
-  esac
-fi
-hooks_off=0
-case "$settings" in
-  *disableAllHooks*) hooks_off=1 ;;
-esac
-if [ "$user_on" = "1" ] && [ "$hooks_off" = "0" ] && [ -f "$HOME/.claude/settings.json" ]; then
-  marker=$(sed -n 's/.*touch \([^" ]*\).*/\1/p' "$HOME/.claude/settings.json" | head -n 1)
-  if [ -n "$marker" ]; then touch "$marker"; fi
-fi
-cat >/dev/null
-printf '%s\n' '{{"type":"result","result":"ok","usage":{{"input_tokens":1,"output_tokens":1}}}}'
-"#,
-            home_record = home_record.display()
+        let bin = write_cli(
+            &dir,
+            &format!("mode=hostile\nhome_record={}\n", home_record.display()),
         );
-        let bin = write_cli(&dir, &script);
         let fired = Command::new(&bin)
             .env_clear()
             .env("HOME", &hostile)

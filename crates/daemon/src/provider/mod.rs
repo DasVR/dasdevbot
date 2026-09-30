@@ -237,8 +237,15 @@ pub struct ProviderSettings {
     pub role: String,
     /// HOME for the Claude CLI. Required for `claude-cli`. The process home is not used.
     pub claude_home: Option<PathBuf>,
-    /// Optional SHA-256 digests for the resolved `claude` path and its interpreters.
+    /// SHA-256 of the native Claude ELF. Required for `serve` on the server role.
     pub claude_sha256: Vec<[u8; 32]>,
+}
+
+fn claude_sha256_required(settings: &ProviderSettings) -> bool {
+    settings.kind == ProviderKind::ClaudeCli
+        && settings.command == CommandKind::Serve
+        && settings.role == "server"
+        && settings.claude_sha256.is_empty()
 }
 
 pub fn open_provider(settings: &ProviderSettings) -> Result<Box<dyn LlmProvider>, ProviderError> {
@@ -278,6 +285,11 @@ pub fn open_with(
         }
         ProviderKind::OllamaLocal => Ok(Box::new(OllamaLocal::new(settings.model.clone()))),
         ProviderKind::ClaudeCli => {
+            if claude_sha256_required(settings) {
+                return Err(ProviderError::Failed(
+                    "claude_sha256 is required for the service role".into(),
+                ));
+            }
             let home = settings.claude_home.clone().ok_or_else(|| {
                 ProviderError::Failed(
                     "claude_home is required; refusing to load the process home".into(),
@@ -444,4 +456,37 @@ pub(crate) fn start_log() {
 #[cfg(test)]
 pub(crate) fn take_log() -> Vec<String> {
     LOG_CAPTURE.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_server_role_requires_claude_sha256_before_starting() {
+        let missing = ProviderSettings {
+            kind: ProviderKind::ClaudeCli,
+            model: None,
+            dev_env_secrets: false,
+            command: CommandKind::Serve,
+            role: "server".into(),
+            claude_home: Some(PathBuf::from("/var/lib/dasdevbot")),
+            claude_sha256: Vec::new(),
+        };
+        let opened = open_with(&missing, &KeyringHandle, &ProcessEnv);
+        let Err(err) = opened else {
+            panic!("server role started without claude_sha256");
+        };
+        assert!(
+            err.to_string().contains("claude_sha256 is required"),
+            "{err}"
+        );
+        let mut smoke = missing;
+        smoke.command = CommandKind::SmokeModel;
+        assert!(!claude_sha256_required(&smoke));
+        let mut device = smoke;
+        device.command = CommandKind::Serve;
+        device.role = "device".into();
+        assert!(!claude_sha256_required(&device));
+    }
 }

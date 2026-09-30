@@ -17,3 +17,6 @@ Security Director sign-off needs every item below to pass.
 7. The service starts under the hardened unit, with ProtectHome and PrivateTmp. The login works, and /var/lib/dasdevbot is mode 0700 and owned by dasdevbot.
 8. There's no auto-update: DISABLE_AUTOUPDATER and DISABLE_UPDATES are honored, and the binary hash is unchanged after 24 h.
 9. `smoke-model --provider claude-cli --claude-home /var/lib/dasdevbot` returns ok, and the prompt text never appears in `journalctl -u dasdevbotd`.
+10. memfd_create and exec via /proc/self/fd work under SystemCallFilter=@system-service, ProtectSystem=strict and PrivateDevices.
+11. The native claude 2.1.285 binary runs from the memfd, even though it may re-read itself through /proc/self/exe.
+12. A CLAUDE.md in {claude_home} or {claude_home}/claude-cwd isn't loaded, or Arriq accepts that it is. Either way, only dasdevbot and root can write there.
