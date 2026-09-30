@@ -119,7 +119,9 @@
       "result": "PASS",
       "evidence": [
         "first-run.mp4"
-      ]
+      ],
+      "duplicateFrames": 0,
+      "frames": 374
     },
     {
       "id": "motion-reduced",
@@ -127,7 +129,9 @@
       "result": "PASS",
       "evidence": [
         "first-run-reduced.mp4"
-      ]
+      ],
+      "duplicateFrames": 0,
+      "frames": 282
     }
   ]
 }

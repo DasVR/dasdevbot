@@ -1,11 +1,12 @@
 /**
  * First-run acceptance captures.
  * Stills are 1280x800 at 2x, TZ America/New_York, pointer parked off the rows.
- * Videos walk all four steps at 60fps with a millisecond clock in the corner.
+ * Videos walk all four steps at 60fps. Each frame is one virtual-time step of
+ * 16.667ms, then a screenshot, so the file is not a doubled 30fps screencast.
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
 
@@ -15,11 +16,12 @@ const { chromium } = require("playwright");
 const desktop = fileURLToPath(new URL("../apps/desktop/", import.meta.url));
 const viteBin = fileURLToPath(new URL("../apps/desktop/node_modules/vite/bin/vite.js", import.meta.url));
 const outDir = fileURLToPath(new URL("../docs/review/first-run/", import.meta.url));
+const FRAME_MS = 16.667;
 
 const checks = [];
 
-function record(id, name, pass, evidence) {
-  checks.push({ id, name, result: pass ? "PASS" : "FAIL", evidence });
+function record(id, name, pass, evidence, extra = {}) {
+  checks.push({ id, name, result: pass ? "PASS" : "FAIL", evidence, ...extra });
   console.log(`${pass ? "PASS" : "FAIL"}  ${id}  ${name}`);
 }
 
@@ -311,17 +313,12 @@ const preview = spawn(
 drain(preview.stdout);
 drain(preview.stderr);
 
-let xvfb = null;
-
 try {
   await waitForHttp(origin, preview);
   await captureStills(origin);
   await captureVideos(origin);
 } finally {
   preview.kill("SIGTERM");
-  if (xvfb) {
-    xvfb.kill("SIGTERM");
-  }
   await writeFile(`${outDir}/acceptance.json`, `${JSON.stringify({ checks }, null, 2)}\n`);
 }
 
@@ -860,26 +857,78 @@ async function captureStills(pageOrigin) {
 }
 
 async function captureVideos(pageOrigin) {
-  xvfb = spawn("Xvfb", [":99", "-screen", "0", "1600x1000x24", "-ac", "+extension", "RANDR"], {
-    stdio: "ignore",
-  });
-  process.env.DISPLAY = ":99";
-  await new Promise((resolve) => setTimeout(resolve, 400));
   await recordWalk(pageOrigin, false, `${outDir}/first-run.mp4`);
   await recordWalk(pageOrigin, true, `${outDir}/first-run-reduced.mp4`);
 }
 
+function budgetExpired(cdp) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("virtual time budget did not expire")), 10000);
+    cdp.once("Emulation.virtualTimeBudgetExpired", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function stepFrame(cdp, page, framesDir, index) {
+  const done = budgetExpired(cdp);
+  await cdp.send("Emulation.setVirtualTimePolicy", {
+    policy: "advance",
+    budget: FRAME_MS,
+    maxVirtualTimeTaskStarvationCount: 100,
+  });
+  await done;
+  await page.evaluate(() => {
+    let el = document.getElementById("proof-clock");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "proof-clock";
+      el.style.cssText = [
+        "position:fixed",
+        "top:8px",
+        "right:8px",
+        "z-index:40",
+        "padding:2px 6px",
+        "pointer-events:none",
+        "font:12px/16px 'JetBrains Mono', ui-monospace, monospace",
+        "color:#5A5249",
+        "background:#F6F2EB",
+      ].join(";");
+      document.body.appendChild(el);
+    }
+    el.textContent = `${Math.round(performance.now())} ms`;
+  });
+  const name = String(index).padStart(6, "0");
+  await page.screenshot({ path: `${framesDir}/${name}.png`, type: "png" });
+  return index + 1;
+}
+
+async function hold(cdp, page, framesDir, index, ms) {
+  const frames = Math.max(1, Math.round(ms / FRAME_MS));
+  for (let i = 0; i < frames; i += 1) {
+    index = await stepFrame(cdp, page, framesDir, index);
+  }
+  return index;
+}
+
+async function stepUntil(cdp, page, framesDir, index, predicate) {
+  for (let i = 0; i < 240; i += 1) {
+    index = await stepFrame(cdp, page, framesDir, index);
+    if (await predicate()) {
+      return index;
+    }
+  }
+  throw new Error("virtual clock timed out before the next step appeared");
+}
+
 async function recordWalk(pageOrigin, reduced, outFile) {
+  const framesDir = `/tmp/dasdevbot-frames-${reduced ? "reduced" : "full"}`;
+  await rm(framesDir, { recursive: true, force: true });
+  await mkdir(framesDir, { recursive: true });
   const browser = await launchBrowser({
-    headless: false,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--window-position=40,40",
-      "--window-size=1320,900",
-      "--disable-frame-rate-limit",
-    ],
+    headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
@@ -905,67 +954,45 @@ async function recordWalk(pageOrigin, reduced, outFile) {
   await page.getByRole("heading", { name: "dasdevbot runs a small helper on this machine." }).waitFor();
   await page.locator("[data-curl][data-drawn=yes]").waitFor();
   await park(page);
-  const box = await page.evaluate(() => ({
-    x: window.screenX + (window.outerWidth - window.innerWidth),
-    y: window.screenY + (window.outerHeight - window.innerHeight),
-  }));
-  const cropX = Math.max(0, Math.round(box.x));
-  const cropY = Math.max(0, Math.round(box.y));
-  const ffmpeg = spawn(
-    "ffmpeg",
-    [
-      "-y",
-      "-f",
-      "x11grab",
-      "-draw_mouse",
-      "1",
-      "-framerate",
-      "60",
-      "-video_size",
-      "1600x1000",
-      "-i",
-      ":99",
-      "-vf",
-      `crop=1280:800:${cropX}:${cropY}`,
-      "-an",
-      "-c:v",
-      "libx264",
-      "-pix_fmt",
-      "yuv420p",
-      "-r",
-      "60",
-      outFile,
-    ],
-    { stdio: ["pipe", "ignore", "pipe"] },
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
+  let frame = 0;
+  const visible = (locator) => locator.isVisible().catch(() => false);
+  frame = await hold(cdp, page, framesDir, frame, 600);
+  await page.getByRole("button", { name: "Start helper" }).click({ force: true });
+  frame = await stepUntil(cdp, page, framesDir, frame, () =>
+    visible(page.getByRole("heading", { name: "Connect GitHub." })),
   );
-  let ffmpegLog = "";
-  ffmpeg.stderr.on("data", (chunk) => {
-    ffmpegLog += chunk.toString();
-  });
-  await page.waitForTimeout(600);
-  await page.getByRole("button", { name: "Start helper" }).click();
-  await page.getByRole("heading", { name: "Connect GitHub." }).waitFor();
-  await page.waitForTimeout(500);
+  frame = await hold(cdp, page, framesDir, frame, 500);
   const popupPromise = context.waitForEvent("page");
-  await page.getByRole("button", { name: "Connect GitHub" }).click();
+  await page.getByRole("button", { name: "Connect GitHub" }).click({ force: true });
   const popup = await popupPromise;
-  await page.getByText("Finish in your browser. This window will continue on its own.").waitFor();
-  await page.waitForTimeout(700);
-  await popup.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("heading", { name: "Pick a repo." }).waitFor();
-  await page.waitForTimeout(400);
+  frame = await stepUntil(cdp, page, framesDir, frame, () =>
+    visible(page.getByText("Finish in your browser. This window will continue on its own.")),
+  );
+  frame = await hold(cdp, page, framesDir, frame, 700);
+  await popup.getByRole("heading", { name: "Finish in the browser" }).waitFor();
+  await popup.getByRole("button", { name: "Continue" }).click({ force: true });
+  frame = await stepUntil(cdp, page, framesDir, frame, () =>
+    visible(page.getByRole("heading", { name: "Pick a repo." })),
+  );
+  frame = await hold(cdp, page, framesDir, frame, 400);
   await page.locator("#repo-search").fill("dasdev");
-  await page.waitForTimeout(400);
-  await page.getByRole("radio", { name: /DasVR\/dasdevbot/ }).click();
+  frame = await hold(cdp, page, framesDir, frame, 400);
+  await page.getByRole("radio", { name: /DasVR\/dasdevbot/ }).click({ force: true });
   await park(page);
-  await page.waitForTimeout(300);
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("heading", { name: "Everyone asks before it acts." }).waitFor();
-  await page.waitForTimeout(800);
-  await page.getByRole("button", { name: "Start watching DasVR/dasdevbot" }).click();
-  await page.getByRole("heading", { name: "Nothing waiting on you" }).waitFor();
-  await page.getByText("Here", { exact: true }).waitFor();
-  await page.waitForTimeout(900);
+  frame = await hold(cdp, page, framesDir, frame, 300);
+  await page.getByRole("button", { name: "Continue" }).click({ force: true });
+  frame = await stepUntil(cdp, page, framesDir, frame, () =>
+    visible(page.getByRole("heading", { name: "Everyone asks before it acts." })),
+  );
+  frame = await hold(cdp, page, framesDir, frame, 800);
+  await page.getByRole("button", { name: "Start watching DasVR/dasdevbot" }).click({ force: true });
+  frame = await stepUntil(cdp, page, framesDir, frame, () =>
+    visible(page.getByRole("heading", { name: "Nothing waiting on you" })),
+  );
+  frame = await stepUntil(cdp, page, framesDir, frame, () => visible(page.getByText("Here", { exact: true })));
+  frame = await hold(cdp, page, framesDir, frame, 900);
   const motion = await page.locator("[data-empty-underline]").evaluate((node) => {
     const style = getComputedStyle(node);
     return {
@@ -981,33 +1008,86 @@ async function recordWalk(pageOrigin, reduced, outFile) {
       return value && value !== "none";
     });
   });
-  ffmpeg.kill("SIGINT");
-  await new Promise((resolve) => ffmpeg.on("exit", resolve));
-  const rate = await probeRate(outFile);
+  const encoded = await encodeFrames(framesDir, frame, outFile);
   const clock = await page.locator("#proof-clock").count();
+  const unique =
+    encoded.duplicates === 0 &&
+    encoded.frames === frame &&
+    encoded.hashedFrames === frame &&
+    encoded.rate === "60/1";
   if (reduced) {
     record(
       "motion-reduced",
       "Reduced-motion walk has no transforms and a drawn underline",
-      motion.name === "none" && motion.offset === "0px" && !transforms && rate === "60/1" && clock === 1,
+      motion.name === "none" && motion.offset === "0px" && !transforms && unique && clock === 1,
       ["first-run-reduced.mp4"],
+      { duplicateFrames: encoded.duplicates, frames: encoded.frames },
     );
   } else {
     record(
       "motion",
       "60fps walk of all four steps with a millisecond clock",
-      motion.iterations === "1" && rate === "60/1" && clock === 1,
+      motion.iterations === "1" && unique && clock === 1,
       ["first-run.mp4"],
+      { duplicateFrames: encoded.duplicates, frames: encoded.frames },
     );
   }
-  if (rate !== "60/1") {
-    console.error(ffmpegLog.slice(-2000));
-  }
+  console.log(
+    `${outFile} ${encoded.width}x${encoded.height} ${encoded.rate} frames ${encoded.frames} duplicate-frames ${encoded.duplicates}`,
+  );
   await browser.close();
+  await rm(framesDir, { recursive: true, force: true });
 }
 
-function probeRate(file) {
-  return new Promise((resolve) => {
+function encodeFrames(framesDir, count, outFile) {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn(
+      "ffmpeg",
+      [
+        "-y",
+        "-framerate",
+        "60",
+        "-start_number",
+        "0",
+        "-i",
+        `${framesDir}/%06d.png`,
+        "-frames:v",
+        String(count),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-fps_mode",
+        "cfr",
+        "-r",
+        "60",
+        outFile,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let log = "";
+    ffmpeg.stderr.on("data", (chunk) => {
+      log += chunk.toString();
+    });
+    ffmpeg.on("exit", async (code) => {
+      if (code !== 0) {
+        reject(new Error(log.slice(-2000) || `ffmpeg exit ${code}`));
+        return;
+      }
+      try {
+        const probed = await probeVideo(outFile);
+        const hashed = await hashFrames(outFile);
+        resolve({ ...probed, duplicates: hashed.duplicates, hashedFrames: hashed.frames });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
+function probeVideo(file) {
+  return new Promise((resolve, reject) => {
     const probe = spawn("ffprobe", [
       "-v",
       "error",
@@ -1023,15 +1103,53 @@ function probeRate(file) {
     probe.stdout.on("data", (chunk) => {
       body += chunk.toString();
     });
-    probe.on("exit", () => {
+    probe.on("exit", (code) => {
       try {
         const parsed = JSON.parse(body);
         const stream = parsed.streams?.[0] ?? {};
-        console.log(`${file} ${stream.width}x${stream.height} ${stream.avg_frame_rate} frames ${stream.nb_frames}`);
-        resolve(stream.avg_frame_rate ?? "");
-      } catch {
-        resolve("");
+        resolve({
+          rate: stream.avg_frame_rate ?? "",
+          frames: Number(stream.nb_frames ?? 0),
+          width: stream.width ?? 0,
+          height: stream.height ?? 0,
+        });
+      } catch (err) {
+        reject(code === 0 ? err : new Error(`ffprobe exit ${code}`));
       }
+    });
+  });
+}
+
+function hashFrames(file) {
+  return new Promise((resolve, reject) => {
+    const probe = spawn("ffmpeg", ["-v", "error", "-i", file, "-f", "framehash", "-hash", "sha256", "-"]);
+    let body = "";
+    let err = "";
+    probe.stdout.on("data", (chunk) => {
+      body += chunk.toString();
+    });
+    probe.stderr.on("data", (chunk) => {
+      err += chunk.toString();
+    });
+    probe.on("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(err || `framehash exit ${code}`));
+        return;
+      }
+      const hashes = [];
+      for (const line of body.split("\n")) {
+        const match = line.match(/([0-9a-f]{64})\s*$/);
+        if (match) {
+          hashes.push(match[1]);
+        }
+      }
+      let duplicates = 0;
+      for (let i = 1; i < hashes.length; i += 1) {
+        if (hashes[i] === hashes[i - 1]) {
+          duplicates += 1;
+        }
+      }
+      resolve({ duplicates, frames: hashes.length });
     });
   });
 }
