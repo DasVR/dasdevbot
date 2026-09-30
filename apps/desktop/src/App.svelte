@@ -27,7 +27,7 @@
   let primed = $state(false);
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
-  const oldestPending = $derived.by(() => {
+  const pending = $derived.by(() => {
     const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
     return rows.reduce<Approval | null>((oldest, approval) => {
       if (!oldest || approval.created_at < oldest.created_at) {
@@ -36,36 +36,38 @@
       return oldest;
     }, null);
   });
-  const latestSettled = $derived.by(() => {
-    const rows = snapshot?.approvals.filter((approval) => approval.status !== "pending") ?? [];
-    return rows.reduce<Approval | null>((latest, approval) => {
-      if (!latest || approval.created_at > latest.created_at) {
-        return approval;
+  const receipts = $derived.by(() => {
+    const map: Record<string, Approval> = {};
+    for (const approval of snapshot?.approvals ?? []) {
+      if (approval.status === "pending") {
+        continue;
       }
-      return latest;
-    }, null);
+      map[`approval-requested:${approval.id}`] = approval;
+    }
+    return map;
   });
-  const shown = $derived(oldestPending ?? latestSettled);
   const stream = $derived.by(() => {
     const events = snapshot?.events ?? [];
-    const requestKey = shown ? `approval-requested:${shown.id}` : "";
+    const pendingKey = pending ? `approval-requested:${pending.id}` : "";
     return [...events].reverse().map((event) => {
       const source = event.source.trim();
       const shortId = shortEventId(event.id);
       const millis = hlcMillis(event.hlc);
-      const detail = `${event.hlc} · ${shortId}`;
       return {
         id: event.id,
         mark: source.charAt(0).toUpperCase() || "·",
         when: millis == null ? "—" : formatStreamTime(millis),
         iso: millis == null ? "" : new Date(millis).toISOString(),
         who: source ? `${source} · ${event.kind}` : event.kind,
-        detail,
-        request: requestKey !== "" && event.idempotency_key === requestKey,
+        detail: shortId,
+        title: event.hlc,
+        receipt: receipts[event.idempotency_key] ?? null,
+        pendingHere: pendingKey !== "" && event.idempotency_key === pendingKey,
       };
     });
   });
-  const anchored = $derived(stream.some((row) => row.request));
+  const pendingAnchored = $derived(stream.some((row) => row.pendingHere));
+  const anyReceipt = $derived(stream.some((row) => row.receipt !== null));
   const undoable = $derived.by(() => {
     const now = Date.now();
     const rows =
@@ -153,7 +155,7 @@
       return;
     }
     event.preventDefault();
-    if (shown?.id === target.id) {
+    if (stream.some((row) => row.receipt?.id === target.id)) {
       return;
     }
     void onundo(target.id);
@@ -361,26 +363,17 @@
 
 <svelte:window onkeydown={onWindowKey} />
 
-{#snippet approvalSlot()}
-  <div class={["slot", shown?.status === "pending" && "over"]} {@attach flipSlot}>
-    {#if shown}
-      {#key shown.id}
-        <ApprovalCard
-          approval={shown}
-          busy={deciding}
-          shortcutTarget={shown.status === "pending"}
-          ondecide={(decision, reason) => ondecide(shown.id, decision, reason)}
-          onundo={() => onundo(shown.id)}
-        />
-      {/key}
-    {:else}
-      <p class="quiet-empty">
-        <svg class="quiet-line" viewBox="0 0 104 10" aria-hidden="true">
-          <path class="pen draw" pathLength="1" d={QUIET_LINE_PATH} />
-        </svg>
-        Nothing is waiting.
-      </p>
-    {/if}
+{#snippet approvalSlot(approval: Approval)}
+  <div class={["slot", approval.status === "pending" && "over"]} {@attach flipSlot}>
+    {#key approval.id}
+      <ApprovalCard
+        approval={approval}
+        busy={deciding}
+        shortcutTarget={approval.status === "pending"}
+        ondecide={(decision, reason) => ondecide(approval.id, decision, reason)}
+        onundo={() => onundo(approval.id)}
+      />
+    {/key}
   </div>
 {/snippet}
 
@@ -440,10 +433,11 @@
         <div class="stage" {@attach pinOverlay}>
           <ol class="stream">
             {#each stream as row (row.id)}
-              {@const filed = row.request && shown !== null && shown.status !== "pending"}
+              {@const approval = row.receipt ?? (row.pendingHere ? pending : null)}
+              {@const filed = row.receipt !== null}
               <li class={filed ? "slot-row" : "event"} animate:stepRows>
                 {#if !filed}
-                  <div class="row" title={row.detail} in:arrive|global={{ play: primed }}>
+                  <div class="row" title={row.title} in:arrive|global={{ play: primed }}>
                     <time class="when" datetime={row.iso || undefined}>{row.when}</time>
                     <span class="disc" aria-hidden="true">{row.mark}</span>
                     <div class="copy">
@@ -452,14 +446,21 @@
                     </div>
                   </div>
                 {/if}
-                {#if row.request && shown}
-                  {@render approvalSlot()}
+                {#if approval}
+                  {@render approvalSlot(approval)}
                 {/if}
               </li>
             {/each}
           </ol>
-          {#if !anchored}
-            {@render approvalSlot()}
+          {#if pending && !pendingAnchored}
+            {@render approvalSlot(pending)}
+          {:else if !pending && !anyReceipt}
+            <p class="quiet-empty">
+              <svg class="quiet-line" viewBox="0 0 104 10" aria-hidden="true">
+                <path class="pen draw" pathLength="1" d={QUIET_LINE_PATH} />
+              </svg>
+              Nothing is waiting.
+            </p>
           {/if}
         </div>
 
@@ -758,15 +759,19 @@
     overflow-wrap: anywhere;
   }
 
-  /* Filed receipt: the card is the row. A hairline's padding or rule would sit under it. */
+  /* Filed receipt sits in the row's copy column. Same tracks as .row, without a hairline rule. */
   .slot-row {
-    padding: 0;
+    display: grid;
+    grid-template-columns: 76px 28px minmax(0, 1fr);
+    column-gap: 12px;
+    padding: 0 2px;
     border: 0;
     min-height: 0;
     height: auto;
   }
 
   .slot-row .slot {
+    grid-column: 3;
     margin-top: 0;
   }
 
