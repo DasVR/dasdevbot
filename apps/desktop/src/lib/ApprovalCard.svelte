@@ -1249,8 +1249,14 @@
     box-shadow: var(--highlight-top), var(--shadow-puff);
   }
 
-  .approve:active:not(:disabled),
+  .approve:active:not(:disabled) {
+    background: var(--ink-press);
+    border-color: var(--ink-press);
+    box-shadow: var(--shadow-press);
+  }
+
   .deny:active:not(:disabled) {
+    background: var(--paper-sunken);
     box-shadow: var(--shadow-press);
   }
 
@@ -1516,13 +1522,17 @@
       transform: none;
     }
 
-    .approve:active:not(:disabled),
-    .deny:active:not(:disabled) {
+    .approve:active:not(:disabled) {
+      background: var(--ink-press);
+      border-color: var(--ink-press);
+      box-shadow: var(--highlight-top), var(--shadow-puff);
       transition: none;
     }
 
     .deny:active:not(:disabled) {
-      background: color-mix(in oklab, var(--ink-1) 14%, var(--paper-raised));
+      background: var(--paper-sunken);
+      box-shadow: var(--highlight-top), var(--shadow-puff);
+      transition: none;
     }
 
     .face-idle,
