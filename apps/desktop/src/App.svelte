@@ -1,10 +1,26 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { tick } from "svelte";
   import { flip, type AnimationConfig } from "svelte/animate";
   import { linear } from "svelte/easing";
   import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
+  import Curl from "./lib/Curl.svelte";
+  import FirstRun from "./lib/FirstRun.svelte";
+  import FocusIcon from "./lib/FocusIcon.svelte";
+  import GlyphSlot from "./lib/GlyphSlot.svelte";
   import { tokenEase, tokenMs } from "./lib/cssTokens";
+  import {
+    dayPart,
+    doneToday,
+    greetingHeading,
+    greetingLine,
+    greetingSeen,
+    markGreetingSeen,
+    modeReturnSkipsGreeting,
+  } from "./lib/greeting";
+  import { isFirstRunComplete, landingCopy, loadRecord } from "./lib/firstRun/model";
+  import { askAfterLine, loadPermissionMemory, savePermissionMemory } from "./lib/firstRun/permissions";
+  import { micPort, notificationPort } from "./lib/firstRun/ports";
   import { QUIET_LINE_PATH } from "./lib/pen";
   import {
     decide,
@@ -32,6 +48,17 @@
   let deciding = $state(false);
   let primed = $state(false);
   let now = $state(Date.now());
+  let onboarded = $state(isFirstRunComplete());
+  let landedNow = false;
+  let greetingOn = $state(false);
+  let greetingName = $state("");
+  let underlineOn = $state(false);
+  const remembered = loadPermissionMemory();
+  let notificationsAsked = $state(remembered.notifications);
+  let micAsked = $state(remembered.mic);
+  let permissionLine = $state<string | null>(null);
+  let unfocused = $state(false);
+  let permissionBusy = false;
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const pending = $derived.by(() => {
@@ -74,7 +101,6 @@
     });
   });
   const pendingAnchored = $derived(stream.some((row) => row.pendingHere));
-  const anyReceipt = $derived(stream.some((row) => row.receipt !== null));
   const undoable = $derived.by(() => {
     const rows =
       snapshot?.approvals.filter((approval) => {
@@ -117,6 +143,14 @@
       return latest;
     }, null);
   });
+  const waitingCount = $derived(
+    (snapshot?.approvals ?? []).filter((approval) => approval.status === "pending").length,
+  );
+  const finishedToday = $derived(doneToday(snapshot?.approvals ?? [], now));
+  const greetPart = $derived(dayPart(new Date(now)));
+  const greetTitle = $derived(greetingName ? greetingHeading(greetPart, greetingName) : "");
+  const greetSub = $derived(greetingLine(greetPart, waitingCount, finishedToday));
+  const watchedRepo = $derived(loadRecord()?.repo ?? reviewer?.project ?? "DasVR/NIL");
   const filingSeconds = $derived(
     filingUndo?.undo_until == null
       ? 0
@@ -127,16 +161,105 @@
     try {
       snapshot = await getSnapshot();
       error = null;
+      await tick();
       if (!primed) {
-        await tick();
         primed = true;
       }
+      await askNotifications();
     } catch (err) {
       error = err instanceof Error ? err.message : "The daemon is not reachable.";
     }
   }
 
+  function paintFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+  }
+
+  function rememberPermissions(): void {
+    savePermissionMemory({ notifications: notificationsAsked, mic: micAsked });
+  }
+
+  async function askNotifications(): Promise<void> {
+    if (!onboarded || notificationsAsked || permissionBusy || permissionLine) {
+      return;
+    }
+    if ((document.visibilityState === "visible" && !unfocused) || !pending) {
+      return;
+    }
+    notificationsAsked = true;
+    rememberPermissions();
+    permissionBusy = true;
+    try {
+      await askAfterLine({
+        line: "Want a Review banner when something waits on you?",
+        show: async (line) => {
+          permissionLine = line;
+          await tick();
+        },
+        hide: () => {
+          permissionLine = null;
+        },
+        paint: paintFrame,
+        request: () => notificationPort().request(),
+      });
+    } finally {
+      permissionBusy = false;
+      permissionLine = null;
+    }
+  }
+
+  async function onTalk(): Promise<void> {
+    if (micAsked || permissionBusy || permissionLine) {
+      return;
+    }
+    micAsked = true;
+    rememberPermissions();
+    permissionBusy = true;
+    try {
+      await askAfterLine({
+        line: "The mic stays off until you hold to talk.",
+        show: async (line) => {
+          permissionLine = line;
+          await tick();
+        },
+        hide: () => {
+          permissionLine = null;
+        },
+        paint: paintFrame,
+        request: () => micPort().request(),
+      });
+    } finally {
+      permissionBusy = false;
+      permissionLine = null;
+    }
+  }
+
+  function openGreeting(): void {
+    if (!onboarded || landedNow || greetingOn || modeReturnSkipsGreeting()) {
+      return;
+    }
+    const name = loadRecord()?.login;
+    if (!name || greetingSeen(new Date())) {
+      return;
+    }
+    markGreetingSeen(new Date());
+    greetingName = name;
+    greetingOn = true;
+  }
+
+  function dismissGreeting(): void {
+    greetingOn = false;
+  }
+
+  function completeFirstRun(): void {
+    landedNow = true;
+    onboarded = true;
+  }
+
   async function simulate(forced = false): Promise<void> {
+    dismissGreeting();
     busy = true;
     try {
       await emitPush(forced);
@@ -177,7 +300,7 @@
   }
 
   function onWindowKey(event: KeyboardEvent): void {
-    if (event.repeat || isTextEntry(event.target)) {
+    if (!onboarded || event.repeat || isTextEntry(event.target)) {
       return;
     }
     if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
@@ -332,7 +455,11 @@
     };
   }
 
-  onMount(() => {
+  $effect(() => {
+    if (!onboarded) {
+      return;
+    }
+    openGreeting();
     void refresh();
     const clock = setInterval(() => {
       now = Date.now();
@@ -340,9 +467,25 @@
     const timer = setInterval(() => {
       void refresh();
     }, 1000);
+    const onBlur = () => {
+      unfocused = true;
+      void askNotifications();
+    };
+    const onFocus = () => {
+      unfocused = false;
+    };
+    const onVisibility = () => {
+      void askNotifications();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
     return () => {
       clearInterval(clock);
       clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
     };
   });
 </script>
@@ -363,13 +506,20 @@
   </div>
 {/snippet}
 
-<div class="well" style:--flat-radius={FLAT_RADIUS}>
+{#if !onboarded}
+  <FirstRun onDone={completeFirstRun} />
+{:else}
+<div class="well" style:--flat-radius={FLAT_RADIUS} data-mode="here" data-watching="on">
   <div class="shell">
     <header class="titlebar">
       <div class="wordmark">
         <span class="dots" aria-hidden="true"></span>
         <strong>dasdevbot</strong>
       </div>
+      <p class="mode">
+        <FocusIcon />
+        <span>Here</span>
+      </p>
       <p class="status">
         {#if snapshot}
           {snapshot.role} · protocol {snapshot.protocol} · {snapshot.provider_detail} · sync {snapshot.sync}
@@ -389,9 +539,14 @@
         {#if reviewer}
           <div class="agent" data-status={reviewer.status}>
             <div class="agent-row">
-              <h2>{reviewer.name}</h2>
+              <button class="agent-name" type="button" onclick={dismissGreeting}>{reviewer.name}</button>
               {#if reviewer.status === "working"}
-                <span class="agent-status">{reviewer.status}</span>
+                <span class="agent-status">
+                  <svg class="running-trace" data-running-trace viewBox="0 0 72 16" aria-hidden="true">
+                    <path class="pen" pathLength="1" d="M2 9 C16 6 28 12 44 8 C54 6 62 10 70 8" />
+                  </svg>
+                  {reviewer.status}
+                </span>
               {:else if filingUndo && filingSeconds > 0}
                 <span class="agent-status">filing · undo {filingSeconds}s</span>
               {:else if reviewer.status === "blocked" && !filingUndo}
@@ -418,10 +573,27 @@
           </button>
         </div>
         <p class="hint">Reviewer is a stored row. It runs only when this event wakes it.</p>
+        <button class="talk" type="button" onclick={() => void onTalk()}>Hold to talk</button>
       </aside>
 
       <main>
+        {#if greetingOn}
+          <section class="greet" data-greeting>
+            <GlyphSlot>
+              {#snippet glyph()}
+                <Curl blink />
+              {/snippet}
+            </GlyphSlot>
+            <div>
+              <h2 class="greet-title">{greetTitle}</h2>
+              <p class="greet-sub" data-greeting-sub>{greetSub}</p>
+            </div>
+          </section>
+        {/if}
         <p class="section">Stream</p>
+        {#if permissionLine}
+          <p class="why" data-permission-line aria-live="polite">{permissionLine}</p>
+        {/if}
         <div class="stage" {@attach pinOverlay}>
           <ol class="stream">
             {#each stream as row (row.id)}
@@ -446,13 +618,31 @@
           </ol>
           {#if pending && !pendingAnchored}
             {@render approvalSlot(pending)}
-          {:else if !pending && !anyReceipt}
-            <p class="quiet-empty">
-              <svg class="quiet-line" viewBox="0 0 104 10" aria-hidden="true">
-                <path class="pen draw" pathLength="1" d={QUIET_LINE_PATH} />
-              </svg>
-              Nothing is waiting.
-            </p>
+          {:else if stream.length === 0}
+            <div class="empty-state" data-landing>
+              {#if !greetingOn}
+                <div class="landing-row">
+                  <GlyphSlot>
+                    {#snippet glyph()}
+                      <Curl blink onLanded={() => (underlineOn = true)} />
+                    {/snippet}
+                  </GlyphSlot>
+                  <div>
+                    <h1 class="empty-title">Nothing waiting on you</h1>
+                    <svg class="quiet-line" viewBox="0 0 104 10" aria-hidden="true">
+                      <path
+                        class="pen"
+                        class:draw={underlineOn}
+                        data-empty-underline
+                        pathLength="1"
+                        d={QUIET_LINE_PATH}
+                      />
+                    </svg>
+                  </div>
+                </div>
+              {/if}
+              <p class="quiet-copy">{landingCopy(watchedRepo)}</p>
+            </div>
           {/if}
         </div>
 
@@ -474,6 +664,7 @@
     </div>
   </div>
 </div>
+{/if}
 
 <style>
   .well {
@@ -493,7 +684,7 @@
 
   .titlebar {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: var(--s-4);
     align-items: center;
     padding: var(--s-3) var(--s-4);
@@ -506,6 +697,18 @@
     gap: var(--s-3);
     font-weight: var(--w-semibold);
     letter-spacing: var(--track-tight);
+  }
+
+  .mode {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s-2);
+    margin-right: auto;
+    margin-left: var(--s-4);
+    color: var(--ink-1);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+    font-weight: var(--w-semibold);
   }
 
   .dots {
@@ -578,11 +781,18 @@
     align-items: baseline;
   }
 
-  h2 {
+  .agent-name {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
     font-size: var(--t-lead);
     line-height: var(--lh-lead);
     font-weight: var(--w-semibold);
     letter-spacing: var(--track-tight);
+    cursor: pointer;
+    text-align: left;
   }
 
   .project,
@@ -782,46 +992,142 @@
     pointer-events: auto;
   }
 
-  .quiet-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--s-2);
-    margin-top: var(--s-3);
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
-  }
-
-  .quiet-line {
-    width: 104px;
-    height: 10px;
+  .running-trace {
+    width: 36px;
+    height: 12px;
     overflow: visible;
   }
 
-  .quiet-empty .pen {
+  .running-trace .pen {
+    fill: none;
+    stroke: var(--pen);
+    stroke-width: var(--pen-width);
+    stroke-linecap: round;
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    animation: trace-run var(--dur-trace-read) linear infinite;
+  }
+
+  .greet {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s-4);
+    margin-bottom: var(--s-6);
+  }
+
+  .greet-title {
+    font-size: var(--t-display);
+    line-height: var(--lh-display);
+    font-weight: var(--w-semibold);
+    letter-spacing: var(--track-tight);
+    color: var(--ink-1);
+  }
+
+  .greet-sub {
+    margin-top: var(--s-1);
+    color: var(--ink-2);
+    font-size: var(--t-body);
+    line-height: var(--lh-body);
+  }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s-3);
+    margin-top: var(--s-5);
+    max-width: 40rem;
+  }
+
+  .landing-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s-4);
+  }
+
+  .empty-title {
+    font-size: var(--t-display);
+    line-height: var(--lh-display);
+    font-weight: var(--w-semibold);
+    letter-spacing: var(--track-tight);
+    color: var(--ink-1);
+  }
+
+  .quiet-copy {
+    color: var(--ink-2);
+    font-size: var(--t-body);
+    line-height: var(--lh-body);
+  }
+
+  .quiet-line {
+    width: 168px;
+    height: 10px;
+    margin-top: calc(var(--s-1) * -1);
+    overflow: visible;
+  }
+
+  .empty-state .pen {
     fill: none;
     stroke: var(--pen);
     stroke-width: var(--pen-width);
     stroke-linecap: round;
     vector-effect: non-scaling-stroke;
-  }
-
-  .quiet-empty .draw {
     stroke-dasharray: 1;
-    stroke-dashoffset: 0;
-    animation: draw-quiet var(--dur-draw) var(--ease-draw) both;
+    stroke-dashoffset: 1;
   }
 
-  @keyframes draw-quiet {
+  .empty-state .draw {
+    animation: draw-quiet var(--dur-draw) var(--ease-draw) 1 both;
+  }
+
+  @keyframes trace-run {
     from {
       stroke-dashoffset: 1;
     }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  .why {
+    margin: 0 0 var(--s-3);
+    color: var(--ink-2);
+    font-size: var(--t-body);
+    line-height: var(--lh-body);
+  }
+
+  .talk {
+    margin-top: var(--s-4);
+    width: 100%;
+    height: 40px;
+    padding: 0 var(--s-4);
+    border-radius: var(--r-md);
+    border: 1.5px solid var(--ink-1);
+    background: var(--paper-raised);
+    color: var(--ink-1);
+    font-size: var(--t-meta);
+    font-weight: var(--w-semibold);
+    cursor: pointer;
+  }
+
+  .talk:active {
+    background: var(--paper-sunken);
+  }
+
+  .talk:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .quiet-empty .draw {
+    .empty-state .pen,
+    .running-trace .pen {
       animation: none;
+      stroke-dashoffset: 0;
+    }
+
+    .talk:active {
+      transition: none;
     }
   }
 
