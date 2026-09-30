@@ -126,6 +126,7 @@
   async function refresh(): Promise<void> {
     try {
       snapshot = await getSnapshot();
+      now = Date.now();
       error = null;
       if (!primed) {
         await tick();
@@ -354,6 +355,7 @@
     {#key approval.id}
       <ApprovalCard
         approval={approval}
+        {now}
         busy={deciding}
         shortcutTarget={approval.status === "pending"}
         ondecide={(decision, reason) => ondecide(approval.id, decision, reason)}

@@ -46,6 +46,8 @@
 
   interface Props {
     approval: Approval;
+    /** Shared with the roster countdown so paper and the undo label flip together. */
+    now: number;
     busy?: boolean;
     holdMs?: number;
     shortcutTarget?: boolean;
@@ -55,6 +57,7 @@
 
   let {
     approval,
+    now,
     busy = false,
     holdMs,
     shortcutTarget = false,
@@ -83,13 +86,13 @@
   let strike = $state(0);
   let checkOffset = $state(1);
   let committing = $state<Decision | null>(null);
-  let nowMs = $state(Date.now());
 
   type HoldKind = "approve" | "deny";
   let holdKind = $state<HoldKind | null>(null);
   let holdFrame = 0;
   let morphTimer = 0;
   let holdSealed = false;
+  let approveSeal = false;
 
   const locked = $derived(busy || committing !== null);
   const duration = $derived(holdDurationMs(effect, holdMs));
@@ -98,11 +101,11 @@
       !approval.committed &&
       (approval.status === "approved" || approval.status === "denied") &&
       approval.undo_until != null &&
-      approval.undo_until > nowMs,
+      approval.undo_until > now,
   );
   const floating = $derived(pending || showUndo);
   const undoSeconds = $derived(
-    approval.undo_until == null ? 0 : Math.max(0, Math.ceil((approval.undo_until - nowMs) / 1000)),
+    approval.undo_until == null ? 0 : Math.max(0, Math.ceil((approval.undo_until - now) / 1000)),
   );
   const stamp = $derived(approval.decided_at == null ? "" : formatDecisionStamp(approval.decided_at));
   const decisionShort = $derived(shortEventId(approval.decision_event_id ?? ""));
@@ -238,14 +241,6 @@
     return () => {
       observer.disconnect();
     };
-  }
-
-  function tickUndo(): () => void {
-    nowMs = Date.now();
-    const timer = window.setInterval(() => {
-      nowMs = Date.now();
-    }, 200);
-    return () => window.clearInterval(timer);
   }
 
   function focusReason(node: HTMLInputElement): () => void {
@@ -425,10 +420,10 @@
   }
 
   async function onApproveClick(): Promise<void> {
-    if (locked || denyOpen || !pending) {
+    if (locked || approveSeal || denyOpen || !pending) {
       return;
     }
-    committing = "approve";
+    approveSeal = true;
     const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
     await animateNumber(
       1,
@@ -443,7 +438,11 @@
       checkOffset = 0;
       await wait(tokenMs("--dur-base", 120));
     }
+    // The lead check unmounts in the same turn the Approved label mounts.
+    checkOffset = 1;
+    committing = "approve";
     await settleDecision("approve");
+    approveSeal = false;
   }
 
   async function confirmDeny(): Promise<void> {
@@ -518,7 +517,7 @@
     holdKind = null;
     holdSealed = true;
     if (kind === "approve") {
-      checkOffset = 0;
+      checkOffset = 1;
       committing = "approve";
       void settleDecision("approve");
       return;
@@ -819,7 +818,7 @@
       </div>
     </div>
   {:else}
-    <div class="receipt" {@attach tickUndo}>
+    <div class="receipt">
       {#if approval.status === "approved"}
         <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
           <path class="pen trace draw" pathLength="1" d={CHECK_PATH} />
@@ -1520,6 +1519,10 @@
     button:active:not(:disabled),
     details[open] .chev {
       transform: none;
+    }
+
+    button:active:not(:disabled) {
+      box-shadow: var(--highlight-top), var(--shadow-puff);
     }
 
     .approve:active:not(:disabled) {
