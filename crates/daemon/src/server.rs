@@ -118,7 +118,7 @@ fn dispatch(app: &App, request: &mut Request) -> Result<Response<Cursor<Vec<u8>>
                 store.decide_approval(&id, &req.decision, req.reason.as_deref(), wall_ms())?
             };
             Ok(json_response(
-                200,
+                if recorded.refused { 403 } else { 200 },
                 &DecisionResponse {
                     protocol: PROTOCOL_VERSION,
                     approval_id: id,
@@ -723,6 +723,82 @@ mod tests {
         assert_eq!(approval["action"], "force_push");
         assert_eq!(approval["draft"], "git push --force origin phase0");
         assert_eq!(approval["status"], "pending");
+    }
+
+    #[test]
+    fn force_push_approve_is_refused_and_not_recorded() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-c1-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: None,
+                role: "server".into(),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        spawn_worker(Arc::clone(&app), rx);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let health = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        assert_eq!(health["ready"], true);
+
+        agent
+            .post(&format!("http://{addr}/v1/events"))
+            .send_json(json!({
+                "source": "demo",
+                "kind": "repo.push",
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0",
+                    "subject": "simulated push",
+                    "forced": true
+                },
+                "idempotency_key": "ipc-c1-forced"
+            }))
+            .unwrap()
+            .into_json::<EmitResponse>()
+            .unwrap();
+
+        let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
+        let approval = &snap["approvals"][0];
+        assert_eq!(approval["effect_class"], "destructive");
+        assert_eq!(approval["action"], "force_push");
+        let id = approval["id"].as_str().unwrap();
+
+        let refused = agent
+            .post(&format!("http://{addr}/v1/approvals/{id}/decision"))
+            .send_json(json!({ "decision": "approve" }));
+        let ureq::Error::Status(code, response) = refused.expect_err("approve must be refused")
+        else {
+            panic!("approve returned a success response");
+        };
+        assert_eq!(code, 403);
+        let body: serde_json::Value = response.into_json().unwrap();
+        assert_eq!(body["status"], "denied");
+        assert_eq!(body["approval_id"], id);
+        assert_eq!(body["executed"], false);
+
+        let after: serde_json::Value = agent
+            .get(&format!("http://{addr}/v1/snapshot"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        let rows = after["approvals"].as_array().unwrap();
+        assert!(
+            rows.iter().all(|row| row["status"] != "approved"),
+            "destructive approve was recorded: {after}"
+        );
+        let filed = rows.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(filed["status"], "denied");
+        assert_eq!(filed["reason"], crate::store::Store::DESTRUCTIVE_OFF);
     }
 
     #[test]

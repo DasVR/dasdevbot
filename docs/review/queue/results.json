@@ -11,7 +11,7 @@
     {
       "id": 2,
       "result": "PASS",
-      "evidence": "before sheet armed; during sheet held/held since=cleared; arming since 5524 landed 5523 click 4932; still arming at +250ms; armed after 818ms; agent builder; switch 4961 focus 5515; active ap_new; gap -0.44px"
+      "evidence": "before sheet armed; during sheet held/held since=cleared; arming since 5521 landed 5521 click 4925; still arming at +250ms; armed after 818ms; agent builder; switch 4959 focus 5513; active ap_new; gap -0.44px"
     },
     {
       "id": 8,
@@ -36,7 +36,7 @@
     {
       "id": 5,
       "result": "PASS",
-      "evidence": "rows held ap_old → ap_mid → ap_new; \"Showing what was waiting at 12:48 PM. Your decisions are saved.\"; opacity 0.45; actions 0; alerts 0"
+      "evidence": "rows held ap_old → ap_mid → ap_new; \"Showing what was waiting at 1:20 PM. Your decisions are saved.\"; opacity 0.45; actions 0; alerts 0"
     },
     {
       "id": 6,

@@ -473,11 +473,15 @@
     void focusApproval(next.id);
   }
 
-  function scrimFade(): TransitionConfig {
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function scrimFade(
+    _node: Element,
+    _params: undefined,
+    options: { direction: "in" | "out" | "both" },
+  ): TransitionConfig {
+    const intro = options.direction !== "out";
     return {
-      duration: reduced ? tokenMs("--dur-base", 120) : tokenMs("--dur-soft", 360),
-      easing: (t) => t,
+      duration: intro ? tokenMs("--dur-soft", 360) : tokenMs("--dur-base", 240),
+      easing: intro ? tokenEase("--ease-out") : tokenEase("--ease-exit"),
       css: (t) => `opacity: ${t}`,
     };
   }

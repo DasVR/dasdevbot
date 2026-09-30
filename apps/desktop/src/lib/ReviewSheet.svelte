@@ -214,10 +214,19 @@
     padding: 8px 10px;
     border-radius: var(--r-sm);
     cursor: pointer;
+    transition:
+      background-color var(--dur-fast) var(--ease-out),
+      transform var(--dur-base) var(--ease-out);
   }
 
   .close:hover {
-    background: color-mix(in oklab, var(--paper-sunken) 65%, transparent);
+    background: rgb(var(--shade) / 0.05);
+  }
+
+  .close:active {
+    transform: scale(0.97, 0.955);
+    transition-duration: var(--dur-fast);
+    transition-timing-function: var(--ease-press);
   }
 
   .close:focus-visible {
@@ -225,7 +234,13 @@
     outline-offset: 2px;
   }
 
-  .summary,
+  .summary {
+    margin-top: 8px;
+    color: var(--ink-1);
+    font-size: var(--t-body);
+    line-height: var(--lh-body);
+  }
+
   .daemon,
   .empty {
     margin-top: 8px;
@@ -271,14 +286,6 @@
 
   div.rw {
     cursor: default;
-  }
-
-  .rw:hover {
-    background: color-mix(in oklab, var(--paper-sunken) 65%, transparent);
-  }
-
-  div.rw:hover {
-    background: none;
   }
 
   .rw:focus-visible {
