@@ -4,9 +4,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use dasdevbotd::{
-    audit_dev_env, open_provider, plan_secret_set, prompt_secret_from_tty, read_piped_secret,
-    serve, session_token_path, url_exposes_bearer, CommandKind, Config, Error, KeyringHandle,
-    ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource,
+    audit_dev_env, open_provider, parse_sha256_list, plan_secret_set, prompt_secret_from_tty,
+    read_piped_secret, serve, session_token_path, url_exposes_bearer, CommandKind, Config, Error,
+    KeyringHandle, ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource,
 };
 
 fn main() -> ExitCode {
@@ -63,6 +63,7 @@ struct Flags {
     model: Option<String>,
     dev_env_secrets: bool,
     claude_home: Option<PathBuf>,
+    claude_sha256: Vec<[u8; 32]>,
 }
 
 fn flags(args: Vec<String>) -> Result<Flags, Error> {
@@ -79,6 +80,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut model = None;
     let mut dev_env_secrets = false;
     let mut claude_home = None;
+    let mut claude_sha256 = Vec::new();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         let mut value = || {
@@ -109,6 +111,9 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             "--model" => model = Some(value()?),
             "--dev-env-secrets" => dev_env_secrets = true,
             "--claude-home" => claude_home = Some(PathBuf::from(value()?)),
+            "--claude-sha256" => {
+                claude_sha256 = parse_sha256_list(&value()?).map_err(Error::BadRequest)?;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -140,6 +145,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         model,
         dev_env_secrets,
         claude_home,
+        claude_sha256,
     })
 }
 
@@ -162,6 +168,7 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
         command: CommandKind::Serve,
         role: flags.role.clone(),
         claude_home: flags.claude_home.clone(),
+        claude_sha256: flags.claude_sha256.clone(),
     })?;
     let app = dasdevbotd::build_and_worker(
         Config {
@@ -200,6 +207,7 @@ fn smoke_model(args: Vec<String>) -> Result<(), Error> {
         command: CommandKind::SmokeModel,
         role: flags.role,
         claude_home: flags.claude_home,
+        claude_sha256: flags.claude_sha256,
     }) {
         Ok(provider) => provider,
         Err(ProviderError::Unavailable(message)) => {
@@ -335,9 +343,9 @@ Usage:
                   [--web apps/desktop/dist] [--role server|device|display]
                   [--token TOKEN]
                   [--provider ollama|ollama-local|claude-cli] [--model NAME]
-                  [--claude-home PATH] [--dev-env-secrets]
+                  [--claude-home PATH] [--claude-sha256 HEX] [--dev-env-secrets]
   dasdevbotd smoke-model --provider ollama|ollama-local|claude-cli [--model NAME]
-                         [--claude-home PATH]
+                         [--claude-home PATH] [--claude-sha256 HEX]
   dasdevbotd secret set <name> [--stdin]
   dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
                   [--repo DasVR/NIL] [--ref phase0]
@@ -353,8 +361,10 @@ The default provider is Ollama Cloud at https://ollama.com. Store the key with
 `secret set ollama` (no-echo TTY, or `--stdin` from a pipe). `--dev-env-secrets`
 reads OLLAMA_API_KEY and is refused on the server role. `--model` is optional.
 ollama-local talks only to 127.0.0.1:11434. claude-cli requires --claude-home.
-That directory is the CLI's HOME. On Ubuntu, log in once as the service user
-with `sudo -iu dasdevbot claude`. See deploy/ubuntu. The mock provider is for tests.
+That directory is the CLI's HOME. `--claude-sha256` is an optional hex digest,
+or a comma-separated list for the binary and its interpreters. On Ubuntu, log in
+once as the service user with `sudo -u dasdevbot -H claude`. See deploy/ubuntu.
+The mock provider is for tests.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.

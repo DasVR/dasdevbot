@@ -16,8 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::fs::OpenOptionsExt;
 
 pub use provider::{
-    open_provider, CompletionRequest, LlmProvider, MockProvider, ProviderError, ProviderKind,
-    ProviderSettings,
+    open_provider, parse_sha256_list, CompletionRequest, LlmProvider, MockProvider, ProviderError,
+    ProviderKind, ProviderSettings,
 };
 pub use secrets::{
     plan_secret_set, prompt_secret_from_tty, read_piped_secret, CommandKind, KeyringHandle,

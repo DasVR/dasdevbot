@@ -13,7 +13,7 @@ use crate::secrets::{
     DEV_ENV_WARNING,
 };
 
-pub use claude::ClaudeCli;
+pub use claude::{parse_sha256_list, ClaudeCli};
 pub use ollama::{OllamaCloud, OllamaLocal, OLLAMA_BUSY_MAX_MS};
 
 /// Tokens reserved before a provider call. A turn whose agent cannot cover this does not call.
@@ -237,6 +237,8 @@ pub struct ProviderSettings {
     pub role: String,
     /// HOME for the Claude CLI. Required for `claude-cli`. The process home is not used.
     pub claude_home: Option<PathBuf>,
+    /// Optional SHA-256 digests for the resolved `claude` path and its interpreters.
+    pub claude_sha256: Vec<[u8; 32]>,
 }
 
 pub fn open_provider(settings: &ProviderSettings) -> Result<Box<dyn LlmProvider>, ProviderError> {
@@ -281,7 +283,12 @@ pub fn open_with(
                     "claude_home is required; refusing to load the process home".into(),
                 )
             })?;
-            let provider = ClaudeCli::open(PathBuf::from("claude"), settings.model.clone(), home)?;
+            let provider = ClaudeCli::open(
+                PathBuf::from("claude"),
+                settings.model.clone(),
+                home,
+                &settings.claude_sha256,
+            )?;
             Ok(Box::new(provider))
         }
     }

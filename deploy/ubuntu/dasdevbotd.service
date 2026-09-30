@@ -9,6 +9,18 @@ Group=dasdevbot
 Environment=HOME=/var/lib/dasdevbot
 ExecStart=/usr/local/bin/dasdevbotd serve --provider claude-cli --claude-home /var/lib/dasdevbot --data /var/lib/dasdevbot/dasdevbot.sqlite
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/dasdevbot
+PrivateTmp=true
+UMask=0077
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
 Restart=on-failure
 
 [Install]
