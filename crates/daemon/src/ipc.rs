@@ -234,11 +234,8 @@ fn accept_external_decision(
     let nonce = request.client_nonce.filter(|text| !text.is_empty()).ok_or_else(|| {
         Error::Forbidden("external tier requires a Windows Hello signature".into())
     })?;
-    let target = store.approval_target(request.approval_id)?;
-    verify_user(
-        request.verifier,
-        &consent_prompt(request.decision, action, &target),
-    )?;
+    // No daemon-side prompt here. The shell's named consent and the
+    // key-bound RequestSignAsync are the user check for this tier.
     let action_hash = action_hash(class_name, action, draft);
     let record = store.commit_signed_decision(
         request.approval_id,
@@ -288,8 +285,7 @@ fn accept_external_undo(
     let nonce = request.client_nonce.filter(|text| !text.is_empty()).ok_or_else(|| {
         Error::Forbidden("external tier requires a Windows Hello signature".into())
     })?;
-    let target = store.approval_target(request.approval_id)?;
-    verify_user(request.verifier, &consent_prompt("undo", action, &target))?;
+    // No daemon-side prompt; see accept_external_decision.
     let action_hash = action_hash(class_name, action, draft);
     let record = store.commit_signed_undo(
         request.approval_id,
@@ -347,6 +343,11 @@ pub fn prepare_signature(store: &mut Store, request: PrepareRequest<'_>) -> Resu
             "signature_required": false,
             "tier": "internal",
         }));
+    }
+    if !dasdevbot_core::EXTERNAL_TIER_ENABLED {
+        return Err(Error::Forbidden(
+            "external tier is denied in Phase 1".into(),
+        ));
     }
     if !hello_key::signing_path_is_present() {
         return Err(Error::Forbidden(
@@ -796,7 +797,28 @@ mod tests {
             "approve",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("Windows Hello"), "{err}");
+        assert!(err.to_string().contains("External"), "{err}");
+        assert_eq!(store.approval_status(&id).unwrap(), "pending");
+        // A client signature does not reopen the tier either.
+        let err = sign_decision(
+            &mut store,
+            SignRequest {
+                window: CARD_WINDOW,
+                voice: false,
+                approval_id: &id,
+                decision: "approve",
+                reason: None,
+                now_ms: 2_000,
+                fencing: 7,
+                secrets: &secrets(),
+                verifier: &allow(),
+                audit_seed: &AUDIT_SEED,
+                client_signature: Some("00"),
+                client_nonce: Some("nonce"),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("External"), "{err}");
         assert_eq!(store.approval_status(&id).unwrap(), "pending");
     }
 

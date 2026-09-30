@@ -28,7 +28,7 @@ pub use decision::{
     SETTINGS_WINDOW,
 };
 pub use election::{claim as claim_leader, dispatch_allowed, Claim, LeaderLease};
-pub use gate::{decide, EffectClass, GateInput, GateOutcome, Policy};
+pub use gate::{decide, EffectClass, GateInput, GateOutcome, Policy, EXTERNAL_TIER_ENABLED};
 pub use grant::{issue_expiry, GrantError, EXTERNAL_EXPIRY_MS, READ_EXPIRY_MS, WRITE_LOCAL_EXPIRY_MS};
 pub use harness::{HarnessError, HarnessState, JobLife, Phase, Step};
 pub use hlc::{HlcTimestamp, HybridClock};

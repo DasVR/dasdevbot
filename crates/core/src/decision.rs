@@ -22,6 +22,8 @@ pub enum DecisionDeny {
     Voice,
     WrongWindow,
     Destructive,
+    /// The external tier is off in Phase 1. See `EXTERNAL_TIER_ENABLED`.
+    External,
     NotASurface,
 }
 
@@ -39,6 +41,9 @@ pub fn authorize_decision(
     }
     if matches!(class, EffectClass::Destructive) {
         return Err(DecisionDeny::Destructive);
+    }
+    if matches!(class, EffectClass::External) && !crate::gate::EXTERNAL_TIER_ENABLED {
+        return Err(DecisionDeny::External);
     }
     match surface {
         Surface::TauriIpc if window == CARD_WINDOW => Ok(()),
@@ -85,11 +90,15 @@ mod tests {
             Err(DecisionDeny::Destructive)
         );
         assert_eq!(
-            authorize_decision(Surface::TauriIpc, MAIN_WINDOW, false, EffectClass::External),
+            authorize_decision(Surface::TauriIpc, MAIN_WINDOW, false, EffectClass::WriteLocal),
             Err(DecisionDeny::WrongWindow)
         );
         assert_eq!(
             authorize_decision(Surface::TauriIpc, CARD_WINDOW, false, EffectClass::External),
+            Err(DecisionDeny::External)
+        );
+        assert_eq!(
+            authorize_decision(Surface::TauriIpc, CARD_WINDOW, false, EffectClass::WriteLocal),
             Ok(())
         );
         assert_eq!(authorize_secret_window(SETTINGS_WINDOW), Ok(()));

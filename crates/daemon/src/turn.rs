@@ -430,9 +430,8 @@ fn stop_after_provider_error(
 }
 
 fn phase1_policy() -> Policy {
-    let mut policy = Policy::phase1();
-    policy.deny_external = !crate::hello_key::signing_path_is_present();
-    policy
+    // External is denied by the policy itself, not by a failing verifier.
+    Policy::phase1()
 }
 
 fn external_tier_is_denied() -> bool {
