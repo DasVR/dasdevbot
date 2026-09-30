@@ -32,8 +32,10 @@ fn daemon_logs_do_not_contain_the_session_token() {
             web.to_str().expect("utf8 path"),
             "--token",
             TOKEN,
+            "--provider",
+            "ollama-local",
         ])
-        .env_remove("XAI_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -102,7 +104,7 @@ fn daemon_logs_do_not_contain_the_session_token() {
 fn allow_remote_is_refused_even_with_web() {
     let output = Command::new(env!("CARGO_BIN_EXE_dasdevbotd"))
         .args(["serve", "--web", "apps/desktop/dist", "--allow-remote"])
-        .env_remove("XAI_API_KEY")
+        .env_remove("OLLAMA_API_KEY")
         .output()
         .expect("spawn dasdevbotd");
     assert!(!output.status.success());

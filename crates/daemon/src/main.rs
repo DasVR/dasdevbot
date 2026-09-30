@@ -1,8 +1,13 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
-use dasdevbotd::{serve, session_token_path, url_exposes_bearer, Error};
+use dasdevbotd::{
+    open_provider, plan_secret_set, prompt_secret_from_tty, read_piped_secret, serve,
+    session_token_path, url_exposes_bearer, CommandKind, Config, Error, KeyringHandle,
+    ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -32,7 +37,8 @@ fn run() -> Result<(), Error> {
         match first.as_str() {
             "serve" => serve_from(rest),
             "emit" => emit(rest),
-            "smoke-xai" => smoke_xai(rest),
+            "smoke-model" => smoke_model(rest),
+            "secret" => secret_command(rest),
             "help" => {
                 print_help();
                 Ok(())
@@ -53,6 +59,9 @@ struct Flags {
     repo: String,
     reference: String,
     token: Option<String>,
+    provider: ProviderKind,
+    model: Option<String>,
+    dev_env_secrets: bool,
 }
 
 fn flags(args: Vec<String>) -> Result<Flags, Error> {
@@ -65,6 +74,9 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut repo = "DasVR/NIL".to_string();
     let mut reference = "phase0".to_string();
     let mut token: Option<String> = None;
+    let mut provider = ProviderKind::Ollama;
+    let mut model = None;
+    let mut dev_env_secrets = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         let mut value = || {
@@ -88,6 +100,12 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
                 ));
             }
             "--token" => token = Some(value()?),
+            "--provider" => {
+                let value = value()?;
+                provider = ProviderKind::parse(&value).map_err(Error::BadRequest)?;
+            }
+            "--model" => model = Some(value()?),
+            "--dev-env-secrets" => dev_env_secrets = true,
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -115,6 +133,9 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         repo,
         reference,
         token,
+        provider,
+        model,
+        dev_env_secrets,
     })
 }
 
@@ -126,15 +147,25 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
         "dasdevbotd starting role={} data={} provider={}",
         flags.role,
         flags.data.display(),
-        provider_label()
+        flags.provider.as_str()
     );
+    let provider = open_provider(&ProviderSettings {
+        kind: flags.provider,
+        model: flags.model.clone(),
+        dev_env_secrets: flags.dev_env_secrets,
+        command: CommandKind::Serve,
+        role: flags.role.clone(),
+    })?;
     serve(
-        dasdevbotd::build_and_worker(dasdevbotd::Config {
-            data: flags.data,
-            web_root: flags.web,
-            role: flags.role,
-            token: explicit,
-        })?,
+        dasdevbotd::build_and_worker(
+            Config {
+                data: flags.data,
+                web_root: flags.web,
+                role: flags.role,
+                token: explicit,
+            },
+            provider,
+        )?,
         &flags.bind,
     )
 }
@@ -147,6 +178,81 @@ fn explicit_token(flag: Option<String>) -> Option<String> {
         Ok(token) if !token.trim().is_empty() => Some(token),
         _ => None,
     }
+}
+
+fn smoke_model(args: Vec<String>) -> Result<(), Error> {
+    let flags = flags(args)?;
+    let provider = match open_provider(&ProviderSettings {
+        kind: flags.provider,
+        model: flags.model,
+        dev_env_secrets: flags.dev_env_secrets,
+        command: CommandKind::SmokeModel,
+        role: flags.role,
+    }) {
+        Ok(provider) => provider,
+        Err(ProviderError::Unavailable(message)) => {
+            eprintln!("dasdevbotd smoke-model skipped: {message}");
+            return Ok(());
+        }
+        Err(err) => return Err(Error::Provider(err)),
+    };
+    let started = Instant::now();
+    match provider.complete(&dasdevbotd::CompletionRequest {
+        model: String::new(),
+        system: String::new(),
+        user: "Reply with the single word ok.".into(),
+        max_tokens: 16,
+    }) {
+        Ok(completion) => {
+            println!("latency_ms={}", started.elapsed().as_millis());
+            match (
+                completion.usage.input_tokens,
+                completion.usage.output_tokens,
+            ) {
+                (Some(input), Some(output)) => {
+                    println!("input_tokens={input}");
+                    println!("output_tokens={output}");
+                }
+                _ => println!("tokens unavailable"),
+            }
+            Ok(())
+        }
+        Err(ProviderError::Unavailable(message)) => {
+            eprintln!("dasdevbotd smoke-model skipped: {message}");
+            Ok(())
+        }
+        Err(err) => Err(Error::Provider(err)),
+    }
+}
+
+fn secret_command(args: Vec<String>) -> Result<(), Error> {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("set") => secret_set(args.collect()),
+        Some(other) => Err(Error::BadRequest(format!(
+            "unknown secret command {other}; try `secret set <name>`"
+        ))),
+        None => Err(Error::BadRequest(
+            "secret needs a subcommand; try `secret set <name>`".into(),
+        )),
+    }
+}
+
+fn secret_set(args: Vec<String>) -> Result<(), Error> {
+    let plan = plan_secret_set(&args).map_err(|err| Error::BadRequest(err.to_string()))?;
+    let secret = match plan.source {
+        SecretSource::Tty => {
+            prompt_secret_from_tty("secret: ").map_err(|err| Error::BadRequest(err.to_string()))?
+        }
+        SecretSource::Stdin => {
+            read_piped_secret().map_err(|err| Error::BadRequest(err.to_string()))?
+        }
+    };
+    KeyringHandle
+        .set(&plan.name, &secret)
+        .map_err(|err| Error::BadRequest(err.to_string()))?;
+    eprintln!("stored secret {}", plan.name);
+    Ok(())
 }
 
 fn emit(args: Vec<String>) -> Result<(), Error> {
@@ -180,14 +286,6 @@ fn emit(args: Vec<String>) -> Result<(), Error> {
     Ok(())
 }
 
-fn smoke_xai(args: Vec<String>) -> Result<(), Error> {
-    if !args.is_empty() {
-        return Err(Error::BadRequest("smoke-xai takes no arguments".into()));
-    }
-    dasdevbotd::smoke_xai()?;
-    Ok(())
-}
-
 fn emit_token(flags: &Flags) -> Result<String, Error> {
     if let Some(token) = explicit_token(flags.token.clone()) {
         return Ok(token);
@@ -199,13 +297,6 @@ fn emit_token(flags: &Flags) -> Result<String, Error> {
             "missing bearer token; pass --token or set DASDEVBOT_TOKEN (looked at {})",
             path.display()
         ))),
-    }
-}
-
-fn provider_label() -> &'static str {
-    match env::var("XAI_API_KEY") {
-        Ok(key) if !key.trim().is_empty() => "xai",
-        _ => "mock (XAI_API_KEY unset)",
     }
 }
 
@@ -228,9 +319,12 @@ Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
                   [--web apps/desktop/dist] [--role server|device|display]
                   [--token TOKEN]
+                  [--provider ollama|ollama-local|claude-cli] [--model NAME]
+                  [--dev-env-secrets]
+  dasdevbotd smoke-model --provider ollama|ollama-local|claude-cli [--model NAME]
+  dasdevbotd secret set <name> [--stdin]
   dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
                   [--repo DasVR/NIL] [--ref phase0]
-  dasdevbotd smoke-xai
 
 Mutating routes require the per-launch bearer in the Authorization header.
 serve writes it next to the database as <data>.token (mode 0600). The daemon
@@ -239,11 +333,11 @@ A request that puts it in the URL or query string is rejected. The token must
 be at least 32 bytes. --allow-remote is refused until Phase 1 or TLS, including
 together with --web. The bind stays on loopback.
 
-The provider is xAI chat completions when XAI_API_KEY is set.
-Otherwise every draft is produced by the labeled mock provider.
-smoke-xai does not use the mock: it skips when XAI_API_KEY is unset.
-XAI_MODEL overrides the model (default grok-4.6).
-The xAI base URL is the compile-time constant https://api.x.ai/v1.
+The default provider is Ollama Cloud at https://ollama.com. Store the key with
+`secret set ollama` (no-echo TTY, or `--stdin` from a pipe). `--dev-env-secrets`
+reads OLLAMA_API_KEY and is refused on the server role. `--model` is optional.
+ollama-local talks only to 127.0.0.1:11434. claude-cli uses the pinned Claude
+Code CLI. The mock provider is for tests.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.

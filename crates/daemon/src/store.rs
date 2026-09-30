@@ -497,6 +497,16 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Keep the lease and push its deadline out so the worker does not claim the job again until then.
+    pub fn pause_leased(&self, job_id: &str, owner: &str, until_ms: u64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE jobs SET lease_until_ms = ?1
+             WHERE id = ?2 AND lease_owner = ?3 AND status = 'leased'",
+            params![until_ms as i64, job_id, owner],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn record_approval_and_wait(
         &mut self,
         wall_ms: u64,

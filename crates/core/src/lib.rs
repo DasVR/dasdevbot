@@ -24,4 +24,6 @@ pub mod kind {
     pub const LEDGER_POSTED: &str = "ledger.posted";
     pub const BUDGET_DENIED: &str = "budget.denied";
     pub const JOB_FAILED: &str = "job.failed";
+    pub const JOB_PAUSED: &str = "job.paused";
+    pub const PROVIDER_COST: &str = "provider.cost";
 }
