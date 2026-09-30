@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use dasdevbotd::{require_explicit_token, serve, session_token_path, Error};
+use dasdevbotd::{require_explicit_token, serve, session_token_path, url_exposes_bearer, Error};
 
 fn main() -> ExitCode {
     match run() {
@@ -53,7 +53,6 @@ struct Flags {
     repo: String,
     reference: String,
     allow_remote: bool,
-    dev: bool,
     token: Option<String>,
 }
 
@@ -67,7 +66,6 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut repo = "DasVR/NIL".to_string();
     let mut reference = "phase0".to_string();
     let mut allow_remote = false;
-    let mut dev = false;
     let mut token: Option<String> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -87,7 +85,6 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             "--repo" => repo = value()?,
             "--ref" => reference = value()?,
             "--allow-remote" => allow_remote = true,
-            "--dev" => dev = true,
             "--token" => token = Some(value()?),
             "--help" | "-h" => {
                 print_help();
@@ -116,7 +113,6 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         repo,
         reference,
         allow_remote,
-        dev,
         token,
     })
 }
@@ -137,7 +133,6 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
             data: flags.data,
             web_root: flags.web,
             role: flags.role,
-            dev: flags.dev,
             token: explicit,
         })?,
         &flags.bind,
@@ -169,6 +164,11 @@ fn emit(args: Vec<String>) -> Result<(), Error> {
         "idempotency_key": format!("cli-{}", uuid::Uuid::new_v4())
     });
     let token = emit_token(&flags)?;
+    if url_exposes_bearer(&flags.url, &token) {
+        return Err(Error::BadRequest(
+            "bearer token must be sent only in the Authorization header".into(),
+        ));
+    }
     let response = ureq::post(&endpoint)
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
@@ -232,21 +232,23 @@ dasdevbotd — phase 0 spike
 Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
                   [--web apps/desktop/dist] [--role server|device|display]
-                  [--token TOKEN] [--dev]
+                  [--token TOKEN]
   dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
                   [--repo DasVR/NIL] [--ref phase0]
   dasdevbotd smoke-xai
 
-Mutating routes require the per-launch bearer. serve writes it next to the
-database as <data>.token (mode 0600) and injects it into the desktop HTML.
-It is not returned by the API. --allow-remote refuses to start unless
---token or DASDEVBOT_TOKEN is set.
+Mutating routes require the per-launch bearer in the Authorization header.
+serve writes it next to the database as <data>.token (mode 0600) and injects
+it into the desktop HTML. It is not returned by the API, and a request that
+puts it in the URL or query string is rejected. The daemon does not log it.
+--allow-remote refuses to start unless --token or DASDEVBOT_TOKEN is set.
 
 The provider is xAI chat completions when XAI_API_KEY is set.
 Otherwise every draft is produced by the labeled mock provider.
 smoke-xai does not use the mock: it skips when XAI_API_KEY is unset.
 XAI_MODEL overrides the model (default grok-4.6).
-XAI_BASE_URL is ignored unless its host is api.x.ai, or --dev is set.
+The xAI base URL is the compile-time constant https://api.x.ai/v1.
+A dev Cargo feature can override it only in a debug build.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.

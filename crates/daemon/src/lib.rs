@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::os::unix::fs::OpenOptionsExt;
 
 pub use provider::{from_env, smoke_xai, LlmProvider, MockProvider};
-pub use server::serve;
+pub use server::{serve, url_exposes_bearer};
 pub use store::Store;
 
 use provider::ProviderError;
@@ -61,14 +61,12 @@ pub struct Config {
     pub data: PathBuf,
     pub web_root: Option<PathBuf>,
     pub role: String,
-    /// Honors a non-`api.x.ai` `XAI_BASE_URL` when set.
-    pub dev: bool,
     /// Operator token (`--token` or `DASDEVBOT_TOKEN`). Generated when absent.
     pub token: Option<String>,
 }
 
 pub fn build_and_worker(config: Config) -> Result<Arc<App>> {
-    let provider = from_env(config.dev);
+    let provider = from_env();
     let (app, rx) = build_app(config, provider)?;
     turn::spawn_worker(Arc::clone(&app), rx);
     Ok(app)

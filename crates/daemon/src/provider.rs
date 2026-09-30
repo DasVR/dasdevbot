@@ -4,7 +4,22 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 const DEFAULT_MODEL: &str = "grok-4.6";
-const DEFAULT_BASE: &str = "https://api.x.ai/v1";
+
+/// Official xAI chat-completions base. Every build pins this.
+pub const XAI_BASE: &str = "https://api.x.ai/v1";
+
+/// Base the adapter calls. Equals [`XAI_BASE`] unless this crate is built with
+/// the `dev` feature and debug assertions. Release builds keep [`XAI_BASE`]
+/// even when that feature is enabled. The debug override is the compile-time
+/// environment variable `DASDEVBOT_DEV_XAI_BASE`.
+#[cfg(all(feature = "dev", debug_assertions))]
+pub const XAI_CHAT_BASE: &str = match option_env!("DASDEVBOT_DEV_XAI_BASE") {
+    Some("") | None => XAI_BASE,
+    Some(value) => value,
+};
+
+#[cfg(not(all(feature = "dev", debug_assertions)))]
+pub const XAI_CHAT_BASE: &str = XAI_BASE;
 
 /// Tokens reserved before a provider call. A turn whose agent cannot cover this does not call.
 pub const RESERVE_TOKENS: u64 = 256;
@@ -95,22 +110,20 @@ Wrap it in try/finally so the next session can take the lock."
 pub struct XaiProvider {
     api_key: String,
     model: String,
-    base: String,
+    base: &'static str,
     agent: ureq::Agent,
 }
 
 impl XaiProvider {
-    pub fn from_env(api_key: String, dev: bool) -> Self {
+    pub fn from_env(api_key: String) -> Self {
         let model = std::env::var("XAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        let configured = std::env::var("XAI_BASE_URL").ok();
-        let base = resolve_xai_base(configured.as_deref(), dev);
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(90))
             .build();
         Self {
             api_key,
             model,
-            base,
+            base: XAI_CHAT_BASE,
             agent,
         }
     }
@@ -172,8 +185,8 @@ pub fn smoke_xai() -> Result<bool, ProviderError> {
             return Ok(false);
         }
     };
-    // The smoke call always goes to api.x.ai; it never honors a dev base URL.
-    let provider = XaiProvider::from_env(key, false);
+    // Uses the pinned XAI_CHAT_BASE (api.x.ai in every release build).
+    let provider = XaiProvider::from_env(key);
     let started = std::time::Instant::now();
     let completion = provider.complete(&CompletionRequest {
         model: provider.model.clone(),
@@ -190,43 +203,11 @@ pub fn smoke_xai() -> Result<bool, ProviderError> {
     Ok(true)
 }
 
-pub fn from_env(dev: bool) -> Box<dyn LlmProvider> {
+pub fn from_env() -> Box<dyn LlmProvider> {
     match std::env::var("XAI_API_KEY") {
-        Ok(key) if !key.trim().is_empty() => Box::new(XaiProvider::from_env(key, dev)),
+        Ok(key) if !key.trim().is_empty() => Box::new(XaiProvider::from_env(key)),
         _ => Box::new(MockProvider::new()),
     }
-}
-
-/// `XAI_BASE_URL` is ignored unless its host is `api.x.ai`, or `dev` is set.
-pub fn resolve_xai_base(configured: Option<&str>, dev: bool) -> String {
-    let Some(raw) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
-        return DEFAULT_BASE.to_string();
-    };
-    if dev || xai_host_is_official(raw) {
-        return raw.to_string();
-    }
-    eprintln!(
-        "dasdevbotd: ignoring XAI_BASE_URL because its host is not api.x.ai (pass --dev to override)"
-    );
-    DEFAULT_BASE.to_string()
-}
-
-fn xai_host_is_official(raw: &str) -> bool {
-    let Some(rest) = raw
-        .strip_prefix("https://")
-        .or_else(|| raw.strip_prefix("http://"))
-    else {
-        return false;
-    };
-    if rest.contains('@') {
-        return false;
-    }
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.is_empty() || authority.starts_with('[') {
-        return false;
-    }
-    let host = authority.split(':').next().unwrap_or("");
-    host.eq_ignore_ascii_case("api.x.ai")
 }
 
 pub fn chat_body(model: &str, req: &CompletionRequest) -> Value {
@@ -309,32 +290,12 @@ mod tests {
     }
 
     #[test]
-    fn xai_base_url_must_be_the_official_host_unless_dev() {
-        assert_eq!(
-            resolve_xai_base(Some("https://api.x.ai/v1"), false),
-            "https://api.x.ai/v1"
-        );
-        assert_eq!(
-            resolve_xai_base(Some("https://API.X.AI:443/v1"), false),
-            "https://API.X.AI:443/v1"
-        );
-        assert_eq!(
-            resolve_xai_base(Some("https://evil.example/v1"), false),
-            DEFAULT_BASE
-        );
-        assert_eq!(
-            resolve_xai_base(Some("https://api.x.ai.evil.com/v1"), false),
-            DEFAULT_BASE
-        );
-        assert_eq!(
-            resolve_xai_base(Some("https://user:secret@api.x.ai/v1"), false),
-            DEFAULT_BASE
-        );
-        assert_eq!(
-            resolve_xai_base(Some("https://evil.example/v1"), true),
-            "https://evil.example/v1"
-        );
-        assert_eq!(resolve_xai_base(None, false), DEFAULT_BASE);
+    fn xai_base_is_pinned_to_the_official_host() {
+        assert_eq!(XAI_BASE, "https://api.x.ai/v1");
+        #[cfg(not(all(feature = "dev", debug_assertions)))]
+        assert_eq!(XAI_CHAT_BASE, XAI_BASE);
+        let provider = XaiProvider::from_env("test-key".into());
+        assert_eq!(provider.base, XAI_CHAT_BASE);
     }
 
     #[test]

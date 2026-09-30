@@ -64,6 +64,11 @@ pub fn handle(app: &App, request: &mut Request, port: u16) -> Response<Cursor<Ve
 }
 
 fn dispatch(app: &App, request: &mut Request, port: u16) -> Result<Response<Cursor<Vec<u8>>>> {
+    if url_exposes_bearer(request.url(), &app.token) {
+        return Err(Error::Forbidden(
+            "bearer token must be sent only in the Authorization header".into(),
+        ));
+    }
     if !host_is_loopback(request, port) {
         return Err(Error::Forbidden("rejected host".into()));
     }
@@ -562,6 +567,65 @@ fn origin_is_allowed(request: &Request, port: u16) -> bool {
     true
 }
 
+/// True when the request target carries a bearer in the path or query.
+///
+/// The error path must not echo `url` or `token`. Callers reject the request
+/// and accept the secret only from the Authorization header.
+pub fn url_exposes_bearer(url: &str, token: &str) -> bool {
+    if !token.is_empty() {
+        if url.contains(token) {
+            return true;
+        }
+        let decoded = percent_decode(url);
+        if decoded.contains(token) || percent_decode(&decoded).contains(token) {
+            return true;
+        }
+    }
+    query_names_a_credential(url)
+}
+
+fn query_names_a_credential(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    query.split('&').any(|pair| {
+        let name = pair.split_once('=').map(|(name, _)| name).unwrap_or(pair);
+        let name = percent_decode(&percent_decode(name));
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "token" | "access_token" | "bearer"
+        )
+    })
+}
+
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (from_hex(bytes[index + 1]), from_hex(bytes[index + 2])) {
+                out.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn bearer_matches(request: &Request, token: &str) -> bool {
     for header in request.headers() {
         if !header.field.equiv("Authorization") {
@@ -638,7 +702,6 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
-                dev: false,
                 token: None,
             },
             Box::new(MockProvider::new()),
@@ -827,7 +890,6 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
-                dev: false,
                 token: None,
             },
             Box::new(MockProvider::new()),
@@ -882,7 +944,6 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
-                dev: false,
                 token: Some("desktop-only-token".into()),
             },
             Box::new(MockProvider::new()),
@@ -985,7 +1046,6 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: Some(dir.clone()),
                 role: "server".into(),
-                dev: false,
                 token: Some("html-only-token".into()),
             },
             Box::new(MockProvider::new()),
@@ -1022,6 +1082,103 @@ mod tests {
     }
 
     #[test]
+    fn bearer_in_the_query_string_is_rejected_and_not_echoed() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-query-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: None,
+                role: "server".into(),
+                token: Some("desktop-only-token".into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let token = app.token.clone();
+        spawn_worker(Arc::clone(&app), rx);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        agent
+            .post(&format!("http://{addr}/v1/events"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({
+                "source": "demo",
+                "kind": "repo.push",
+                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "idempotency_key": "query-push-1"
+            }))
+            .unwrap();
+        let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
+        let approval_id = snap["approvals"][0]["id"].as_str().unwrap();
+
+        let leaked = agent
+            .post(&format!(
+                "http://{addr}/v1/approvals/{approval_id}/decision?token={token}"
+            ))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        match leaked {
+            ureq::Error::Status(403, response) => {
+                let body = response.into_string().unwrap();
+                assert!(body.contains("Authorization"), "{body}");
+                assert!(!body.contains(&token), "response echoed the bearer");
+            }
+            other => panic!("query-string bearer was not forbidden: {other}"),
+        }
+
+        let named = agent
+            .post(&format!(
+                "http://{addr}/v1/approvals/{approval_id}/decision?access_token=not-the-secret"
+            ))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        match named {
+            ureq::Error::Status(403, response) => {
+                let body = response.into_string().unwrap();
+                assert!(
+                    !body.contains("not-the-secret"),
+                    "response echoed the query"
+                );
+                assert!(!body.contains(&token), "response echoed the bearer");
+            }
+            other => panic!("access_token query was not forbidden: {other}"),
+        }
+
+        let still = agent
+            .get(&format!("http://{addr}/v1/snapshot"))
+            .call()
+            .unwrap()
+            .into_json::<serde_json::Value>()
+            .unwrap();
+        assert_eq!(still["approvals"][0]["status"], "pending");
+    }
+
+    #[test]
+    fn url_credential_check_covers_path_query_and_percent_encoding() {
+        let token = "desktop-only-token";
+        assert!(!url_exposes_bearer("/v1/health", token));
+        assert!(url_exposes_bearer(&format!("/v1/{token}/decision"), token));
+        assert!(url_exposes_bearer("/v1/health?token=other", token));
+        assert!(url_exposes_bearer("/v1/health?Access_Token=other", token));
+        assert!(url_exposes_bearer("/v1/health?bearer", token));
+        assert!(url_exposes_bearer(
+            "/v1/health?token=%64esktop-only-token",
+            token
+        ));
+        assert!(!url_exposes_bearer("/v1/health?note=phase0", token));
+        assert!(!url_exposes_bearer("/v1/health", ""));
+    }
+
+    #[test]
     fn serve_binds_before_health() {
         let dir = std::env::temp_dir().join(format!("dasdevbot-bind-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -1032,7 +1189,6 @@ mod tests {
             data: dir.join("db.sqlite"),
             web_root: None,
             role: "server".into(),
-            dev: false,
             token: Some("bind-test-token".into()),
         })
         .unwrap();

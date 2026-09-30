@@ -9,6 +9,9 @@ description = "dasdevbot daemon. Same binary for every node role."
 [features]
 default = ["p2p"]
 p2p = ["dasdevbot-sync/p2p"]
+# Debug-only escape hatch for the xAI base URL. Release builds ignore it
+# because debug assertions are off. Not a default feature.
+dev = []
 
 [lib]
 name = "dasdevbotd"
