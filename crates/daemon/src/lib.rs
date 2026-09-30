@@ -132,21 +132,19 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// The directory that holds the sqlite file. A bare filename lives in `.`.
-fn data_dir(data: &Path) -> PathBuf {
-    match data.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
-}
-
-/// Ignore every name in the data directory. An existing `.gitignore` is left
-/// untouched, including one at the repo root.
+/// Write `*` into the data directory only when this process creates it.
+/// A bare filename resolves to `.`, and an existing directory is left alone.
 pub(crate) fn ensure_data_gitignore(data: &Path) -> Result<()> {
-    let dir = data_dir(data);
-    if dir != Path::new(".") {
-        fs::create_dir_all(&dir)?;
+    let Some(dir) = data
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty() && *parent != Path::new("."))
+    else {
+        return Ok(());
+    };
+    if dir.exists() {
+        return Ok(());
     }
+    fs::create_dir_all(dir)?;
     let ignore = dir.join(".gitignore");
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -229,14 +227,24 @@ mod tests {
     }
 
     #[test]
-    fn data_dir_gets_a_star_gitignore_unless_one_exists() {
-        let dir = std::env::temp_dir().join(format!("dasdevbot-ignore-{}", uuid::Uuid::new_v4()));
-        let fresh = dir.join("fresh");
-        Store::open(&fresh.join("db.sqlite")).unwrap();
-        let written = fs::read_to_string(fresh.join(".gitignore")).unwrap();
-        assert_eq!(written, "*\n");
+    fn star_gitignore_is_written_only_for_a_data_dir_this_process_creates() {
+        let root = std::env::temp_dir().join(format!("dasdevbot-ignore-{}", uuid::Uuid::new_v4()));
+        let created = root.join("created");
+        Store::open(&created.join("db.sqlite")).unwrap();
+        assert_eq!(
+            fs::read_to_string(created.join(".gitignore")).unwrap(),
+            "*\n"
+        );
 
-        let kept = dir.join("kept");
+        let existing = root.join("existing");
+        fs::create_dir_all(&existing).unwrap();
+        Store::open(&existing.join("db.sqlite")).unwrap();
+        assert!(
+            !existing.join(".gitignore").exists(),
+            "an existing data dir must not gain a gitignore"
+        );
+
+        let kept = root.join("kept");
         fs::create_dir_all(&kept).unwrap();
         fs::write(kept.join(".gitignore"), "keep-me\n").unwrap();
         Store::open(&kept.join("db.sqlite")).unwrap();
@@ -244,5 +252,29 @@ mod tests {
             fs::read_to_string(kept.join(".gitignore")).unwrap(),
             "keep-me\n"
         );
+    }
+
+    #[test]
+    fn bare_data_path_does_not_write_a_gitignore_into_dot() {
+        let scratch = std::env::temp_dir().join(format!("dasdevbot-dot-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&scratch).unwrap();
+        let saved = std::env::current_dir().unwrap();
+        let _restore = CurrentDirGuard(saved);
+        std::env::set_current_dir(&scratch).unwrap();
+
+        ensure_data_gitignore(Path::new("bare.sqlite")).unwrap();
+        ensure_data_gitignore(Path::new("./bare.sqlite")).unwrap();
+        assert!(
+            !scratch.join(".gitignore").exists(),
+            "a bare --data path must not write .gitignore into ."
+        );
+    }
+
+    struct CurrentDirGuard(PathBuf);
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
     }
 }
