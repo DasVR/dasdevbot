@@ -12,7 +12,7 @@ This branch is **phase 0**: the spike that has to work before the daemon languag
 - **One shared worker** blocks on a channel. Inserting a job sends a wake. There is no timer and no per-agent thread.
 - **Provider.** `XAI_API_KEY` selects xAI chat completions (`https://api.x.ai/v1/chat/completions`, model `grok-4.6` unless `XAI_MODEL` is set). If the key is missing, a **mock provider** writes the draft. Mock output is prefixed with `[mock provider]`. Token counts on that path are `char/4` estimates and the charge is `$0.00`. The health payload and the ledger line name which one ran.
 - **Approving does not post.** The decision is an event. The external effect is not executed.
-- **License** is undecided (`UNLICENSED`). Commercial intent is still an open decision.
+- **License** is FSL-1.1-ALv2. See [License](#license).
 
 ## Layout
 
@@ -76,3 +76,13 @@ Measurements are in `BENCHMARKS.md`. They are from a real run of `scripts/bench.
 ## Out of this spike
 
 Pairing, replication over the bound endpoint, MCP, sandboxing, embeddings, Pocket, schedules, and a built Tauri shell.
+
+## License
+
+dasdevbot is licensed under the [Functional Source License, Version 1.1, ALv2 Future License (FSL-1.1-ALv2)](LICENSE). Copyright 2026 Arriq Al-Raee (d/b/a Das).
+
+- **Source-available, not open source.** You may use, copy, modify, and redistribute it for any Permitted Purpose.
+- **Permitted Purpose excludes competing uses.** A Competing Use means making the software available to others in a commercial product or service that substitutes for it, or that offers the same or substantially similar functionality. Internal use, non-commercial education and research, and professional services for a licensee are permitted. The [LICENSE](LICENSE) text governs.
+- **Each version becomes Apache-2.0 two years after release.** Every version is irrevocably licensed under the Apache License, Version 2.0 from the second anniversary of the date it was made available.
+- **Contributions require the CLA.** Before a contribution can be merged, you must agree to the [Contributor License Agreement](CLA.md). For now you do that with a comment on your pull request.
+- **Trademarks.** The license grants no rights to the "dasdevbot" or "Das" names or logos. See [TRADEMARKS.md](TRADEMARKS.md).
