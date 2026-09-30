@@ -9,7 +9,7 @@ use dasdevbotd::{
     audit_dev_env, audit_key_path, open_provider, parse_sha256_list, plan_secret_set,
     load_role_file, prompt_secret_from_tty, read_piped_secret, serve,
     session_token_path,
-    url_exposes_bearer, CommandKind, CompletionRequest, Config, Error, KeyringHandle,
+    url_exposes_bearer, CommandKind, CompletionRequest, Config, Error,
     ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource, Store,
 };
 
@@ -297,10 +297,34 @@ fn secret_command(args: Vec<String>) -> Result<(), Error> {
     }
 }
 
+#[cfg(unix)]
 fn secret_set(args: Vec<String>) -> Result<(), Error> {
+    secret_set_at(dasdevbotd::configured_data_path(), args, &dasdevbotd::KeyringHandle)
+}
+
+#[cfg(not(unix))]
+fn secret_set(_args: Vec<String>) -> Result<(), Error> {
+    Err(Error::Forbidden(
+        "on Windows, secrets go in only through the Tauri settings window".into(),
+    ))
+}
+
+/// `fixed` is the daemon database. Only tests pass anything else.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn secret_set_at(fixed: &Path, args: Vec<String>, keys: &dyn SecretHandle) -> Result<(), Error> {
     let (data, rest) = split_data_flag(args)?;
+    if let Some(data) = data {
+        if data != fixed {
+            return Err(Error::Forbidden(format!(
+                "secret set audits only into the daemon database {}; refusing --data {}",
+                fixed.display(),
+                data.display()
+            )));
+        }
+    }
     let plan = plan_secret_set(&rest).map_err(|err| Error::BadRequest(err.to_string()))?;
-    authorize_cli_secret(&data, &plan.name)?;
+    require_daemon_database(fixed)?;
+    authorize_cli_secret(fixed, &plan.name)?;
     let secret = match plan.source {
         SecretSource::Tty => {
             prompt_secret_from_tty("secret: ").map_err(|err| Error::BadRequest(err.to_string()))?
@@ -310,16 +334,27 @@ fn secret_set(args: Vec<String>) -> Result<(), Error> {
         }
     };
     let tail = dasdevbotd::secrets::last4(&secret);
-    record_secret_audit(&data, &plan.name, tail)?;
-    KeyringHandle
-        .set(&plan.name, &secret)
+    // Audit first. A failed audit leaves the keyring untouched.
+    record_secret_audit(fixed, &plan.name, tail)?;
+    keys.set(&plan.name, &secret)
         .map_err(|err| Error::BadRequest(err.to_string()))?;
     eprintln!("stored secret {}", plan.name);
     Ok(())
 }
 
-fn split_data_flag(args: Vec<String>) -> Result<(PathBuf, Vec<String>), Error> {
-    let mut data = PathBuf::from("data/dasdevbot.sqlite");
+/// The database and its audit key must already exist. Never creates either.
+fn require_daemon_database(data: &Path) -> Result<(), Error> {
+    if !data.is_file() || !audit_key_path(data).is_file() {
+        return Err(Error::Forbidden(format!(
+            "no daemon database or audit key at {}; start the daemon first",
+            data.display()
+        )));
+    }
+    Ok(())
+}
+
+fn split_data_flag(args: Vec<String>) -> Result<(Option<PathBuf>, Vec<String>), Error> {
+    let mut data = None;
     let mut rest = Vec::new();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -327,7 +362,7 @@ fn split_data_flag(args: Vec<String>) -> Result<(PathBuf, Vec<String>), Error> {
             let value = iter
                 .next()
                 .ok_or_else(|| Error::BadRequest("--data needs a value".into()))?;
-            data = PathBuf::from(value);
+            data = Some(PathBuf::from(value));
         } else {
             rest.push(arg);
         }
@@ -352,6 +387,8 @@ fn authorize_cli_secret(data: &Path, name: &str) -> Result<(), Error> {
 }
 
 fn record_secret_audit(data: &Path, name: &str, last4: String) -> Result<(), Error> {
+    // Checked again right before Store::open, which would create a database.
+    require_daemon_database(data)?;
     let payload = serde_json::json!({"name": name, "last4": last4}).to_string();
     append_cli_audit(data, "secret.set", &payload)
 }
@@ -457,7 +494,10 @@ be at least 32 bytes. --allow-remote is refused until Phase 1 or TLS, including
 together with --web. The bind stays on loopback.
 
 The default provider is Ollama Cloud at https://ollama.com. Store the key with
-`secret set ollama` (no-echo TTY, or `--stdin` from a pipe). `--dev-env-secrets`
+`secret set ollama` (no-echo TTY, or `--stdin` from a pipe). secret set audits
+only into /var/lib/dasdevbot/dasdevbot.sqlite, which the daemon must already
+have created; another --data is refused. On Windows, secrets go in only
+through the Tauri settings window. `--dev-env-secrets`
 reads OLLAMA_API_KEY and is refused on the server role. `--model` is optional.
 ollama-local talks only to 127.0.0.1:11434. claude-cli requires --claude-home.
 That directory is the CLI's HOME, and <claude-home>/claude-config is its
@@ -506,10 +546,6 @@ mod tests {
         fs::write(&spoof, "executor").unwrap();
         assert!(spoof.ends_with("x.sqlite.role"), "{}", spoof.display());
         assert_ne!(spoof, dasdevbotd::configured_role_path());
-        let literal = std::path::PathBuf::from("/tmp/x.sqlite.role");
-        if spoof != literal {
-            fs::write(&literal, "executor").unwrap();
-        }
         let result = authorize_cli_secret(&data, "github");
         match dasdevbotd::load_role_file() {
             Err(expected) => {
@@ -527,7 +563,89 @@ mod tests {
                 assert_eq!(result.is_ok(), allowed.is_ok());
             }
         }
-        let _ = fs::remove_file(literal);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Records every keyring write so a test can prove none happened.
+    #[derive(Default)]
+    struct RecordingKeys {
+        writes: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SecretHandle for RecordingKeys {
+        fn get(
+            &self,
+            _name: &str,
+        ) -> Result<Option<dasdevbotd::secrets::Secret>, dasdevbotd::secrets::SecretError> {
+            Ok(None)
+        }
+
+        fn set(
+            &self,
+            name: &str,
+            _secret: &dasdevbotd::secrets::Secret,
+        ) -> Result<(), dasdevbotd::secrets::SecretError> {
+            self.writes.lock().unwrap().push(name.to_string());
+            Ok(())
+        }
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-{label}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn secret_set_refuses_a_throwaway_data_path() {
+        let dir = temp_dir("secret-throwaway");
+        let fixed = dir.join("daemon.sqlite");
+        let throwaway = dir.join("throwaway.sqlite");
+        let keys = RecordingKeys::default();
+        let err = secret_set_at(
+            &fixed,
+            vec![
+                "ollama".into(),
+                "--stdin".into(),
+                "--data".into(),
+                throwaway.display().to_string(),
+            ],
+            &keys,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("only into the daemon database"), "{err}");
+        assert!(keys.writes.lock().unwrap().is_empty());
+        assert!(!throwaway.exists());
+        assert!(!audit_key_path(&throwaway).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_set_needs_the_daemon_database_and_its_audit_key() {
+        let dir = temp_dir("secret-fixed");
+        let fixed = dir.join("daemon.sqlite");
+        let keys = RecordingKeys::default();
+        let args = || vec!["ollama".to_string(), "--stdin".to_string()];
+        let err = secret_set_at(&fixed, args(), &keys).unwrap_err();
+        assert!(err.to_string().contains("start the daemon first"), "{err}");
+        assert!(!fixed.exists(), "secret set created a database");
+        drop(Store::open(&fixed).unwrap());
+        let mut explicit = args();
+        explicit.extend(["--data".to_string(), fixed.display().to_string()]);
+        let err = secret_set_at(&fixed, explicit, &keys).unwrap_err();
+        assert!(err.to_string().contains("start the daemon first"), "{err}");
+        assert!(!audit_key_path(&fixed).exists());
+        assert!(keys.writes.lock().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fixed_data_path_is_the_deploy_path() {
+        assert_eq!(
+            dasdevbotd::configured_data_path(),
+            Path::new("/var/lib/dasdevbot/dasdevbot.sqlite")
+        );
     }
 
     #[test]

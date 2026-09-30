@@ -147,6 +147,15 @@ pub fn configured_role_path() -> &'static Path {
     Path::new(ROLE_FILE)
 }
 
+/// The daemon database the deploy units use. `secret set` audits only here.
+#[cfg(unix)]
+const DATA_FILE: &str = "/var/lib/dasdevbot/dasdevbot.sqlite";
+
+#[cfg(unix)]
+pub fn configured_data_path() -> &'static Path {
+    Path::new(DATA_FILE)
+}
+
 pub fn load_role_file() -> Result<String> {
     let path = configured_role_path();
     if !path.is_file() {

@@ -314,9 +314,9 @@ pub fn open_with(
             #[cfg(not(unix))]
             {
                 let _ = settings;
-                return Err(ProviderError::Failed(
+                Err(ProviderError::Failed(
                     "claude-cli is only available on unix".into(),
-                ));
+                ))
             }
             #[cfg(unix)]
             {
@@ -495,7 +495,7 @@ pub(crate) fn take_log() -> Vec<String> {
     LOG_CAPTURE.with(|slot| slot.borrow_mut().take().unwrap_or_default())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
