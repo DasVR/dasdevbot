@@ -174,14 +174,16 @@ fn exchange(data: &Path, body: &Value) -> Result<Value, String> {
     }
     #[cfg(windows)]
     {
-        let port_text = std::fs::read_to_string(dasdevbotd::shell_port_path(data))
+        use std::os::windows::fs::OpenOptionsExt;
+        // SECURITY_IDENTIFICATION: a pipe server may identify us, not impersonate us.
+        const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+        let pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(dasdevbotd::shell_pipe_name(data))
             .map_err(|err| err.to_string())?;
-        let port: u16 = port_text
-            .trim()
-            .parse()
-            .map_err(|_| "shell port is not a number".to_string())?;
-        let stream = std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|err| err.to_string())?;
-        write_and_read(stream, body)
+        write_and_read(pipe, body)
     }
 }
 

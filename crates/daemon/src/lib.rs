@@ -17,6 +17,8 @@ mod surface;
 mod topology;
 mod turn;
 mod verify_user;
+#[cfg(windows)]
+mod win_acl;
 
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -189,8 +191,11 @@ pub fn shell_socket_path(data: &Path) -> PathBuf {
     sibling(data, ".shell.sock")
 }
 
-pub fn shell_port_path(data: &Path) -> PathBuf {
-    sibling(data, ".shell.port")
+/// Windows named pipe for the shell, keyed by the data path.
+pub fn shell_pipe_name(data: &Path) -> String {
+    let path = std::path::absolute(data).unwrap_or_else(|_| data.to_path_buf());
+    let hash = blake3::hash(path.display().to_string().as_bytes());
+    format!(r"\\.\pipe\dasdevbot-{}", &hash.to_hex()[..32])
 }
 
 fn sibling(data: &Path, suffix: &str) -> PathBuf {
@@ -361,7 +366,10 @@ pub(crate) fn write_private(path: PathBuf, bytes: &[u8]) -> Result<()> {
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let mut file = options.open(path)?;
+    let mut file = options.open(&path)?;
+    // Owner-only before any bytes land. The open handle keeps its access.
+    #[cfg(windows)]
+    win_acl::protect_file(&path)?;
     file.write_all(bytes)?;
     Ok(())
 }

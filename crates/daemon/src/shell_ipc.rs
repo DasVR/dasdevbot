@@ -10,6 +10,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 
 use serde_json::json;
 
@@ -19,6 +21,12 @@ use crate::signature::{DECISION_PURPOSE, UNDO_PURPOSE};
 use crate::verify_user::{PlatformVerifier, UserVerifier};
 use crate::{wall_ms, App, Error};
 
+/// The connecting process, as seen by the OS. Only `is_self` peers are served.
+#[derive(Clone, Copy, Debug)]
+pub struct Peer {
+    pub is_self: bool,
+}
+
 pub fn spawn(app: Arc<App>) -> crate::Result<()> {
     #[cfg(unix)]
     {
@@ -26,7 +34,7 @@ pub fn spawn(app: Arc<App>) -> crate::Result<()> {
     }
     #[cfg(windows)]
     {
-        spawn_tcp(app)
+        spawn_pipe(app)
     }
 }
 
@@ -46,7 +54,7 @@ fn spawn_unix(app: Arc<App>) -> crate::Result<()> {
             let Ok(stream) = stream else { continue };
             let app = Arc::clone(&app);
             std::thread::spawn(move || {
-                let peer = peer_uid(&stream);
+                let peer = unix_peer(&stream);
                 serve_client(app, peer, stream);
             });
         }
@@ -54,23 +62,17 @@ fn spawn_unix(app: Arc<App>) -> crate::Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn spawn_tcp(app: Arc<App>) -> crate::Result<()> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    crate::write_private(crate::shell_port_path(&app.data), port.to_string().as_bytes())?;
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let app = Arc::clone(&app);
-            std::thread::spawn(move || serve_client(app, 0, stream));
-        }
-    });
-    Ok(())
+#[cfg(unix)]
+fn unix_peer(stream: &std::os::unix::net::UnixStream) -> Peer {
+    // geteuid is a libc read of the process uid. It cannot fail.
+    let own = unsafe { libc::geteuid() };
+    Peer {
+        is_self: peer_uid(stream) == Some(own),
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn peer_uid(stream: &std::os::unix::net::UnixStream) -> u32 {
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
     let mut cred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -87,53 +89,154 @@ fn peer_uid(stream: &std::os::unix::net::UnixStream) -> u32 {
         )
     };
     if rc != 0 {
-        u32::MAX
+        None
     } else {
-        cred.uid
+        Some(cred.uid)
     }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn peer_uid(_stream: &std::os::unix::net::UnixStream) -> u32 {
-    u32::MAX
+fn peer_uid(_stream: &std::os::unix::net::UnixStream) -> Option<u32> {
+    None
 }
 
-fn peer_is_self(peer_uid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        peer_uid == unsafe { libc::geteuid() }
+/// Owner-only named pipe. The first instance must be ours, so a squatter
+/// that created the name first makes startup fail.
+#[cfg(windows)]
+fn spawn_pipe(app: Arc<App>) -> crate::Result<()> {
+    let name = crate::win_acl::wide(crate::shell_pipe_name(&app.data).as_ref());
+    let own = crate::win_acl::current_user()?;
+    let descriptor = crate::win_acl::owner_only(&own)?;
+    let mut pipe = create_pipe(&name, &descriptor, true)?;
+    std::thread::spawn(move || loop {
+        if connect_pipe(&pipe).is_err() {
+            // Drop the broken instance and start a fresh one.
+            match next_pipe(&name, &descriptor) {
+                Some(next) => pipe = next,
+                None => return,
+            }
+            continue;
+        }
+        // The next instance exists before this one is served.
+        let Some(next) = next_pipe(&name, &descriptor) else {
+            return;
+        };
+        let served = std::mem::replace(&mut pipe, next);
+        let peer = pipe_peer(&served, &own);
+        let app = Arc::clone(&app);
+        std::thread::spawn(move || {
+            let served = serve_client(app, peer, served);
+            // Wait for the client to read the reply before the handle closes.
+            let _ = served.sync_all();
+        });
+    });
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_pipe(
+    name: &[u16],
+    descriptor: &crate::win_acl::Descriptor,
+    first: bool,
+) -> std::io::Result<std::fs::File> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+    use windows::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    };
+    let mut open_mode = PIPE_ACCESS_DUPLEX;
+    if first {
+        open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = peer_uid;
-        true
+    let attributes = descriptor.attributes();
+    // SAFETY: name is NUL-terminated, and attributes and the descriptor it
+    // points at outlive the call.
+    let handle = unsafe {
+        CreateNamedPipeW(
+            PCWSTR(name.as_ptr()),
+            open_mode,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_UNLIMITED_INSTANCES,
+            4096,
+            4096,
+            0,
+            Some(&attributes),
+        )
+    };
+    if handle.is_invalid() {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: handle is a fresh pipe handle owned by nothing else.
+    Ok(unsafe { std::fs::File::from_raw_handle(handle.0) })
+}
+
+/// A new instance, retrying while the system is short of resources.
+#[cfg(windows)]
+fn next_pipe(name: &[u16], descriptor: &crate::win_acl::Descriptor) -> Option<std::fs::File> {
+    for _ in 0..50 {
+        match create_pipe(name, descriptor, false) {
+            Ok(pipe) => return Some(pipe),
+            Err(err) => {
+                eprintln!("dasdevbotd: shell pipe instance failed: {err}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+    eprintln!("dasdevbotd: shell pipe stopped");
+    None
+}
+
+#[cfg(windows)]
+fn connect_pipe(pipe: &std::fs::File) -> windows::core::Result<()> {
+    use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
+    use windows::Win32::System::Pipes::ConnectNamedPipe;
+    // SAFETY: the handle is a live, synchronous pipe instance owned by pipe.
+    match unsafe { ConnectNamedPipe(HANDLE(pipe.as_raw_handle()), None) } {
+        // A client that connected before this call is still a connection.
+        Err(err) if err.code() == ERROR_PIPE_CONNECTED.to_hresult() => Ok(()),
+        other => other,
     }
 }
 
-fn serve_client(app: Arc<App>, peer_uid: u32, stream: impl std::io::Read + Write) {
+/// The client process must run as the daemon's user. Any failure is foreign.
+#[cfg(windows)]
+fn pipe_peer(pipe: &std::fs::File, own: &crate::win_acl::UserSid) -> Peer {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
+    let mut pid = 0u32;
+    // SAFETY: the handle is a connected pipe owned by pipe; pid is a local.
+    let known = unsafe { GetNamedPipeClientProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) };
+    let is_self = known.is_ok()
+        && pid != 0
+        && crate::win_acl::process_user(pid).is_ok_and(|user| user.equals(own));
+    Peer { is_self }
+}
+
+fn serve_client<S: std::io::Read + Write>(app: Arc<App>, peer: Peer, stream: S) -> S {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
+    if reader.read_line(&mut line).is_ok() {
+        let verifier = PlatformVerifier;
+        let keys = KeyringHandle;
+        let response = handle_line(&app, &verifier, &keys, peer, &line);
+        let _ = writeln!(reader.get_mut(), "{response}");
     }
-    let verifier = PlatformVerifier;
-    let keys = KeyringHandle;
-    let response = handle_line(&app, &verifier, &keys, peer_uid, &line);
-    let _ = writeln!(reader.get_mut(), "{response}");
+    reader.into_inner()
 }
 
 pub fn handle_line(
     app: &App,
     verifier: &dyn UserVerifier,
     secrets: &dyn SecretHandle,
-    peer_uid: u32,
+    peer: Peer,
     line: &str,
 ) -> String {
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(_) => return err_json(&Error::BadRequest("shell request is not json".into())),
     };
-    match dispatch(app, verifier, secrets, peer_uid, &request) {
+    match dispatch(app, verifier, secrets, peer, &request) {
         Ok(value) => json!({"ok": true, "result": value}).to_string(),
         Err(err) => err_json(&err),
     }
@@ -147,10 +250,10 @@ fn dispatch(
     app: &App,
     verifier: &dyn UserVerifier,
     secrets: &dyn SecretHandle,
-    peer_uid: u32,
+    peer: Peer,
     request: &serde_json::Value,
 ) -> crate::Result<serde_json::Value> {
-    if !peer_is_self(peer_uid) {
+    if !peer.is_self {
         return Err(Error::Unauthorized);
     }
     let token = request
@@ -371,15 +474,23 @@ mod tests {
     use crate::verify_user::TestVerifier;
     use crate::{build_app, Config, MockProvider};
 
-    fn self_uid() -> u32 {
-        #[cfg(unix)]
-        {
-            unsafe { libc::geteuid() }
-        }
-        #[cfg(not(unix))]
-        {
-            0
-        }
+    const SELF: Peer = Peer { is_self: true };
+    const FOREIGN: Peer = Peer { is_self: false };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_pair_peer_is_self() {
+        let (left, _right) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(unix_peer(&left).is_self);
+    }
+
+    #[test]
+    fn the_pipe_name_is_stable_per_data_path() {
+        let one = crate::shell_pipe_name(std::path::Path::new("a/db.sqlite"));
+        assert!(one.starts_with(r"\\.\pipe\dasdevbot-"), "{one}");
+        assert_eq!(one.len(), r"\\.\pipe\dasdevbot-".len() + 32);
+        assert_eq!(one, crate::shell_pipe_name(std::path::Path::new("a/db.sqlite")));
+        assert_ne!(one, crate::shell_pipe_name(std::path::Path::new("b/db.sqlite")));
     }
 
     #[test]
@@ -441,7 +552,7 @@ mod tests {
                 )
                 .unwrap()
         };
-        let peer = self_uid();
+        let peer = SELF;
         let spoofed = handle_line(
             &app,
             &TestVerifier { allow: true },
@@ -465,7 +576,7 @@ mod tests {
             &app,
             &TestVerifier { allow: true },
             &keys,
-            peer.wrapping_add(1),
+            FOREIGN,
             &json!({
                 "op": "decide",
                 "token": app.token,
@@ -546,7 +657,7 @@ mod tests {
         )
         .unwrap();
         let keys = MemorySecrets::new();
-        let peer = self_uid();
+        let peer = SELF;
         app.store
             .lock()
             .unwrap()
@@ -607,5 +718,38 @@ mod tests {
             Some((X509_SPKI_BLOB, "bb".to_string()))
         );
         assert!(crate::audit_log::verify(&store, &app.audit_seed).unwrap());
+    }
+
+    /// The real pipe: an own-user client is served. The squatter refusal
+    /// (FILE_FLAG_FIRST_PIPE_INSTANCE) needs a real Windows host to check.
+    #[cfg(windows)]
+    #[test]
+    fn the_named_pipe_serves_the_same_user() {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = std::env::temp_dir().join(format!("dasdevbot-pipe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("db.sqlite");
+        let (app, _rx) = build_app(
+            Config {
+                data: data.clone(),
+                web_root: None,
+                role: "executor".into(),
+                token: Some("0123456789abcdef0123456789abcdef".into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        spawn(Arc::clone(&app)).unwrap();
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(crate::shell_pipe_name(&data))
+            .unwrap();
+        let line = json!({"op": "no-such-op", "token": app.token}).to_string();
+        writeln!(pipe, "{line}").unwrap();
+        let mut reply = String::new();
+        BufReader::new(pipe).read_line(&mut reply).unwrap();
+        // A foreign peer would get "unauthorized" before the op is looked at.
+        assert!(reply.contains("unknown shell op"), "{reply}");
     }
 }
