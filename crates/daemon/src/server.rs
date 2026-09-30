@@ -15,6 +15,9 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::turn;
 use crate::{wall_ms, App, Error, Result};
 
+/// Same policy as the Tauri shell, plus `frame-ancestors 'none'`.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8787 http://localhost:8787; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+
 pub fn serve(app: Arc<App>, bind: &str) -> Result<()> {
     let local = dasdevbot_sync::bind_local().map_err(Error::Bind)?;
     if let Some(id) = local.node_id.clone() {
@@ -409,7 +412,7 @@ fn serve_static(app: &App, path: &str) -> Response<Cursor<Vec<u8>>> {
         root.join(rel)
     };
     if candidate.is_file() {
-        return file_response(app, &candidate);
+        return file_response(&candidate);
     }
     if Path::new(rel).extension().is_some() {
         return json_response(
@@ -421,7 +424,7 @@ fn serve_static(app: &App, path: &str) -> Response<Cursor<Vec<u8>>> {
     }
     let index = root.join("index.html");
     if index.is_file() {
-        file_response(app, &index)
+        file_response(&index)
     } else {
         json_response(
             404,
@@ -432,19 +435,12 @@ fn serve_static(app: &App, path: &str) -> Response<Cursor<Vec<u8>>> {
     }
 }
 
-fn file_response(app: &App, path: &Path) -> Response<Cursor<Vec<u8>>> {
+fn file_response(path: &Path) -> Response<Cursor<Vec<u8>>> {
     match fs::read(path) {
-        Ok(bytes) => {
-            let body = if path.extension().and_then(|ext| ext.to_str()) == Some("html") {
-                inject_session_token(&bytes, &app.token)
-            } else {
-                bytes
-            };
-            with_headers(
-                Response::from_data(body).with_status_code(StatusCode(200)),
-                mime(path),
-            )
-        }
+        Ok(bytes) => with_headers(
+            Response::from_data(bytes).with_status_code(StatusCode(200)),
+            mime(path),
+        ),
         Err(_) => json_response(
             404,
             &ErrorBody {
@@ -476,47 +472,6 @@ fn read_body(request: &mut Request) -> Result<String> {
     Ok(body)
 }
 
-fn inject_session_token(bytes: &[u8], token: &str) -> Vec<u8> {
-    let Ok(html) = std::str::from_utf8(bytes) else {
-        return bytes.to_vec();
-    };
-    let meta = format!(
-        "<meta name=\"dasdevbot-token\" content=\"{}\">",
-        escape_html(token)
-    );
-    let injected = if let Some(start) = html.find("<meta name=\"dasdevbot-token\"") {
-        match html[start..].find('>') {
-            Some(end_rel) => {
-                let end = start + end_rel + 1;
-                let mut out = String::with_capacity(html.len() + meta.len());
-                out.push_str(&html[..start]);
-                out.push_str(&meta);
-                out.push_str(&html[end..]);
-                out
-            }
-            None => html.to_string(),
-        }
-    } else if let Some(at) = html.find("<head>") {
-        let split = at + "<head>".len();
-        let mut out = String::with_capacity(html.len() + meta.len());
-        out.push_str(&html[..split]);
-        out.push_str(&meta);
-        out.push_str(&html[split..]);
-        out
-    } else {
-        format!("{meta}{html}")
-    };
-    injected.into_bytes()
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 fn bound_port(server: &Server) -> u16 {
     server
         .server_addr()
@@ -537,6 +492,7 @@ fn is_mutating(method: &Method) -> bool {
 fn host_is_loopback(request: &Request, port: u16) -> bool {
     let ip = format!("127.0.0.1:{port}");
     let name = format!("localhost:{port}");
+    let v6 = format!("[::1]:{port}");
     let mut saw = false;
     for header in request.headers() {
         if !header.field.equiv("Host") {
@@ -544,7 +500,7 @@ fn host_is_loopback(request: &Request, port: u16) -> bool {
         }
         saw = true;
         let value = header.value.as_str().trim();
-        if value != ip && value != name {
+        if value != ip && value != name && value != v6 {
             return false;
         }
     }
@@ -678,6 +634,9 @@ fn with_headers(
     response
         .with_header(header("Content-Type", content_type))
         .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Content-Security-Policy", CONTENT_SECURITY_POLICY))
+        .with_header(header("X-Frame-Options", "DENY"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -691,7 +650,11 @@ mod tests {
     use crate::turn::spawn_worker;
     use crate::Config;
     use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
     use std::time::{Duration, Instant};
+
+    const STRONG_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     #[test]
     fn ipc_round_trip_approval_is_recorded_and_not_executed() {
@@ -944,7 +907,7 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
-                token: Some("desktop-only-token".into()),
+                token: Some(STRONG_TOKEN.into()),
             },
             Box::new(MockProvider::new()),
         )
@@ -1033,20 +996,95 @@ mod tests {
     }
 
     #[test]
-    fn desktop_html_receives_the_token_and_health_does_not() {
+    fn get_root_does_not_contain_the_token() {
         let dir = std::env::temp_dir().join(format!("dasdevbot-html-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("index.html"),
-            "<!doctype html><head><meta name=\"dasdevbot-token\" content=\"\"></head><body>ok</body>",
-        )
-        .unwrap();
+        let page = "<!doctype html><head></head><body>ok</body>";
+        fs::write(dir.join("index.html"), page).unwrap();
+        fs::write(dir.join("app.js"), "console.log('desk');").unwrap();
         let (app, _rx) = crate::build_app(
             Config {
                 data: dir.join("db.sqlite"),
                 web_root: Some(dir.clone()),
                 role: "server".into(),
-                token: Some("html-only-token".into()),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let token = app.token.clone();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        let root = agent
+            .get(&format!("http://{addr}/"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert_eq!(root, page);
+        assert!(!root.contains(&token), "GET / contained the bearer");
+        let script = agent
+            .get(&format!("http://{addr}/app.js"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(!script.contains(&token), "static file contained the bearer");
+        let health = agent
+            .get(&format!("http://{addr}/v1/health"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(!health.contains(&token), "health contained the bearer");
+    }
+
+    #[test]
+    fn missing_host_header_is_rejected() {
+        let (addr, token) = serve_fixture(None);
+        let response = raw_http(
+            &addr,
+            "GET /v1/health HTTP/1.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 403") || response.starts_with("HTTP/1.0 403"),
+            "missing Host was not rejected"
+        );
+        assert!(response.contains("rejected host"));
+        assert!(!response.contains(&token), "response echoed the bearer");
+    }
+
+    #[test]
+    fn ipv6_loopback_host_is_accepted() {
+        let (addr, _token) = serve_fixture(None);
+        let port = addr.rsplit_once(':').unwrap().1;
+        let response = raw_http(
+            &addr,
+            &format!("GET /v1/health HTTP/1.1\r\nHost: [::1]:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"),
+            "ipv6 loopback host was rejected"
+        );
+        assert!(response.contains("\"ready\":true"));
+    }
+
+    #[test]
+    fn responses_carry_frame_and_content_type_headers() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-hdr-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.html"), "<!doctype html><body>ok</body>").unwrap();
+        let (app, _rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: Some(dir),
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
             },
             Box::new(MockProvider::new()),
         )
@@ -1057,28 +1095,20 @@ mod tests {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(2))
             .build();
-        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
-        let page = agent
-            .get(&format!("http://{addr}/"))
-            .call()
-            .unwrap()
-            .into_string()
-            .unwrap();
-        assert!(page.contains("content=\"html-only-token\""));
-        assert_eq!(page.matches("dasdevbot-token").count(), 1);
-        let health = agent
-            .get(&format!("http://{addr}/v1/health"))
-            .call()
-            .unwrap()
-            .into_string()
-            .unwrap();
-        assert!(!health.contains("html-only-token"));
-        assert!(agent
-            .get(&format!("http://{addr}/v1/health"))
-            .call()
-            .unwrap()
-            .header("Access-Control-Allow-Origin")
-            .is_none());
+        let health_url = format!("http://{addr}/v1/health");
+        let start = Instant::now();
+        let health = loop {
+            if let Ok(response) = agent.get(&health_url).call() {
+                break response;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!("daemon did not answer {health_url}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_security_headers(&health);
+        let page = agent.get(&format!("http://{addr}/")).call().unwrap();
+        assert_security_headers(&page);
     }
 
     #[test]
@@ -1090,7 +1120,7 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
-                token: Some("desktop-only-token".into()),
+                token: Some(STRONG_TOKEN.into()),
             },
             Box::new(MockProvider::new()),
         )
@@ -1189,7 +1219,7 @@ mod tests {
             data: dir.join("db.sqlite"),
             web_root: None,
             role: "server".into(),
-            token: Some("bind-test-token".into()),
+            token: Some(STRONG_TOKEN.into()),
         })
         .unwrap();
         let bind = format!("127.0.0.1:{port}");
@@ -1208,6 +1238,58 @@ mod tests {
         } else {
             assert!(health["endpoint_id"].is_null());
         }
+    }
+
+    fn serve_fixture(web_root: Option<std::path::PathBuf>) -> (String, String) {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-fix-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, _rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root,
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let token = app.token.clone();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+        (addr, token)
+    }
+
+    fn raw_http(addr: &str, request: &str) -> String {
+        let start = Instant::now();
+        loop {
+            if let Ok(mut stream) = TcpStream::connect(addr) {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream.write_all(request.as_bytes()).unwrap();
+                let _ = stream.shutdown(Shutdown::Write);
+                let mut buf = String::new();
+                let _ = stream.read_to_string(&mut buf);
+                if !buf.is_empty() {
+                    return buf;
+                }
+            }
+            if start.elapsed() > Duration::from_secs(2) {
+                panic!("no HTTP response from {addr}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_security_headers(response: &ureq::Response) {
+        assert_eq!(
+            response.header("Content-Security-Policy"),
+            Some(CONTENT_SECURITY_POLICY)
+        );
+        assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+        assert_eq!(response.header("X-Frame-Options"), Some("DENY"));
+        assert_eq!(response.header("X-Content-Type-Options"), Some("nosniff"));
     }
 
     fn wait_ok(agent: &ureq::Agent, url: &str) -> serde_json::Value {

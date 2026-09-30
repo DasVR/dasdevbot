@@ -41,7 +41,13 @@ cd ../..
 ./target/release/dasdevbotd serve
 ```
 
-Open <http://127.0.0.1:8787>. Click **Simulate repo.push**. Reviewer wakes, drafts a review, and the approval card appears. **Approve** or **Deny**. The event log gains `approval.decided`. Nothing is sent to GitHub or anywhere else.
+With the daemon running, start the Vite dev server and use that page for the clickable demo:
+
+```bash
+cd apps/desktop && npm run dev
+```
+
+Open <http://127.0.0.1:5173>. Click **Simulate repo.push**. Reviewer wakes, drafts a review, and the approval card appears. **Approve** or **Deny**. The event log gains `approval.decided`. Nothing is sent to GitHub or anywhere else. The dev server injects the bearer into the page it serves. `npm run build` does not.
 
 From another shell, against a running daemon:
 
@@ -49,11 +55,11 @@ From another shell, against a running daemon:
 ./target/release/dasdevbotd emit --repo DasVR/NIL --ref phase0
 ```
 
-Useful flags: `--bind`, `--data` (default `data/dasdevbot.sqlite`), `--web`, `--role server|device|display`, `--token`. The role is recorded; phase 0 behavior does not change with it. Non-loopback binds need `--allow-remote`, and that flag refuses to start unless `--token` or `DASDEVBOT_TOKEN` is set.
+Useful flags: `--bind`, `--data` (default `data/dasdevbot.sqlite`), `--web`, `--role server|device|display`, `--token`. The role is recorded; phase 0 behavior does not change with it. The bind stays on loopback. `--allow-remote` is refused until Phase 1 or TLS, including together with `--web`.
 
-`serve` mints a bearer for mutating routes, writes it to `<data>.token` (mode 0600), and injects it into the desktop HTML. The API does not return it. Send it only in the `Authorization` header. A request that puts the bearer in the URL or query string is rejected, and the daemon does not log the token. `emit` reads that file, or `--token`.
+`serve` mints a bearer of at least 32 random bytes, writes it to `<data>.token` (mode 0600), and does not put it in any HTML it serves. The API does not return it, and the daemon does not log it. Send it only in the `Authorization` header. A request that puts the bearer in the URL or query string is rejected. `emit` reads the token file, or `--token`. The Tauri shell reads that file and passes the bearer to the webview through an init script (`window.__DASDEVBOT_TOKEN`) and the `session_token` IPC command.
 
-Set `XAI_API_KEY` before `serve` to call xAI. Leave it unset to stay on the mock provider. Do not commit the key. The xAI base URL is the compile-time constant `https://api.x.ai/v1`. A `dev` Cargo feature can override it only in a debug build; a release binary keeps the official URL. The process environment cannot redirect it.
+Set `XAI_API_KEY` before `serve` to call xAI. Leave it unset to stay on the mock provider. Do not commit the key. The xAI base URL is the compile-time constant `https://api.x.ai/v1`. The process environment cannot redirect it.
 
 One real call, with no mock fallback:
 
@@ -63,7 +69,7 @@ XAI_API_KEY=... ./target/release/dasdevbotd smoke-xai
 
 If `XAI_API_KEY` is unset, that command prints `dasdevbotd smoke-xai: skipped, XAI_API_KEY is not set` and exits 0. It does not invent a completion. `XAI_MODEL` overrides the model (default `grok-4.6`).
 
-`cd apps/desktop && npm run dev` is the Vite dev server on port 5173. It proxies `/v1` to the daemon.
+The daemon still serves `apps/desktop/dist` on <http://127.0.0.1:8787> when that build exists. That page has no bearer, so mutating actions from it are rejected. `cd apps/desktop && npm run dev` is the Vite dev server on port 5173. It proxies `/v1` to the daemon.
 
 ## What the spike proves
 

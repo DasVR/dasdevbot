@@ -21,6 +21,7 @@ function sessionTokenPlugin(): Plugin {
   const tokenPath = path.resolve(root, "../../data/dasdevbot.sqlite.token");
   return {
     name: "dasdevbot-session-token",
+    apply: "serve",
     transformIndexHtml(html: string): string {
       let token = "";
       try {

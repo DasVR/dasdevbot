@@ -16,6 +16,8 @@ use std::os::unix::fs::OpenOptionsExt;
 
 pub use provider::{from_env, smoke_xai, LlmProvider, MockProvider};
 pub use server::{serve, url_exposes_bearer};
+
+const MIN_TOKEN_BYTES: usize = 32;
 pub use store::Store;
 
 use provider::ProviderError;
@@ -72,20 +74,6 @@ pub fn build_and_worker(config: Config) -> Result<Arc<App>> {
     Ok(app)
 }
 
-/// `--allow-remote` stays closed unless the operator chose the bearer.
-pub fn require_explicit_token(allow_remote: bool, token: Option<&str>) -> Result<()> {
-    if !allow_remote {
-        return Ok(());
-    }
-    match token {
-        Some(token) if !token.trim().is_empty() => Ok(()),
-        _ => Err(Error::BadRequest(
-            "refusing --allow-remote unless a bearer token is set with --token or DASDEVBOT_TOKEN"
-                .into(),
-        )),
-    }
-}
-
 pub fn session_token_path(data: &Path) -> PathBuf {
     let mut name = data
         .file_name()
@@ -103,7 +91,15 @@ pub fn build_app(
     let node = store.node_id().to_string();
     let (wake, rx) = mpsc::channel();
     let token = match config.token {
-        Some(token) if !token.trim().is_empty() => token,
+        Some(token) if !token.trim().is_empty() => {
+            let token = token.trim().to_string();
+            if token.len() < MIN_TOKEN_BYTES {
+                return Err(Error::BadRequest(
+                    "bearer token must be at least 32 random bytes".into(),
+                ));
+            }
+            token
+        }
         _ => mint_token(),
     };
     persist_token(&config.data, &token)?;
@@ -121,11 +117,19 @@ pub fn build_app(
 }
 
 fn mint_token() -> String {
-    format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
+    let mut bytes = [0u8; MIN_TOKEN_BYTES];
+    getrandom::getrandom(&mut bytes).expect("os rng");
+    hex_encode(&bytes)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
 }
 
 fn persist_token(data: &Path, token: &str) -> Result<()> {
@@ -156,10 +160,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allow_remote_requires_an_explicit_token() {
-        assert!(require_explicit_token(false, None).is_ok());
-        assert!(require_explicit_token(true, None).is_err());
-        assert!(require_explicit_token(true, Some("  ")).is_err());
-        assert!(require_explicit_token(true, Some("operator-token")).is_ok());
+    fn token_must_be_at_least_32_random_bytes() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-token-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let short = build_app(
+            Config {
+                data: dir.join("short.sqlite"),
+                web_root: None,
+                role: "server".into(),
+                token: Some("a".repeat(MIN_TOKEN_BYTES - 1)),
+            },
+            Box::new(MockProvider::new()),
+        );
+        match short {
+            Err(err) => assert!(err.to_string().contains("32"), "{err}"),
+            Ok(_) => panic!("short token was accepted"),
+        }
+
+        let (minted, _) = build_app(
+            Config {
+                data: dir.join("minted.sqlite"),
+                web_root: None,
+                role: "server".into(),
+                token: None,
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        assert!(minted.token.len() >= MIN_TOKEN_BYTES);
+        assert_eq!(minted.token.len(), MIN_TOKEN_BYTES * 2);
+
+        let supplied = "b".repeat(MIN_TOKEN_BYTES);
+        let (app, _) = build_app(
+            Config {
+                data: dir.join("supplied.sqlite"),
+                web_root: None,
+                role: "server".into(),
+                token: Some(format!("  {supplied}  ")),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        assert_eq!(app.token, supplied);
     }
 }

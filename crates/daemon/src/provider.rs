@@ -8,19 +8,6 @@ const DEFAULT_MODEL: &str = "grok-4.6";
 /// Official xAI chat-completions base. Every build pins this.
 pub const XAI_BASE: &str = "https://api.x.ai/v1";
 
-/// Base the adapter calls. Equals [`XAI_BASE`] unless this crate is built with
-/// the `dev` feature and debug assertions. Release builds keep [`XAI_BASE`]
-/// even when that feature is enabled. The debug override is the compile-time
-/// environment variable `DASDEVBOT_DEV_XAI_BASE`.
-#[cfg(all(feature = "dev", debug_assertions))]
-pub const XAI_CHAT_BASE: &str = match option_env!("DASDEVBOT_DEV_XAI_BASE") {
-    Some("") | None => XAI_BASE,
-    Some(value) => value,
-};
-
-#[cfg(not(all(feature = "dev", debug_assertions)))]
-pub const XAI_CHAT_BASE: &str = XAI_BASE;
-
 /// Tokens reserved before a provider call. A turn whose agent cannot cover this does not call.
 pub const RESERVE_TOKENS: u64 = 256;
 
@@ -123,7 +110,7 @@ impl XaiProvider {
         Self {
             api_key,
             model,
-            base: XAI_CHAT_BASE,
+            base: XAI_BASE,
             agent,
         }
     }
@@ -185,7 +172,7 @@ pub fn smoke_xai() -> Result<bool, ProviderError> {
             return Ok(false);
         }
     };
-    // Uses the pinned XAI_CHAT_BASE (api.x.ai in every release build).
+    // Uses the pinned XAI_BASE; the environment cannot redirect it.
     let provider = XaiProvider::from_env(key);
     let started = std::time::Instant::now();
     let completion = provider.complete(&CompletionRequest {
@@ -292,10 +279,8 @@ mod tests {
     #[test]
     fn xai_base_is_pinned_to_the_official_host() {
         assert_eq!(XAI_BASE, "https://api.x.ai/v1");
-        #[cfg(not(all(feature = "dev", debug_assertions)))]
-        assert_eq!(XAI_CHAT_BASE, XAI_BASE);
         let provider = XaiProvider::from_env("test-key".into());
-        assert_eq!(provider.base, XAI_CHAT_BASE);
+        assert_eq!(provider.base, XAI_BASE);
     }
 
     #[test]
