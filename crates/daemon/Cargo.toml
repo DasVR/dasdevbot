@@ -6,6 +6,10 @@ license.workspace = true
 publish.workspace = true
 description = "dasdevbot daemon. Same binary for every node role."
 
+[features]
+default = ["p2p"]
+p2p = ["dasdevbot-sync/p2p"]
+
 [lib]
 name = "dasdevbotd"
 path = "src/lib.rs"
@@ -17,7 +21,7 @@ path = "src/main.rs"
 [dependencies]
 dasdevbot-core = { path = "../core" }
 dasdevbot-proto = { path = "../proto" }
-dasdevbot-sync = { path = "../sync" }
+dasdevbot-sync = { path = "../sync", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

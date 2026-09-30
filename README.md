@@ -2,13 +2,13 @@
 
 A clean-room, local-first runtime for AI teammates. An agent is a row — persona, memory namespace, budget — woken into a shared daemon only when an event arrives. Idle teammates cost nothing because they are not processes.
 
-This branch is **phase 0**: the spike that has to work before the daemon language is treated as settled. It is Rust. Sync is a stub. Nothing here is copied from openbot.
+This branch is **phase 0**: the spike that has to work before the daemon language is treated as settled. It is Rust. `serve` binds a local iroh endpoint. Nothing here is copied from openbot.
 
 ## Phase 0 choices
 
 - **IPC is loopback HTTP, JSON, protocol version 1** (`crates/proto`). The daemon binds `127.0.0.1` and blocks in `accept`, so idle means a parked thread rather than a poll loop. The same messages can move to a Tauri shell or to iroh later without a new vocabulary. A browser can speak HTTP; a named pipe cannot, and this spike's client is a browser.
 - **The client is Svelte 5 + Vite**, served by the daemon from `apps/desktop/dist`. `apps/desktop/src-tauri` is the Tauri 2 scaffold and is not built here.
-- **`crates/sync` does not link iroh.** The design gate wanted iroh in the binary before trusting the RSS budget. This spike measures the kernel alone (SQLite, the queue, one provider call, loopback IPC) so a 20 MB binary is a statement about that kernel. Headroom, if any, is in `BENCHMARKS.md`.
+- **`crates/sync` links iroh 1.3 behind the `p2p` feature, which is on by default.** `serve` binds an endpoint with relays and port mapping off and prints the node id. It does not dial anyone. `cargo build --release --no-default-features -p dasdevbotd` leaves iroh out. Both sizes are in `BENCHMARKS.md`.
 - **One shared worker** blocks on a channel. Inserting a job sends a wake. There is no timer and no per-agent thread.
 - **Provider.** `XAI_API_KEY` selects xAI chat completions (`https://api.x.ai/v1/chat/completions`, model `grok-4.6` unless `XAI_MODEL` is set). If the key is missing, a **mock provider** writes the draft. Mock output is prefixed with `[mock provider]`. Token counts on that path are `char/4` estimates and the charge is `$0.00`. The health payload and the ledger line name which one ran.
 - **Approving does not post.** The decision is an event. The external effect is not executed.
@@ -19,7 +19,7 @@ This branch is **phase 0**: the spike that has to work before the daemon languag
 ```
 crates/core     events, gate, budgets, leases (no I/O)
 crates/proto    versioned daemon↔client messages
-crates/sync     stub (iroh not linked)
+crates/sync     iroh endpoint (`p2p`, default on)
 crates/daemon   dasdevbotd
 apps/desktop    Svelte 5 client and a Tauri 2 scaffold
 integrations/   placeholders only
@@ -53,6 +53,14 @@ Useful flags: `--bind`, `--data` (default `data/dasdevbot.sqlite`), `--web`, `--
 
 Set `XAI_API_KEY` before `serve` to call xAI. Leave it unset to stay on the mock provider. Do not commit the key.
 
+One real call, with no mock fallback:
+
+```bash
+XAI_API_KEY=... ./target/release/dasdevbotd smoke-xai
+```
+
+If `XAI_API_KEY` is unset, that command prints `dasdevbotd smoke-xai: skipped, XAI_API_KEY is not set` and exits 0. It does not invent a completion. `XAI_MODEL` overrides the model (default `grok-4.6`).
+
 `cd apps/desktop && npm run dev` is the Vite dev server on port 5173. It proxies `/v1` to the daemon.
 
 ## What the spike proves
@@ -67,4 +75,4 @@ Measurements are in `BENCHMARKS.md`. They are from a real run of `scripts/bench.
 
 ## Out of this spike
 
-Pairing, iroh, MCP, sandboxing, embeddings, Pocket, schedules, and a built Tauri shell.
+Pairing, replication over the bound endpoint, MCP, sandboxing, embeddings, Pocket, schedules, and a built Tauri shell.
