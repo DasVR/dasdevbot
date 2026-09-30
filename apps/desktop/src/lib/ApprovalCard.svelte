@@ -434,12 +434,6 @@
       },
       tokenEase("--ease-draw"),
     );
-    if (reducedMotion.current) {
-      checkOffset = 0;
-      await wait(tokenMs("--dur-base", 120));
-    }
-    // The lead check unmounts in the same turn the Approved label mounts.
-    checkOffset = 1;
     committing = "approve";
     await settleDecision("approve");
     approveSeal = false;
@@ -517,7 +511,6 @@
     holdKind = null;
     holdSealed = true;
     if (kind === "approve") {
-      checkOffset = 1;
       committing = "approve";
       void settleDecision("approve");
       return;
@@ -777,15 +770,7 @@
                 <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
               </svg>
             {/if}
-            <span class="face">
-              <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
-              <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
-                <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
-                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
-                </svg>
-                Approved
-              </span>
-            </span>
+            Approve draft
           </button>
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
         {/if}
@@ -1287,37 +1272,6 @@
     left: 18px;
   }
 
-  .check.inline {
-    position: static;
-  }
-
-  .face {
-    display: grid;
-    place-items: center;
-  }
-
-  .face-idle,
-  .face-done {
-    grid-area: 1 / 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    transition: opacity var(--dur-soft) var(--ease-in-out);
-  }
-
-  .face-done {
-    opacity: 0;
-  }
-
-  .face-idle.gone {
-    opacity: 0;
-  }
-
-  .face-done.show {
-    opacity: 1;
-  }
-
   .quiet {
     margin-top: var(--s-3);
     display: flex;
@@ -1535,11 +1489,6 @@
     .deny:active:not(:disabled) {
       background: var(--paper-sunken);
       box-shadow: var(--highlight-top), var(--shadow-puff);
-      transition: none;
-    }
-
-    .face-idle,
-    .face-done {
       transition: none;
     }
   }
