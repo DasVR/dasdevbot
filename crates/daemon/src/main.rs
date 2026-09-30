@@ -62,6 +62,7 @@ struct Flags {
     provider: ProviderKind,
     model: Option<String>,
     dev_env_secrets: bool,
+    claude_home: Option<PathBuf>,
 }
 
 fn flags(args: Vec<String>) -> Result<Flags, Error> {
@@ -77,6 +78,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut provider = ProviderKind::Ollama;
     let mut model = None;
     let mut dev_env_secrets = false;
+    let mut claude_home = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         let mut value = || {
@@ -106,6 +108,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             }
             "--model" => model = Some(value()?),
             "--dev-env-secrets" => dev_env_secrets = true,
+            "--claude-home" => claude_home = Some(PathBuf::from(value()?)),
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -136,6 +139,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         provider,
         model,
         dev_env_secrets,
+        claude_home,
     })
 }
 
@@ -157,6 +161,7 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
         dev_env_secrets: flags.dev_env_secrets,
         command: CommandKind::Serve,
         role: flags.role.clone(),
+        claude_home: flags.claude_home.clone(),
     })?;
     let app = dasdevbotd::build_and_worker(
         Config {
@@ -194,6 +199,7 @@ fn smoke_model(args: Vec<String>) -> Result<(), Error> {
         dev_env_secrets: flags.dev_env_secrets,
         command: CommandKind::SmokeModel,
         role: flags.role,
+        claude_home: flags.claude_home,
     }) {
         Ok(provider) => provider,
         Err(ProviderError::Unavailable(message)) => {
@@ -329,8 +335,9 @@ Usage:
                   [--web apps/desktop/dist] [--role server|device|display]
                   [--token TOKEN]
                   [--provider ollama|ollama-local|claude-cli] [--model NAME]
-                  [--dev-env-secrets]
+                  [--claude-home PATH] [--dev-env-secrets]
   dasdevbotd smoke-model --provider ollama|ollama-local|claude-cli [--model NAME]
+                         [--claude-home PATH]
   dasdevbotd secret set <name> [--stdin]
   dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
                   [--repo DasVR/NIL] [--ref phase0]
@@ -345,8 +352,9 @@ together with --web. The bind stays on loopback.
 The default provider is Ollama Cloud at https://ollama.com. Store the key with
 `secret set ollama` (no-echo TTY, or `--stdin` from a pipe). `--dev-env-secrets`
 reads OLLAMA_API_KEY and is refused on the server role. `--model` is optional.
-ollama-local talks only to 127.0.0.1:11434. claude-cli uses the pinned Claude
-Code CLI. The mock provider is for tests.
+ollama-local talks only to 127.0.0.1:11434. claude-cli requires --claude-home.
+That directory is the CLI's HOME. On Ubuntu, log in once as the service user
+with `sudo -iu dasdevbot claude`. See deploy/ubuntu. The mock provider is for tests.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.

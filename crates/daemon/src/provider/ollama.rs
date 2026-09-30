@@ -4,7 +4,7 @@
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
@@ -44,6 +44,26 @@ pub fn capped_busy_delay(step: u32) -> u64 {
     OLLAMA_BUSY_INITIAL_MS
         .saturating_mul(1_u64 << shift)
         .min(OLLAMA_BUSY_MAX_MS)
+}
+
+/// Spread a scheduled wait by 20% without leaving 0..=`OLLAMA_BUSY_MAX_MS`.
+/// `unit` is 0..=1000. 0 is the low end, 1000 is the high end, 500 is the schedule.
+pub fn jittered_backoff(base_ms: u64, unit: u32) -> u64 {
+    let unit = u64::from(unit.min(1000));
+    let delta = base_ms / 5;
+    let low = base_ms.saturating_sub(delta);
+    let high = base_ms.saturating_add(delta).min(OLLAMA_BUSY_MAX_MS);
+    if high <= low {
+        return low;
+    }
+    low + (high - low) * unit / 1000
+}
+
+fn jitter_unit() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos() % 1001)
+        .unwrap_or(0)
 }
 
 const CLOUD_QUOTA_ABSENT: &str = "Ollama Cloud chat responses include per-call token counts. GET /api/usage is the only account signal, and only a remaining monthly-credit fraction is accepted. No session or weekly limit is read.";
@@ -88,7 +108,10 @@ impl OllamaCloud {
         let mut completion = run_busy_retries(
             || self.post_chat(&model, req),
             charge,
-            |backoff_ms| std::thread::sleep(Duration::from_millis(backoff_ms)),
+            |backoff_ms| {
+                let waited = jittered_backoff(backoff_ms, jitter_unit());
+                std::thread::sleep(Duration::from_millis(waited));
+            },
         )?;
         self.observe_usage(&mut completion);
         Ok(completion)
@@ -629,6 +652,31 @@ mod tests {
         assert_eq!(OLLAMA_BUSY_INITIAL_MS, 2_000);
         assert_eq!(OLLAMA_BUSY_MAX_MS, 60_000);
         assert_eq!(OLLAMA_BUSY_MAX_ATTEMPTS, 6);
+        for base in [2_000_u64, 4_000, 8_000, 16_000, 32_000, 60_000] {
+            for unit in [0, 500, 1000] {
+                let waited = jittered_backoff(base, unit);
+                let low = base - base / 5;
+                let high = (base + base / 5).min(OLLAMA_BUSY_MAX_MS);
+                assert!(
+                    (low..=high).contains(&waited),
+                    "{waited} left {low}..={high}"
+                );
+            }
+        }
+        assert!(jittered_backoff(60_000, 1000) <= OLLAMA_BUSY_MAX_MS);
+        let req = CompletionRequest {
+            model: String::new(),
+            system: "abcd".into(),
+            user: "abcd".into(),
+            max_tokens: 512,
+        };
+        assert_eq!(
+            crate::provider::LlmProvider::attempt_worst_case(
+                &OllamaCloud::new(Secret::new("k"), None),
+                &req
+            ),
+            515
+        );
         assert_eq!(busy_backoff_after(0), None);
         assert_eq!(busy_backoff_after(1), Some(2_000));
         assert_eq!(busy_backoff_after(2), Some(4_000));

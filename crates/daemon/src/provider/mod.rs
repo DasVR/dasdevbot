@@ -186,6 +186,19 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<Completion, ProviderError>;
     fn id(&self) -> &'static str;
     fn detail(&self) -> String;
+    /// Tokens one attempt can spend. The admission ledger reserves this before the
+    /// attempt. This daemon reports the estimate and does not reserve it.
+    fn attempt_worst_case(&self, req: &CompletionRequest) -> u64 {
+        attempt_worst_case_tokens(req, 0)
+    }
+}
+
+/// Input estimate, plus `max_tokens`, plus any per-attempt accounting the provider adds.
+pub fn attempt_worst_case_tokens(req: &CompletionRequest, retry_accounting: u64) -> u64 {
+    estimate_tokens(&req.system)
+        .saturating_add(estimate_tokens(&req.user))
+        .saturating_add(u64::from(req.max_tokens))
+        .saturating_add(retry_accounting)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,6 +235,8 @@ pub struct ProviderSettings {
     pub dev_env_secrets: bool,
     pub command: CommandKind,
     pub role: String,
+    /// HOME for the Claude CLI. Required for `claude-cli`. The process home is not used.
+    pub claude_home: Option<PathBuf>,
 }
 
 pub fn open_provider(settings: &ProviderSettings) -> Result<Box<dyn LlmProvider>, ProviderError> {
@@ -261,7 +276,12 @@ pub fn open_with(
         }
         ProviderKind::OllamaLocal => Ok(Box::new(OllamaLocal::new(settings.model.clone()))),
         ProviderKind::ClaudeCli => {
-            let provider = ClaudeCli::open(PathBuf::from("claude"), settings.model.clone())?;
+            let home = settings.claude_home.clone().ok_or_else(|| {
+                ProviderError::Failed(
+                    "claude_home is required; refusing to load the process home".into(),
+                )
+            })?;
+            let provider = ClaudeCli::open(PathBuf::from("claude"), settings.model.clone(), home)?;
             Ok(Box::new(provider))
         }
     }
@@ -282,6 +302,10 @@ impl LlmProvider for OllamaCloud {
 
     fn detail(&self) -> String {
         OllamaCloud::detail(self)
+    }
+
+    fn attempt_worst_case(&self, req: &CompletionRequest) -> u64 {
+        attempt_worst_case_tokens(req, ollama::OLLAMA_BUSY_RETRY_BUDGET_TOKENS)
     }
 }
 
