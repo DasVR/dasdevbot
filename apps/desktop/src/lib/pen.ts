@@ -8,6 +8,9 @@ export const DENY_MARK_PATH = "M4.5 12.6c5-.7 10-.6 15 .2";
 
 export const CHEVRON_PATH = "M4.5 2.5 8 6l-3.5 3.5";
 
+/** Quiet empty-state rule. One stroke, no card. */
+export const QUIET_LINE_PATH = "M1.5 5.2c18-.7 36-.9 54-.3 16.4.5 32.2.9 48.5.2";
+
 export interface ArrowMark {
   width: number;
   height: number;
