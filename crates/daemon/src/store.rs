@@ -680,6 +680,24 @@ impl Store {
         if decision != "approve" && decision != "deny" {
             return Err(Error::BadRequest("decision must be approve or deny".into()));
         }
+        let effect_class: String = self
+            .conn
+            .query_row(
+                "SELECT effect_class FROM approvals WHERE id = ?1",
+                [approval_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("approval {approval_id}"))
+                }
+                other => Error::Sqlite(other),
+            })?;
+        if effect_class == "destructive" {
+            return Err(Error::BadRequest(
+                "Destructive actions are off in this build.".into(),
+            ));
+        }
         let reason = clean_reason(reason);
         let status = if decision == "approve" {
             "approved"

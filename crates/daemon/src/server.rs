@@ -282,6 +282,7 @@ fn event_view(event: crate::store::StoredEvent) -> EventView {
         kind: event.kind,
         thread_id: event.thread_id,
         idempotency_key: event.idempotency_key,
+        payload: event.payload,
     }
 }
 
@@ -332,12 +333,15 @@ fn remember(
 }
 
 fn evidence_view(row: &crate::store::ApprovalRow) -> EvidenceView {
+    let (pr, pr_number) = pr_from_evidence(&row.evidence);
     if !row.evidence_repo.is_empty()
         || !row.evidence_ref.is_empty()
         || !row.evidence_event_id.is_empty()
     {
         return EvidenceView {
             repo: row.evidence_repo.clone(),
+            pr,
+            pr_number,
             git_ref: row.evidence_ref.clone(),
             event_id: row.evidence_event_id.clone(),
             kind: row.evidence_kind.clone(),
@@ -357,10 +361,30 @@ fn evidence_view(row: &crate::store::ApprovalRow) -> EvidenceView {
     }
     EvidenceView {
         repo,
+        pr,
+        pr_number,
         git_ref,
         event_id,
         kind: String::new(),
     }
+}
+
+/// `pr` line from the stored evidence text. The number is the leading `#n`.
+fn pr_from_evidence(text: &str) -> (String, String) {
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("pr ") else {
+            continue;
+        };
+        let pr = rest.trim().to_string();
+        let digits = pr
+            .strip_prefix('#')
+            .unwrap_or("")
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        return (pr, digits);
+    }
+    (String::new(), String::new())
 }
 
 fn optional_ms(value: Option<i64>, include: bool) -> Option<u64> {
@@ -527,7 +551,13 @@ mod tests {
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
-                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0 @ a41c9e2",
+                    "pr": "#212 handoff: release lock on refresh",
+                    "purpose": "Leave one review comment flagging an unhandled error path in the session handoff.",
+                    "subject": "simulated push"
+                },
                 "idempotency_key": "ipc-push-1"
             }))
             .unwrap()
@@ -541,7 +571,13 @@ mod tests {
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
-                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0 @ a41c9e2",
+                    "pr": "#212 handoff: release lock on refresh",
+                    "purpose": "Leave one review comment flagging an unhandled error path in the session handoff.",
+                    "subject": "simulated push"
+                },
                 "idempotency_key": "ipc-push-1"
             }))
             .unwrap()
@@ -557,7 +593,7 @@ mod tests {
         assert_eq!(approval["effect_class"], "external");
         assert_eq!(approval["action"], "post_pr_comment");
         assert_eq!(approval["evidence"]["repo"], "DasVR/NIL");
-        assert_eq!(approval["evidence"]["ref"], "phase0");
+        assert_eq!(approval["evidence"]["ref"], "phase0 @ a41c9e2");
         assert_eq!(approval["evidence"]["kind"], "repo.push");
         assert!(!approval["evidence"]["event_id"]
             .as_str()
@@ -583,7 +619,21 @@ mod tests {
         assert!(reviewer["tokens_spent"].as_u64().unwrap() > 0);
         assert!(!snap["ledger"].as_array().unwrap().is_empty());
         assert_eq!(snap["ledger"][0]["usage_kind"], "estimated");
-        assert_eq!(snap["ledger"][0]["micro_usd"], 0);
+        assert_eq!(snap["ledger"][0]["model"], "reviewer-small");
+        assert_eq!(snap["ledger"][0]["micro_usd"], 431);
+        assert_eq!(approval["model"], "reviewer-small");
+        assert_eq!(approval["input_tokens"], 2418);
+        assert_eq!(approval["output_tokens"], 212);
+        assert_eq!(approval["micro_usd"], 431);
+        assert_eq!(
+            approval["evidence"]["pr"],
+            "#212 handoff: release lock on refresh"
+        );
+        assert_eq!(approval["evidence"]["pr_number"], "212");
+        assert_eq!(
+            approval["purpose"],
+            "Leave one review comment flagging an unhandled error path in the session handoff."
+        );
 
         let decision = agent
             .post(&format!(
@@ -717,12 +767,23 @@ mod tests {
         assert!(emitted.created);
         assert_eq!(emitted.jobs.len(), 1);
 
-        let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
-        let approval = &snap["approvals"][0];
-        assert_eq!(approval["effect_class"], "destructive");
-        assert_eq!(approval["action"], "force_push");
-        assert_eq!(approval["draft"], "git push --force origin phase0");
-        assert_eq!(approval["status"], "pending");
+        let snap = wait_denial(&agent, &format!("http://{addr}/v1/snapshot"));
+        assert!(snap["approvals"]
+            .as_array()
+            .map(|rows| rows.is_empty())
+            .unwrap_or(false));
+        let denied = snap["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "job.failed")
+            .expect("destructive push is a denial, not a card");
+        let body: serde_json::Value =
+            serde_json::from_str(denied["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(body["policy"], "c1");
+        assert_eq!(body["effect_class"], "destructive");
+        assert_eq!(body["line"], "Destructive actions are off in this build.");
+        assert_eq!(body["command"], "git push --force origin phase0");
     }
 
     #[test]
@@ -764,6 +825,28 @@ mod tests {
             }
             if start.elapsed() > Duration::from_secs(20) {
                 panic!("daemon did not answer {url}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_denial(agent: &ureq::Agent, url: &str) -> serde_json::Value {
+        let start = Instant::now();
+        loop {
+            let snap: serde_json::Value = agent.get(url).call().unwrap().into_json().unwrap();
+            let denied = snap["events"].as_array().is_some_and(|events| {
+                events.iter().any(|event| {
+                    event["kind"] == "job.failed"
+                        && event["payload"]
+                            .as_str()
+                            .is_some_and(|payload| payload.contains("\"policy\":\"c1\""))
+                })
+            });
+            if denied {
+                return snap;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!("destructive push was not denied: {snap}");
             }
             std::thread::sleep(Duration::from_millis(20));
         }

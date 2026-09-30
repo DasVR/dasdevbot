@@ -27,3 +27,5 @@ jobs:
         run: npx playwright install --with-deps chromium
       - working-directory: apps/desktop
         run: npm run font-proof
+      - working-directory: apps/desktop
+        run: npm run approve-click

@@ -137,6 +137,34 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
     } else {
         EffectClass::External
     };
+    // Phase 1 C1: a destructive effect is denied. There is no card and no hold.
+    if class == EffectClass::Destructive {
+        let command = format!("git push --force origin {}", prepared.evidence_ref);
+        let line = "Destructive actions are off in this build.";
+        let payload = json!({
+            "job_id": job.id,
+            "effect_class": class.as_str(),
+            "outcome": "deny",
+            "policy": "c1",
+            "line": line,
+            "command": command,
+        })
+        .to_string();
+        store.append_at(
+            wall_ms(),
+            "runtime",
+            kind::JOB_FAILED,
+            &payload,
+            &format!("c1-deny:{}", job.id),
+            Some(&prepared.thread_id),
+        )?;
+        store.add_spend(
+            &prepared.agent_id,
+            tokens_i64(completion.input_tokens, completion.output_tokens),
+        )?;
+        store.fail_leased(&job.id, &app.worker_id)?;
+        return Ok(());
+    }
     let grant = store.has_grant(&prepared.agent_id, class.as_str())?;
     let outcome = decide(
         GateInput {
@@ -305,6 +333,31 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
         .get("ref")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let pr = payload
+        .get("pr")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let evidence = if pr.is_empty() {
+        format!("repo {repo}\nref {reference}\nevent {event_id}")
+    } else {
+        format!("repo {repo}\npr {pr}\nref {reference}\nevent {event_id}")
+    };
+    let stated_purpose = payload
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string);
+    let purpose = if forced {
+        format!("Force-push {reference}. This rewrites the remote branch.")
+    } else if let Some(line) = stated_purpose {
+        line
+    } else {
+        format!(
+            "Post a review comment on {repo} at {reference}. Nothing is sent until you approve, and phase 0 does not send it at all."
+        )
+    };
     Ok(Some(Prepared {
         agent_id: agent.id,
         persona: agent.persona,
@@ -313,14 +366,12 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
             "Event kind: {kind_name}\nPayload:\n{}",
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
         ),
-        evidence: format!("repo {repo}\nref {reference}\nevent {event_id}"),
+        evidence,
         evidence_repo: repo.to_string(),
         evidence_ref: reference.to_string(),
         evidence_event_id: event_id.to_string(),
         evidence_kind: kind_name.to_string(),
-        purpose: format!(
-            "Post a review comment on {repo} at {reference}. Nothing is sent until you approve, and phase 0 does not send it at all."
-        ),
+        purpose,
         thread_id,
         tainted,
         forced,

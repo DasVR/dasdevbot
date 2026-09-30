@@ -5,9 +5,10 @@
   import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
   import { tokenEase, tokenMs } from "./lib/cssTokens";
-  import { QUIET_LINE_PATH } from "./lib/pen";
+  import { DENY_MARK_PATH, QUIET_LINE_PATH } from "./lib/pen";
   import {
     decide,
+    destructiveDenial,
     emitPush,
     formatStreamTime,
     formatUsd,
@@ -35,7 +36,10 @@
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const pending = $derived.by(() => {
-    const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
+    const rows =
+      snapshot?.approvals.filter(
+        (approval) => approval.status === "pending" && approval.effect_class !== "destructive",
+      ) ?? [];
     return rows.reduce<Approval | null>((oldest, approval) => {
       if (!oldest || approval.created_at < oldest.created_at) {
         return approval;
@@ -68,6 +72,7 @@
         who: source ? `${source} · ${event.kind}` : event.kind,
         detail: shortId,
         title: event.hlc,
+        denial: destructiveDenial(event.payload),
         receipt: receipts[event.idempotency_key] ?? null,
         pendingHere: pendingKey !== "" && event.idempotency_key === pendingKey,
       };
@@ -92,10 +97,13 @@
       return latest;
     }, null);
   });
-  // Pending is waiting on a human. A decided, uncommitted approval is filing: ink-3, no dot.
+  // Pending is waiting on a human. During undo the roster is ink-3 "approved · undo Ns", no dot.
   const waitingOnHuman = $derived(
     (snapshot?.approvals ?? []).some(
-      (approval) => approval.agent_id === reviewer?.id && approval.status === "pending",
+      (approval) =>
+        approval.agent_id === reviewer?.id &&
+        approval.status === "pending" &&
+        approval.effect_class !== "destructive",
     ),
   );
   const filingUndo = $derived.by(() => {
@@ -126,6 +134,7 @@
   async function refresh(): Promise<void> {
     try {
       snapshot = await getSnapshot();
+      now = Date.now();
       error = null;
       if (!primed) {
         await tick();
@@ -243,95 +252,6 @@
     };
   }
 
-  function pinOverlay(stage: HTMLElement): () => void {
-    const column = stage.closest("main");
-    if (!column) {
-      return () => {};
-    }
-    const place = () => {
-      const box = column.getBoundingClientRect();
-      stage.style.setProperty("--overlay-left", `${box.left}px`);
-      stage.style.setProperty("--overlay-width", `${box.width}px`);
-    };
-    place();
-    const observer = new ResizeObserver(place);
-    observer.observe(column);
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, { passive: true });
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place);
-    };
-  }
-
-  function flipSlot(node: HTMLElement): () => void {
-    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    let first = node.getBoundingClientRect();
-    let over = node.classList.contains("over");
-    let flying = false;
-    const remember = () => {
-      if (flying) {
-        return;
-      }
-      first = node.getBoundingClientRect();
-    };
-    const observer = new ResizeObserver(remember);
-    observer.observe(node);
-    const classes = new MutationObserver(() => {
-      const nextOver = node.classList.contains("over");
-      if (nextOver === over) {
-        return;
-      }
-      const origin = first;
-      over = nextOver;
-      const last = node.getBoundingClientRect();
-      const dx = origin.left - last.left;
-      const dy = origin.top - last.top;
-      if (motion.matches || (Math.abs(dx) < 1 && Math.abs(dy) < 1)) {
-        first = last;
-        if (!over) {
-          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
-        }
-        return;
-      }
-      flying = true;
-      if (!nextOver) {
-        node.style.zIndex = "4";
-        node.style.position = "relative";
-      }
-      node.style.transition = "none";
-      node.style.transform = `translate(${dx}px, ${dy}px)`;
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          node.style.transition = "transform var(--dur-stage) var(--ease-out)";
-          node.style.transform = "translate(0px, 0px)";
-        });
-      });
-      const done = (event: TransitionEvent) => {
-        if (event.propertyName !== "transform") {
-          return;
-        }
-        node.removeEventListener("transitionend", done);
-        node.style.transition = "";
-        node.style.transform = "";
-        node.style.zIndex = "";
-        node.style.position = "";
-        flying = false;
-        if (!over) {
-          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
-        }
-        first = node.getBoundingClientRect();
-      };
-      node.addEventListener("transitionend", done);
-    });
-    classes.observe(node, { attributes: true, attributeFilter: ["class"] });
-    return () => {
-      observer.disconnect();
-      classes.disconnect();
-    };
-  }
-
   onMount(() => {
     void refresh();
     const clock = setInterval(() => {
@@ -350,10 +270,11 @@
 <svelte:window onkeydown={onWindowKey} />
 
 {#snippet approvalSlot(approval: Approval)}
-  <div class={["slot", approval.status === "pending" && "over"]} {@attach flipSlot}>
+  <div class="slot">
     {#key approval.id}
       <ApprovalCard
         approval={approval}
+        {now}
         busy={deciding}
         shortcutTarget={approval.status === "pending"}
         ondecide={(decision, reason) => ondecide(approval.id, decision, reason)}
@@ -393,7 +314,7 @@
               {#if reviewer.status === "working"}
                 <span class="agent-status">{reviewer.status}</span>
               {:else if filingUndo && filingSeconds > 0}
-                <span class="agent-status">filing · undo {filingSeconds}s</span>
+                <span class="agent-status">{filingUndo.status === "denied" ? "denied" : "approved"} · undo {filingSeconds}s</span>
               {:else if reviewer.status === "blocked" && !filingUndo}
                 <span class="agent-status need">
                   <span class="need-dot" aria-hidden="true"></span>
@@ -422,13 +343,24 @@
 
       <main>
         <p class="section">Stream</p>
-        <div class="stage" {@attach pinOverlay}>
+        <div class="stage">
           <ol class="stream">
             {#each stream as row (row.id)}
               {@const approval = row.receipt ?? (row.pendingHere ? pending : null)}
               {@const filed = row.receipt !== null}
               <li class={filed ? "slot-row" : "event"} animate:stepRows>
-                {#if !filed}
+                {#if !filed && row.denial}
+                  <div class="row denial" title={row.title} in:arrive|global={{ play: primed }}>
+                    <time class="when" datetime={row.iso || undefined}>{row.when}</time>
+                    <svg class="dash" viewBox="0 0 24 24" aria-hidden="true">
+                      <path class="pen" pathLength="1" d={DENY_MARK_PATH} />
+                    </svg>
+                    <div class="copy">
+                      <p class="who">{row.denial.line}</p>
+                      <p class="command">{row.denial.command}</p>
+                    </div>
+                  </div>
+                {:else if !filed}
                   <div class="row" title={row.title} in:arrive|global={{ play: primed }}>
                     <time class="when" datetime={row.iso || undefined}>{row.when}</time>
                     <span class="disc" aria-hidden="true">{row.mark}</span>
@@ -438,7 +370,7 @@
                     </div>
                   </div>
                 {/if}
-                {#if approval}
+                {#if approval && approval.effect_class !== "destructive"}
                   {@render approvalSlot(approval)}
                 {/if}
               </li>
@@ -742,6 +674,29 @@
     overflow-wrap: anywhere;
   }
 
+  .denial .dash {
+    width: 24px;
+    height: 24px;
+    justify-self: center;
+  }
+
+  .denial .pen {
+    fill: none;
+    stroke: var(--pen);
+    stroke-width: 1.75px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .command {
+    margin-top: 2px;
+    font-family: var(--font-machine);
+    font-size: var(--t-micro);
+    line-height: var(--lh-micro);
+    color: var(--ink-2);
+    overflow-wrap: anywhere;
+  }
+
   /* Filed receipt sits in the row's copy column. Same tracks as .row, without a hairline rule. */
   .slot-row {
     display: grid;
@@ -759,27 +714,10 @@
   }
 
   .slot {
+    width: 520px;
+    max-width: 100%;
     margin-top: 14px;
     scroll-margin-bottom: 16px;
-  }
-
-  .slot.over {
-    position: fixed;
-    z-index: 4;
-    left: var(--overlay-left, 0px);
-    width: var(--overlay-width, 100%);
-    bottom: 16px;
-    display: flex;
-    justify-content: center;
-    margin-top: 0;
-    padding: 0 28px;
-    pointer-events: none;
-    box-sizing: border-box;
-  }
-
-  .slot.over :global(article.card) {
-    width: min(520px, 100%);
-    pointer-events: auto;
   }
 
   .quiet-empty {

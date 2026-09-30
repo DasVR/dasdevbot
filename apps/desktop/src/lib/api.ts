@@ -21,6 +21,10 @@ export interface Agent {
 
 export interface Evidence {
   repo: string;
+  /** Mock `pr` row, e.g. `#212 handoff: release lock on refresh`. Empty when there is no PR. */
+  pr?: string;
+  /** Digits of the leading `#n` on `pr`. */
+  pr_number?: string;
   ref: string;
   event_id: string;
   kind: string;
@@ -76,6 +80,26 @@ export interface EventRow {
   kind: string;
   thread_id: string;
   idempotency_key: string;
+  payload: string;
+}
+
+/** Phase 1 C1. A destructive effect is this row, never a card. */
+export interface DestructiveDenial {
+  line: string;
+  command: string;
+}
+
+export function destructiveDenial(payload: string): DestructiveDenial | null {
+  let body: { policy?: string; line?: string; command?: string };
+  try {
+    body = JSON.parse(payload) as { policy?: string; line?: string; command?: string };
+  } catch {
+    return null;
+  }
+  if (body.policy !== "c1" || !body.line || !body.command) {
+    return null;
+  }
+  return { line: body.line, command: body.command };
 }
 
 export interface Snapshot {
@@ -188,12 +212,54 @@ export function clampHoldMs(ms: number): number {
   return Math.min(HOLD_MS_MAX, Math.max(HOLD_MS_MIN, Math.round(ms)));
 }
 
-export function holdDurationMs(effect: EffectClass | null, setting?: number): number {
-  const base = setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
-  if (effect === "destructive") {
-    return clampHoldMs(Math.max(base, tokenMs("--dur-hold-destructive", HOLD_MS_MAX)));
+/** External hold. Destructive work has no card and no 1200ms hold (Phase 1 C1). */
+export function holdDurationMs(_effect: EffectClass | null, setting?: number): number {
+  if (setting == null) {
+    return tokenMs("--dur-hold", HOLD_MS_MIN);
   }
-  return base;
+  return clampHoldMs(setting);
+}
+
+/**
+ * Phase 1 C4. Ask the platform authenticator, which is Windows Hello on Windows.
+ * This does not draw a dialog. True means the OS verified the user. False means
+ * they cancelled or the platform could not show Hello.
+ */
+export async function confirmWindowsHello(): Promise<boolean> {
+  const credentialsApi = navigator.credentials;
+  const platform = window.PublicKeyCredential;
+  if (!credentialsApi?.create || !platform?.isUserVerifyingPlatformAuthenticatorAvailable) {
+    return false;
+  }
+  const available = await platform.isUserVerifyingPlatformAuthenticatorAvailable();
+  if (!available) {
+    return false;
+  }
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const userId = crypto.getRandomValues(new Uint8Array(16));
+  try {
+    const credential = await credentialsApi.create({
+      publicKey: {
+        challenge,
+        rp: { name: "dasdevbot" },
+        user: { id: userId, name: "dasdevbot", displayName: "dasdevbot" },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        timeout: 60_000,
+        attestation: "none",
+        authenticatorSelection: {
+          authenticatorAttachment: "platform",
+          userVerification: "required",
+          residentKey: "discouraged",
+        },
+      },
+    });
+    return credential != null;
+  } catch (error) {
+    if (error instanceof DOMException) {
+      return false;
+    }
+    return false;
+  }
 }
 
 export function formatUsd(micro: number): string {
@@ -288,7 +354,11 @@ export async function emitPush(forced = false): Promise<void> {
       kind: "repo.push",
       payload: {
         repo: "DasVR/NIL",
-        ref: "phase0",
+        ref: forced ? "phase0" : "phase0 @ a41c9e2",
+        pr: forced ? "" : "#212 handoff: release lock on refresh",
+        purpose: forced
+          ? ""
+          : "Leave one review comment flagging an unhandled error path in the session handoff.",
         subject: "simulated push",
         note: "phase 0 attaches no diff",
         forced,

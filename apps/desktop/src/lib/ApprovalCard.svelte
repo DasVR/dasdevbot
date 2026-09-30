@@ -7,6 +7,7 @@
     effectAsk,
     effectLabel,
     effectWhy,
+    confirmWindowsHello,
     formatDecisionStamp,
     formatTokens,
     formatUsd,
@@ -46,6 +47,8 @@
 
   interface Props {
     approval: Approval;
+    /** Shared with the roster countdown so paper and the undo label flip together. */
+    now: number;
     busy?: boolean;
     holdMs?: number;
     shortcutTarget?: boolean;
@@ -55,6 +58,7 @@
 
   let {
     approval,
+    now,
     busy = false,
     holdMs,
     shortcutTarget = false,
@@ -82,8 +86,10 @@
   let reason = $state("");
   let strike = $state(0);
   let checkOffset = $state(1);
+  /** 1 hides the ink clip. 0 is the filled Approve control. */
+  let inkClip = $state(1);
+  let confirming = $state(false);
   let committing = $state<Decision | null>(null);
-  let nowMs = $state(Date.now());
 
   type HoldKind = "approve" | "deny";
   let holdKind = $state<HoldKind | null>(null);
@@ -98,11 +104,11 @@
       !approval.committed &&
       (approval.status === "approved" || approval.status === "denied") &&
       approval.undo_until != null &&
-      approval.undo_until > nowMs,
+      approval.undo_until > now,
   );
   const floating = $derived(pending || showUndo);
   const undoSeconds = $derived(
-    approval.undo_until == null ? 0 : Math.max(0, Math.ceil((approval.undo_until - nowMs) / 1000)),
+    approval.undo_until == null ? 0 : Math.max(0, Math.ceil((approval.undo_until - now) / 1000)),
   );
   const stamp = $derived(approval.decided_at == null ? "" : formatDecisionStamp(approval.decided_at));
   const decisionShort = $derived(shortEventId(approval.decision_event_id ?? ""));
@@ -139,8 +145,19 @@
     if (approval.status === "expired") {
       return "Reviewer will ask again on the next push.";
     }
+    const repo = approval.evidence.repo;
+    const prNumber = approval.evidence.pr_number ?? "";
+    if (showUndo && approval.status === "approved" && repo && prNumber) {
+      return `Posts to ${repo} #${prNumber} when undo closes. Nothing is posted yet.`;
+    }
+    if (showUndo && approval.status === "denied") {
+      return "Nothing will post. Undo brings the draft back.";
+    }
     if (approval.status === "denied" && approval.reason) {
       return `Reason: ${approval.reason}`;
+    }
+    if (approval.status === "denied") {
+      return "Undo closed. Nothing was posted.";
     }
     return "Decision recorded. Nothing posted (demo).";
   });
@@ -238,14 +255,6 @@
     return () => {
       observer.disconnect();
     };
-  }
-
-  function tickUndo(): () => void {
-    nowMs = Date.now();
-    const timer = window.setInterval(() => {
-      nowMs = Date.now();
-    }, 200);
-    return () => window.clearInterval(timer);
   }
 
   function focusReason(node: HTMLInputElement): () => void {
@@ -414,6 +423,7 @@
     if (!ok) {
       committing = null;
       checkOffset = 1;
+      inkClip = 1;
       clearMorph();
       return;
     }
@@ -424,26 +434,28 @@
     scheduleMorph(measureSettled());
   }
 
-  async function onApproveClick(): Promise<void> {
-    if (locked || denyOpen || !pending) {
+  function showApproveProgress(progress: number): void {
+    const snapped = reducedMotion.current ? (progress >= 1 ? 0 : 1) : 1 - progress;
+    checkOffset = snapped;
+    inkClip = snapped;
+  }
+
+  async function confirmHelloThenSettle(): Promise<void> {
+    confirming = true;
+    inkClip = 0;
+    checkOffset = 0;
+    const verified = await confirmWindowsHello();
+    if (!verified) {
+      confirming = false;
+      holdSealed = false;
+      checkOffset = 1;
+      inkClip = 1;
       return;
     }
     committing = "approve";
-    const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
-    await animateNumber(
-      1,
-      0,
-      drawMs,
-      (value) => {
-        checkOffset = value;
-      },
-      tokenEase("--ease-draw"),
-    );
-    if (reducedMotion.current) {
-      checkOffset = 0;
-      await wait(tokenMs("--dur-base", 120));
-    }
     await settleDecision("approve");
+    confirming = false;
+    holdSealed = false;
   }
 
   async function confirmDeny(): Promise<void> {
@@ -471,6 +483,19 @@
 
   function openDeny(): void {
     denyOpen = true;
+    if (strike >= 1) {
+      return;
+    }
+    const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
+    void animateNumber(
+      strike,
+      1,
+      drawMs,
+      (value) => {
+        strike = value;
+      },
+      tokenEase("--ease-draw"),
+    );
   }
 
   function back(): void {
@@ -484,6 +509,7 @@
     if (reducedMotion.current) {
       if (kind === "approve") {
         checkOffset = 1;
+        inkClip = 1;
       } else {
         strike = 0;
       }
@@ -496,6 +522,7 @@
       (value) => {
         if (kind === "approve") {
           checkOffset = 1 - value;
+          inkClip = 1 - value;
         } else {
           strike = value;
         }
@@ -505,7 +532,7 @@
   }
 
   function cancelHold(): void {
-    if (!holdKind || holdSealed) {
+    if (!holdKind || holdSealed || confirming) {
       return;
     }
     const kind = holdKind;
@@ -518,17 +545,25 @@
     holdKind = null;
     holdSealed = true;
     if (kind === "approve") {
-      checkOffset = 0;
-      committing = "approve";
-      void settleDecision("approve");
+      void confirmHelloThenSettle();
       return;
     }
     strike = 1;
     openDeny();
   }
 
-  function startHold(kind: HoldKind): void {
-    if (locked || denyOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
+  function startHold(kind: HoldKind, source: "key" | "pointer" = "key"): void {
+    if (
+      locked ||
+      confirming ||
+      denyOpen ||
+      !pending ||
+      effect === "destructive" ||
+      !seenArmed ||
+      (source === "key" &&
+        document.activeElement !== cardEl &&
+        !cardEl?.contains(document.activeElement))
+    ) {
       return;
     }
     cancelAnimationFrame(holdFrame);
@@ -542,7 +577,7 @@
       }
       const progress = Math.min(1, (now - start) / ms);
       if (kind === "approve") {
-        checkOffset = 1 - progress;
+        showApproveProgress(progress);
       } else {
         strike = progress;
       }
@@ -589,7 +624,11 @@
 
   function onWindowKeyup(event: KeyboardEvent): void {
     const released =
-      event.key === "Enter" || event.key === "Backspace" || event.key === "Meta" || event.key === "Control";
+      event.key === "Enter" ||
+      event.key === " " ||
+      event.key === "Backspace" ||
+      event.key === "Meta" ||
+      event.key === "Control";
     if (!released) {
       return;
     }
@@ -604,9 +643,11 @@
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
-    if (!seenArmed || locked) {
-      event.preventDefault();
+    event.preventDefault();
+    if (event.repeat || !seenArmed || locked || confirming) {
+      return;
     }
+    startHold("approve", "key");
   }
 
   async function onUndoClick(): Promise<void> {
@@ -623,6 +664,7 @@
     reason = "";
     strike = 0;
     checkOffset = 1;
+    inkClip = 1;
     committing = null;
     await tick();
     if (!cardEl) {
@@ -635,6 +677,7 @@
 <svelte:window onkeydown={onWindowKeydown} onkeyup={onWindowKeyup} />
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+{#if effect !== "destructive"}
 <article
   {@attach bindCard}
   class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
@@ -654,12 +697,15 @@
   onfocusout={() => {
     queueMicrotask(() => {
       syncFocus();
-      if (document.activeElement !== cardEl) {
+      if (cardEl && !cardEl.contains(document.activeElement)) {
         cancelHold();
       }
     });
   }}
 >
+  {#if floating}
+    <div class="lift" aria-hidden="true"></div>
+  {/if}
   {#if pending}
     {#if effect === "read"}
       <p class="risk-read">Read</p>
@@ -699,6 +745,10 @@
         <dl class="evidence" {@attach watchSeen}>
           <dt>repo</dt>
           <dd>{approval.evidence.repo}</dd>
+          {#if approval.evidence.pr}
+            <dt>pr</dt>
+            <dd>{approval.evidence.pr}</dd>
+          {/if}
           <dt>ref</dt>
           <dd>{approval.evidence.ref}</dd>
           <dt>event</dt>
@@ -748,7 +798,7 @@
             class="field"
             type="text"
             autocomplete="off"
-            placeholder="Optional"
+            placeholder="Not worth a comment on a phase-0 branch"
             onkeydown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -762,7 +812,7 @@
       <div class="actions">
         {#if denyOpen}
           <button class="deny" type="button" disabled={locked} onclick={back}>Back</button>
-          <button class="approve" type="button" disabled={locked} onclick={() => void confirmDeny()}>
+          <button class="approve solid" type="button" disabled={locked} onclick={() => void confirmDeny()}>
             Deny draft
           </button>
         {:else}
@@ -770,22 +820,36 @@
             class="approve"
             type="button"
             disabled={busy}
+            onpointerdown={(event) => {
+              if (event.button !== 0) {
+                return;
+              }
+              startHold("approve", "pointer");
+            }}
+            onpointerup={cancelHold}
+            onpointerleave={cancelHold}
+            onpointercancel={cancelHold}
             onkeydown={onApproveKeydown}
-            onclick={() => void onApproveClick()}
           >
-            {#if holdKind === "approve" || checkOffset < 1}
-              <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
-                <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
-              </svg>
-            {/if}
             <span class="face">
-              <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
-              <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
-                <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
-                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
+              {#if holdKind === "approve" || checkOffset < 1}
+                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
                 </svg>
-                Approved
-              </span>
+              {/if}
+              Approve draft
+            </span>
+            <span
+              class="ink"
+              aria-hidden="true"
+              style:clip-path={`inset(0px ${(inkClip * 100).toFixed(3)}% 0px 0px)`}
+            >
+              {#if holdKind === "approve" || checkOffset < 1}
+                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
+                </svg>
+              {/if}
+              Approve draft
             </span>
           </button>
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
@@ -793,33 +857,40 @@
       </div>
 
       <div class="quiet">
-        <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && !denyOpen}
-          {#snippet modifier()}
-            <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
-          {/snippet}
-          {#snippet enterKey()}
-            <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Enter">
-              <path d={ENTER_KEY_PATH} />
-            </svg>
-          {/snippet}
-          {#snippet deleteKey()}
-            <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Delete">
-              <path d={DELETE_KEY_PATH} />
-            </svg>
-          {/snippet}
-          <p class={["hold-hint", seenArmed && "armed"]}>
-            {#if seenArmed}
-              hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
-            {:else}
-              hold {@render modifier()} {@render enterKey()} unlocks once the evidence has been on screen
-            {/if}
-          </p>
-        {/if}
+        <p>
+          {#if confirming}
+            Confirm with Windows Hello
+          {:else}
+            Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.
+          {/if}
+        </p>
+        {#snippet modifier()}
+          <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
+        {/snippet}
+        {#snippet enterKey()}
+          <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Enter">
+            <path d={ENTER_KEY_PATH} />
+          </svg>
+        {/snippet}
+        {#snippet deleteKey()}
+          <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Delete">
+            <path d={DELETE_KEY_PATH} />
+          </svg>
+        {/snippet}
+        <p
+          class={["hold-hint", seenArmed && "armed", (!cardFocused || denyOpen) && "reserved"]}
+          aria-hidden={!cardFocused || denyOpen}
+        >
+          {#if seenArmed}
+            hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
+          {:else}
+            hold {@render modifier()} {@render enterKey()} unlocks once the evidence has been on screen
+          {/if}
+        </p>
       </div>
     </div>
   {:else}
-    <div class="receipt" {@attach tickUndo}>
+    <div class="receipt">
       {#if approval.status === "approved"}
         <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
           <path class="pen trace draw" pathLength="1" d={CHECK_PATH} />
@@ -853,10 +924,13 @@
     </div>
   {/if}
 </article>
+{/if}
 
 <style>
   .card {
     position: relative;
+    width: 520px;
+    max-width: 100%;
     color: var(--ink-1);
     transition:
       background-color var(--dur-soft) var(--ease-in-out),
@@ -871,8 +945,17 @@
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border-radius: var(--r-xl);
-    box-shadow: var(--glass-edge), var(--shadow-float);
-    padding: var(--s-2) var(--s-2) var(--s-5);
+    box-shadow: var(--glass-edge);
+    padding: var(--s-2) var(--s-2) 16px;
+  }
+
+  .lift {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: var(--shadow-float);
+    pointer-events: none;
+    z-index: -1;
   }
 
   .card.glass.receipt {
@@ -921,6 +1004,8 @@
   }
 
   .risk {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -936,11 +1021,6 @@
 
   .card[data-risk="write_local"] .risk {
     color: var(--risk-write-local);
-  }
-
-  .card[data-risk="destructive"] .risk {
-    color: var(--risk-destructive);
-    background: var(--risk-destructive-bg);
   }
 
   .risk-read {
@@ -1076,7 +1156,7 @@
     font-size: var(--evidence-size);
     line-height: 1.6;
     color: var(--ink-1);
-    background: color-mix(in oklab, var(--paper-sunken) 94%, transparent);
+    background: rgb(237 231 221 / 0.94);
     border-radius: var(--r-sm);
     padding: 10px 12px;
     display: grid;
@@ -1177,7 +1257,7 @@
     white-space: pre-wrap;
     padding: 12px 14px;
     border-radius: var(--r-sm);
-    background: color-mix(in oklab, var(--paper-raised) 94%, transparent);
+    background: rgb(251 249 245 / 0.94);
     box-shadow: 0 0 0 1px var(--hairline);
   }
 
@@ -1221,18 +1301,39 @@
       border-color var(--dur-fast) var(--ease-out);
   }
 
-  .approve {
-    background: var(--ink-1);
-    color: var(--paper-raised);
-    border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
-  }
-
+  .approve,
   .deny {
     background: var(--convex), var(--paper-raised);
     color: var(--ink-1);
     border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    box-shadow:
+      var(--highlight-top),
+      0 1px 2px rgb(var(--shade) / 0.1),
+      0 6px 14px -6px rgb(var(--shade) / 0.18);
+  }
+
+  .approve.solid {
+    background: var(--ink-1);
+    color: var(--paper-raised);
+    border-color: var(--ink-1);
+  }
+
+  .face {
+    position: relative;
+    z-index: 0;
+  }
+
+  .ink {
+    position: absolute;
+    inset: -1.5px;
+    border-radius: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0)), var(--ink-1);
+    color: var(--paper-raised);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16);
   }
 
   button:hover:not(:disabled) {
@@ -1240,17 +1341,33 @@
     transition-duration: var(--dur-fast);
   }
 
-  .approve:hover:not(:disabled) {
+  .approve:hover:not(:disabled),
+  .deny:hover:not(:disabled) {
+    border-color: var(--ink-1);
+    box-shadow:
+      var(--highlight-top),
+      0 1px 2px rgb(var(--shade) / 0.1),
+      0 6px 14px -6px rgb(var(--shade) / 0.18);
+  }
+
+  .approve.solid:hover:not(:disabled) {
     box-shadow: var(--highlight-top), var(--shadow-float);
   }
 
-  .deny:hover:not(:disabled) {
+  .approve:active:not(:disabled) {
+    background: var(--paper-sunken);
     border-color: var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    box-shadow: var(--shadow-press);
   }
 
-  .approve:active:not(:disabled),
+  .approve.solid:active:not(:disabled) {
+    background: var(--ink-press);
+    border-color: var(--ink-press);
+    box-shadow: var(--shadow-press);
+  }
+
   .deny:active:not(:disabled) {
+    background: var(--paper-sunken);
     box-shadow: var(--shadow-press);
   }
 
@@ -1271,7 +1388,11 @@
     outline-offset: 2px;
   }
 
-  .approve .pen {
+  .approve .face .pen {
+    stroke: var(--pen);
+  }
+
+  .approve .ink .pen {
     stroke: var(--paper-raised);
   }
 
@@ -1282,39 +1403,8 @@
     left: 18px;
   }
 
-  .check.inline {
-    position: static;
-  }
-
-  .face {
-    display: grid;
-    place-items: center;
-  }
-
-  .face-idle,
-  .face-done {
-    grid-area: 1 / 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    transition: opacity var(--dur-soft) var(--ease-in-out);
-  }
-
-  .face-done {
-    opacity: 0;
-  }
-
-  .face-idle.gone {
-    opacity: 0;
-  }
-
-  .face-done.show {
-    opacity: 1;
-  }
-
   .quiet {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     display: flex;
     justify-content: center;
     align-items: baseline;
@@ -1336,6 +1426,10 @@
 
   .hold-hint.armed {
     color: var(--ink-2);
+  }
+
+  .hold-hint.reserved {
+    visibility: hidden;
   }
 
   .hold-hint kbd {
@@ -1376,7 +1470,8 @@
     border-radius: var(--r-md);
     border: 0;
     background: var(--paper-raised);
-    box-shadow: var(--shadow-press), 0 0 0 1px var(--hairline-strong);
+    font: inherit;
+    box-shadow: inset 0 1px 2px rgb(var(--shade) / 0.08), 0 0 0 1px var(--hairline-strong);
     padding: 0 12px;
     color: var(--ink-1);
     font-size: var(--t-body);
@@ -1385,6 +1480,11 @@
 
   .field::placeholder {
     color: var(--ink-2);
+  }
+
+  .field:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .receipt {
@@ -1516,18 +1616,37 @@
       transform: none;
     }
 
+    button:active:not(:disabled) {
+      box-shadow:
+        var(--highlight-top),
+        0 1px 2px rgb(var(--shade) / 0.1),
+        0 6px 14px -6px rgb(var(--shade) / 0.18);
+    }
+
     .approve:active:not(:disabled),
     .deny:active:not(:disabled) {
+      background: var(--paper-sunken);
+      border-color: var(--ink-1);
+      box-shadow:
+        var(--highlight-top),
+        0 1px 2px rgb(var(--shade) / 0.1),
+        0 6px 14px -6px rgb(var(--shade) / 0.18);
       transition: none;
     }
 
-    .deny:active:not(:disabled) {
-      background: color-mix(in oklab, var(--ink-1) 14%, var(--paper-raised));
-    }
-
-    .face-idle,
-    .face-done {
+    .approve.solid:active:not(:disabled) {
+      background: var(--ink-press);
+      border-color: var(--ink-press);
       transition: none;
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .card.glass {
+      background: var(--glass-fill-solid);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: var(--glass-edge);
     }
   }
 </style>
