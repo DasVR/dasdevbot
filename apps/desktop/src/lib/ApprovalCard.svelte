@@ -778,28 +778,29 @@
 
       <div class="quiet">
         <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && !denyOpen}
-          {#snippet modifier()}
-            <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
-          {/snippet}
-          {#snippet enterKey()}
-            <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Enter">
-              <path d={ENTER_KEY_PATH} />
-            </svg>
-          {/snippet}
-          {#snippet deleteKey()}
-            <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Delete">
-              <path d={DELETE_KEY_PATH} />
-            </svg>
-          {/snippet}
-          <p class={["hold-hint", seenArmed && "armed"]}>
-            {#if seenArmed}
-              hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
-            {:else}
-              hold {@render modifier()} {@render enterKey()} unlocks once the evidence has been on screen
-            {/if}
-          </p>
-        {/if}
+        {#snippet modifier()}
+          <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
+        {/snippet}
+        {#snippet enterKey()}
+          <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Enter">
+            <path d={ENTER_KEY_PATH} />
+          </svg>
+        {/snippet}
+        {#snippet deleteKey()}
+          <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Delete">
+            <path d={DELETE_KEY_PATH} />
+          </svg>
+        {/snippet}
+        <p
+          class={["hold-hint", seenArmed && "armed", (!cardFocused || denyOpen) && "reserved"]}
+          aria-hidden={!cardFocused || denyOpen}
+        >
+          {#if seenArmed}
+            hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
+          {:else}
+            hold {@render modifier()} {@render enterKey()} unlocks once the evidence has been on screen
+          {/if}
+        </p>
       </div>
     </div>
   {:else}
@@ -1295,6 +1296,10 @@
 
   .hold-hint.armed {
     color: var(--ink-2);
+  }
+
+  .hold-hint.reserved {
+    visibility: hidden;
   }
 
   .hold-hint kbd {

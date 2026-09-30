@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "font-proof": "vite build && node ../../scripts/font-proof.mjs",
+    "approve-click": "node ../../scripts/approve-click.mjs",
     "check-look": "bash ../../scripts/check-tokens.sh && bash ../../scripts/ban-nil-visuals.sh"
   },
   "devDependencies": {
