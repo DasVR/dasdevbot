@@ -33,8 +33,6 @@
   const ARROW_DELAY = "120ms";
   /** Arrow head draws after the shaft. No default token is 160ms. */
   const ARROW_HEAD_DRAW = "160ms";
-  /** Early-release retract. No default token is 160ms (--dur-fast is 140ms). Easing is --ease-exit. */
-  const RETRACT_MS = 160;
   /** Reduced-motion fades. tokens.css has no linear easing token. */
   const REDUCED_FADE_EASE = "linear";
   /** Evidence is off the 11 / 12.5 / 14 type ramp. */
@@ -58,7 +56,7 @@
   let {
     approval,
     busy = false,
-    holdMs = 600,
+    holdMs,
     shortcutTarget = false,
     ondecide,
     onundo,
@@ -94,7 +92,7 @@
   let holdSealed = false;
 
   const locked = $derived(busy || committing !== null);
-  const duration = $derived(holdDurationMs(effect, holdMs));
+  const duration = $derived(holdDurationMs(effect, holdMs ?? tokenMs("--dur-hold", 600)));
   const showUndo = $derived(
     !pending &&
       !approval.committed &&
@@ -102,6 +100,7 @@
       approval.undo_until != null &&
       approval.undo_until > nowMs,
   );
+  const floating = $derived(pending || showUndo);
   const undoSeconds = $derived(
     approval.undo_until == null ? 0 : Math.max(0, Math.ceil((approval.undo_until - nowMs) / 1000)),
   );
@@ -493,7 +492,7 @@
     void animateNumber(
       from,
       0,
-      RETRACT_MS,
+      tokenMs("--dur-retract", 160),
       (value) => {
         if (kind === "approve") {
           checkOffset = 1 - value;
@@ -638,7 +637,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <article
   {@attach bindCard}
-  class={["card", pending ? "glass" : "paper", playRise && "rise"]}
+  class={["card", floating ? "glass" : "paper", playRise && "rise"]}
   style:--arrow-delay={ARROW_DELAY}
   style:--arrow-head-draw={ARROW_HEAD_DRAW}
   style:--reduced-fade={REDUCED_FADE_EASE}
@@ -1404,7 +1403,7 @@
   }
 
   .what b.approved {
-    color: var(--ink-1);
+    color: var(--success);
   }
 
   .what b.denied {
@@ -1501,8 +1500,22 @@
     }
 
     button:hover:not(:disabled),
-    button:active:not(:disabled) {
+    button:active:not(:disabled),
+    details[open] .chev {
       transform: none;
+    }
+
+    .approve:active:not(:disabled),
+    .deny:active:not(:disabled) {
+      transition: none;
+    }
+
+    .approve:active:not(:disabled) {
+      background: color-mix(in oklab, black 18%, var(--ink-1));
+    }
+
+    .deny:active:not(:disabled) {
+      background: color-mix(in oklab, var(--ink-1) 14%, var(--paper-raised));
     }
 
     .face-idle,

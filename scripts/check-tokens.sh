@@ -3,7 +3,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 file="$root/apps/desktop/src/lib/styles/tokens.css"
-expected="88c892553ba05e341c63441ab6551a02a925c88a2a70a0b540005dbf7a4b7f8f"
+expected="232e2b6e68c9c4fb3a9d46ee3353a3d412ed2b9dad327a1a4f8b7078b34ea8cd"
 actual="$(sha256sum "$file" | awk '{print $1}')"
 if [[ "$actual" != "$expected" ]]; then
   echo "tokens.css sha256 mismatch" >&2

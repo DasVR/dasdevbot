@@ -190,7 +190,7 @@ function approval(status) {
     decision_event_id: status === "pending" ? null : "ev_0142",
     reason: null,
     committed: false,
-    undo_until: status === "pending" ? null : now + 60_000,
+    undo_until: status === "pending" ? null : Date.now() + 60_000,
   };
 }
 

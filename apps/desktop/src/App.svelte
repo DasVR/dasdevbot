@@ -31,6 +31,7 @@
   let busy = $state(false);
   let deciding = $state(false);
   let primed = $state(false);
+  let now = $state(Date.now());
 
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const pending = $derived.by(() => {
@@ -75,7 +76,6 @@
   const pendingAnchored = $derived(stream.some((row) => row.pendingHere));
   const anyReceipt = $derived(stream.some((row) => row.receipt !== null));
   const undoable = $derived.by(() => {
-    const now = Date.now();
     const rows =
       snapshot?.approvals.filter((approval) => {
         return (
@@ -92,6 +92,36 @@
       return latest;
     }, null);
   });
+  // Pending is waiting on a human. A decided, uncommitted approval is filing: ink-3, no dot.
+  const waitingOnHuman = $derived(
+    (snapshot?.approvals ?? []).some(
+      (approval) => approval.agent_id === reviewer?.id && approval.status === "pending",
+    ),
+  );
+  const filingUndo = $derived.by(() => {
+    if (waitingOnHuman || reviewer == null) {
+      return null;
+    }
+    const rows =
+      snapshot?.approvals.filter((approval) => {
+        return (
+          approval.agent_id === reviewer.id &&
+          (approval.status === "approved" || approval.status === "denied") &&
+          !approval.committed
+        );
+      }) ?? [];
+    return rows.reduce<Approval | null>((latest, approval) => {
+      if (!latest || (approval.decided_at ?? 0) > (latest.decided_at ?? 0)) {
+        return approval;
+      }
+      return latest;
+    }, null);
+  });
+  const filingSeconds = $derived(
+    filingUndo?.undo_until == null
+      ? 0
+      : Math.max(0, Math.ceil((filingUndo.undo_until - now) / 1000)),
+  );
 
   async function refresh(): Promise<void> {
     try {
@@ -304,10 +334,16 @@
 
   onMount(() => {
     void refresh();
+    const clock = setInterval(() => {
+      now = Date.now();
+    }, 200);
     const timer = setInterval(() => {
       void refresh();
     }, 1000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(clock);
+      clearInterval(timer);
+    };
   });
 </script>
 
@@ -356,6 +392,14 @@
               <h2>{reviewer.name}</h2>
               {#if reviewer.status === "working"}
                 <span class="agent-status">{reviewer.status}</span>
+              {:else if filingUndo}
+                <span class="agent-status">
+                  {#if filingSeconds > 0}
+                    filing · undo {filingSeconds}s
+                  {:else}
+                    filing
+                  {/if}
+                </span>
               {:else if reviewer.status === "blocked"}
                 <span class="agent-status need">
                   <span class="need-dot" aria-hidden="true"></span>

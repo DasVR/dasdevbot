@@ -97,8 +97,13 @@ await page.getByRole("button", { name: "Simulate repo.push" }).click();
 await page.locator("article.card.glass").waitFor();
 await shot("waiting");
 await page.locator("article.card button.approve").click();
-await page.locator("article.card.paper").waitFor();
-await page.locator("article.card .receipt").waitFor();
+await page.locator("article.card.glass .receipt").waitFor();
+await page.locator(".agent-status", { hasText: "filing" }).waitFor();
+await page.locator(".need-dot").waitFor({ state: "detached" });
 await shot("receipt");
+await page.locator("article.card.paper").waitFor({ timeout: 12000 });
+await page.locator("article.card .undo").waitFor({ state: "hidden", timeout: 12000 });
+await page.locator(".agent-status", { hasText: "filing" }).waitFor({ state: "detached" });
+await shot("receipt-filed");
 
 await browser.close();
