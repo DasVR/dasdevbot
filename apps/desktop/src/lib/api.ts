@@ -84,6 +84,7 @@ export interface Snapshot {
   provider: string;
   provider_detail: string;
   sync: string;
+  endpoint_id: string | null;
   agents: Agent[];
   approvals: Approval[];
   ledger: LedgerLine[];
