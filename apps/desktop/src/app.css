@@ -106,3 +106,12 @@ strong {
   outline-offset: 2px;
 }
 
+@keyframes draw-quiet {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+

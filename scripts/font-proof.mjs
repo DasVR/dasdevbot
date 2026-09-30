@@ -325,12 +325,19 @@ try {
     await route.fulfill({ status: 404, contentType: "text/plain", body: "unused" });
   });
 
+  await context.addInitScript(() => {
+    const key = "dasdevbot.first-run";
+    if (!localStorage.getItem(key)) {
+      localStorage.setItem(key, JSON.stringify({ version: 1, completed: true }));
+    }
+  });
+
   const session = await context.newCDPSession(page);
   await session.send("DOM.enable");
   await session.send("CSS.enable");
 
   const states = [
-    ["idle", idleSnapshot(), async () => page.getByText("Nothing is waiting.").waitFor()],
+    ["idle", idleSnapshot(), async () => page.getByRole("heading", { name: "Nothing waiting on you" }).waitFor()],
     ["stream", streamSnapshot(), async () => page.locator(".stream .row").first().waitFor()],
     [
       "waiting",
@@ -363,6 +370,41 @@ try {
     await ready();
     audits.push(await auditState(page, session, name));
   }
+
+  const flowStates = [
+    [
+      "first-run-helper",
+      { version: 1, completed: false, step: "helper", helperSkipped: false, github: "idle", handoffUrl: null, repo: null, address: "127.0.0.1:7421", elsewhere: false, askPost: true, askWrite: true },
+      async () => page.getByRole("heading", { name: "dasdevbot runs a small helper on this machine." }).waitFor(),
+    ],
+    [
+      "first-run-github",
+      { version: 1, completed: false, step: "github", helperSkipped: true, github: "waiting", handoffUrl: null, repo: null, address: "127.0.0.1:7421", elsewhere: false, askPost: true, askWrite: true },
+      async () => page.getByText("Finish in your browser. This window will continue on its own.").waitFor(),
+    ],
+    [
+      "first-run-repo",
+      { version: 1, completed: false, step: "repo", helperSkipped: true, github: "connected", handoffUrl: null, repo: null, address: "127.0.0.1:7421", elsewhere: false, askPost: true, askWrite: true },
+      async () => page.getByText("needs access").waitFor(),
+    ],
+    [
+      "first-run-rules",
+      { version: 1, completed: false, step: "rules", helperSkipped: true, github: "connected", handoffUrl: null, repo: "DasVR/NIL", address: "127.0.0.1:7421", elsewhere: false, askPost: true, askWrite: true },
+      async () => page.getByText("off in this build").waitFor(),
+    ],
+  ];
+  for (const [name, record, ready] of flowStates) {
+    await page.evaluate((next) => {
+      localStorage.setItem("dasdevbot.first-run", JSON.stringify(next));
+    }, record);
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await ready();
+    audits.push(await auditState(page, session, name));
+  }
+
+  await page.goto(`${origin}/github-device.html`, { waitUntil: "networkidle" });
+  await page.getByRole("heading", { name: "Finish in the browser" }).waitFor();
+  audits.push(await auditState(page, session, "github-device"));
 
   await page.goto(`${origin}/gallery.html`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "Line icons" }).waitFor();

@@ -11,6 +11,7 @@ export default defineConfig({
       input: {
         main: `${root}index.html`,
         gallery: `${root}gallery.html`,
+        github: `${root}github-device.html`,
       },
     },
   },
