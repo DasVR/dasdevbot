@@ -268,6 +268,7 @@ async function slotBox(page) {
       w: Math.round(rect.width * 100) / 100,
       h: Math.round(rect.height * 100) / 100,
       dpr: window.devicePixelRatio,
+      empty: node.childElementCount === 0 && (node.textContent ?? "").trim() === "",
     };
   });
 }
@@ -362,8 +363,6 @@ async function captureStills(pageOrigin) {
   let skippedLine = "";
   let manualSkipCount = -1;
   const slots = [];
-  let looksBeforeReload = "";
-  let drawsBeforeReload = "";
 
   await page.goto(`${pageOrigin}/?reset=1&scenario=found`, { waitUntil: "domcontentloaded" });
   await page.locator("[data-phase=checking]").waitFor();
@@ -406,7 +405,7 @@ async function captureStills(pageOrigin) {
 
   await page.goto(`${pageOrigin}/?reset=1&scenario=walk&perms=hold`, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "dasdevbot runs a small helper on this machine." }).waitFor();
-  await page.locator("[data-curl][data-drawn=yes]").waitFor();
+  await page.locator("[data-glyph-slot]").waitFor();
   slots.push(await slotBox(page));
   await page.getByRole("button", { name: "I run it elsewhere" }).click();
   await page.getByLabel("Daemon address").waitFor();
@@ -422,6 +421,7 @@ async function captureStills(pageOrigin) {
   await page.getByRole("button", { name: "Connect GitHub" }).click();
   const popup = await popupPromise;
   await popup.getByRole("heading", { name: "Finish in the browser" }).waitFor();
+  const deviceSlots = await popup.locator("[data-glyph-slot]").count();
   await page.getByText("Finish in your browser. This window will continue on its own.").waitFor();
   const iframeCount = await page.locator("iframe").count();
   const openedUrl = await page.locator("[data-first-run]").getAttribute("data-browser-url");
@@ -452,8 +452,6 @@ async function captureStills(pageOrigin) {
   await page.getByRole("heading", { name: "Pick a repo." }).waitFor();
   await page.getByText("Reviewer watches one repo in this build.").waitFor();
   slots.push(await slotBox(page));
-  drawsBeforeReload = await page.locator("[data-curl]").getAttribute("data-draws");
-  looksBeforeReload = await page.locator("[data-first-run]").getAttribute("data-looks");
   await page.getByText("needs access").waitFor();
   const fix = page.getByRole("link", { name: "Fix on GitHub" });
   const fixHref = await fix.getAttribute("href");
@@ -476,6 +474,7 @@ async function captureStills(pageOrigin) {
   await shot(page, "repo-search");
   await page.locator("#repo-search").fill("zzz");
   await page.getByText("No repo matches “zzz”.").waitFor();
+  const repoEmptySlots = await page.locator("[data-glyph-slot]").count();
   await shot(page, "repo-empty");
   await page.locator("#repo-search").fill("");
   await page.getByRole("radio", { name: /DasVR\/NIL/ }).click();
@@ -503,10 +502,9 @@ async function captureStills(pageOrigin) {
   const postsBefore = eventPosts(requests).length;
   const permDuring = await page.locator("[data-permission-line]").count();
   const permLogDuring = await page.evaluate(() => (window.__perm ?? []).length);
-  const glyphReady = await page.locator("[data-glyph-slot]").evaluate((node) => {
+  const glyphReady = await page.locator("[data-first-run] [data-glyph-slot]").evaluate((node) => {
     const hidden = node.hasAttribute("hidden");
-    const curl = node.querySelector("[data-curl]");
-    return !hidden && curl != null && node.getAttribute("data-size") === "48";
+    return !hidden && node.childElementCount === 0 && node.textContent.trim() === "" && node.getAttribute("data-size") === "48";
   });
   const noGreeting = (await page.locator("[data-greeting]").count()) === 0;
   slots.push(await slotBox(page));
@@ -550,8 +548,6 @@ async function captureStills(pageOrigin) {
       true,
     );
   });
-  const looksAtRules = await page.locator("[data-first-run]").getAttribute("data-looks");
-  const drawsAtRules = await page.locator("[data-curl]").getAttribute("data-draws");
   await page.getByRole("button", { name: "Start watching DasVR/NIL" }).click();
   await page.locator("[data-mode=here]").waitFor();
   await page.locator("[data-watching=on]").waitFor();
@@ -587,42 +583,50 @@ async function captureStills(pageOrigin) {
     ["reviewer-empty.png"],
   );
 
-  const landingDraws = await page.locator("[data-landing] [data-curl]").getAttribute("data-draws");
+  const landingSlot = await page.locator("[data-landing]").evaluate((root) => {
+    const slot = root.querySelector("[data-glyph-slot]");
+    const line = root.querySelector("[data-empty-underline]");
+    const slotRect = slot?.getBoundingClientRect();
+    const lineRect = line?.getBoundingClientRect();
+    return {
+      slots: root.querySelectorAll("[data-glyph-slot]").length,
+      empty: slot != null && slot.childElementCount === 0 && (slot.textContent ?? "").trim() === "",
+      lineAfter: Boolean(slotRect && lineRect && lineRect.left >= slotRect.right - 1),
+    };
+  });
+  const straySlots = await page.evaluate(() => {
+    return {
+      stream: document.querySelectorAll(".stream [data-glyph-slot]").length,
+      card: document.querySelectorAll("article.card [data-glyph-slot]").length,
+      total: document.querySelectorAll("[data-glyph-slot]").length,
+    };
+  });
   const slotStable =
     slots.length === 4 &&
-    slots.every((slot) => slot.dpr === 2 && slot.w === 48 && slot.h === 48) &&
+    slots.every((slot) => slot.dpr === 2 && slot.w === 48 && slot.h === 48 && slot.empty) &&
     sameSlot(slots[0], slots[1]) &&
     sameSlot(slots[1], slots[2]) &&
     sameSlot(slots[2], slots[3]);
   record(
     7,
-    "The Curl slot is at the same x and y on every step, at 2x",
+    "The empty 48px slot is at the same x and y on every step, at 2x",
     slotStable,
     ["helper.png", "helper-skipped.png", "repo.png", "rules.png"],
   );
   record(
     8,
-    "Curl draws exactly once in the flow, with one look per step change",
-    drawsBeforeReload === "1" &&
-      looksBeforeReload === "2" &&
-      drawsAtRules === "1" &&
-      looksAtRules === "7" &&
-      landingDraws === "1",
-    ["rules.png", "reviewer-empty.png"],
+    "The slot stays empty, beside the step title and the landing line only",
+    slotStable &&
+      repoEmptySlots === 1 &&
+      deviceSlots === 0 &&
+      landingSlot.slots === 1 &&
+      landingSlot.empty &&
+      landingSlot.lineAfter &&
+      straySlots.stream === 0 &&
+      straySlots.card === 0 &&
+      straySlots.total === 1,
+    ["rules.png", "reviewer-empty.png", "repo-empty.png"],
   );
-
-  await page.locator("[data-landing] [data-curl][data-blink-state=on]").waitFor();
-  const blinkMs = await page.locator("[data-landing] [data-curl]").getAttribute("data-blink-ms");
-  const blinksAtRest = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
-  await page.waitForTimeout(6300);
-  const blinksAfter = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
-  fixture.agents[0].status = "working";
-  await page.locator("[data-running-trace]").waitFor();
-  const blinksPaused = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
-  const pausedState = await page.locator("[data-landing] [data-curl]").getAttribute("data-blink-state");
-  await page.waitForTimeout(6300);
-  const blinksHeld = Number(await page.locator("[data-landing] [data-curl]").getAttribute("data-blinks"));
-  fixture.agents[0].status = "idle";
 
   const permBeforeCard = await page.locator("[data-permission-line]").count();
   fixture = pendingSnapshot();
@@ -711,11 +715,6 @@ async function captureStills(pageOrigin) {
     ["helper-skipped.png", "github-cancelled.png", "repo.png"],
   );
 
-  const blinkPass =
-    blinkMs === "6000" &&
-    blinksAfter === blinksAtRest + 1 &&
-    pausedState === "paused" &&
-    blinksHeld === blinksPaused;
   const greet = await context.newPage();
   await greet.clock.install({ time: new Date("2026-09-30T22:30:00-04:00") });
   const evening = Date.parse("2026-09-30T21:00:00-04:00");
@@ -761,7 +760,7 @@ async function captureStills(pageOrigin) {
   await greet.reload({ waitUntil: "domcontentloaded" });
   await greet.getByRole("heading", { name: "Evening, Arriq." }).waitFor();
   const eveningSub = (await greet.locator("[data-greeting-sub]").innerText()).trim();
-  const eveningCurl = await greet.locator("[data-greeting] [data-curl]").count();
+  const eveningSlots = await greet.locator("[data-greeting] [data-glyph-slot]").count();
   await park(greet);
   await shot(greet, "greeting-evening");
   await greet.reload({ waitUntil: "domcontentloaded" });
@@ -775,9 +774,9 @@ async function captureStills(pageOrigin) {
   await greet.reload({ waitUntil: "domcontentloaded" });
   await greet.locator("article.card").waitFor();
   const waitingSub = (await greet.locator("[data-greeting-sub]").innerText()).trim();
-  const waitingCurl = await greet.locator("[data-greeting] [data-curl]").count();
-  const curlInCard = await greet.locator("article.card [data-curl]").count();
-  const curlInStream = await greet.locator(".stream [data-curl]").count();
+  const waitingSlots = await greet.locator("[data-greeting] [data-glyph-slot]").count();
+  const slotInCard = await greet.locator("article.card [data-glyph-slot]").count();
+  const slotInStream = await greet.locator(".stream [data-glyph-slot]").count();
   await park(greet);
   await shot(greet, "greeting-waiting");
   await greet.close();
@@ -815,41 +814,43 @@ async function captureStills(pageOrigin) {
   });
   await reducedPage.goto(pageOrigin, { waitUntil: "domcontentloaded" });
   await reducedPage.getByRole("heading", { name: "Nothing waiting on you" }).waitFor();
-  await reducedPage.waitForTimeout(2200);
-  const reducedBlinks = await reducedPage.locator("[data-landing] [data-curl]").getAttribute("data-blinks");
-  const reducedBlinkState = await reducedPage.locator("[data-landing] [data-curl]").getAttribute("data-blink-state");
-  const reducedTransform = await reducedPage.locator("[data-curl] *").evaluateAll((nodes) => {
+  const reducedLine = await reducedPage.locator("[data-empty-underline]").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { name: style.animationName, offset: style.strokeDashoffset, transform: style.transform };
+  });
+  const reducedSlot = await reducedPage.locator("[data-landing] [data-glyph-slot]").evaluate((node) => {
+    return node.childElementCount === 0 && (node.textContent ?? "").trim() === "";
+  });
+  const reducedTransform = await reducedPage.locator("[data-landing] *").evaluateAll((nodes) => {
     return nodes.some((node) => {
       const value = getComputedStyle(node).transform;
       return value && value !== "none";
     });
   });
-  reducedFixture.agents[0].status = "working";
-  await reducedPage.locator("[data-running-trace]").waitFor();
-  await reducedPage.waitForTimeout(800);
-  const reducedHeld = await reducedPage.locator("[data-landing] [data-curl]").getAttribute("data-blinks");
   await reducedContext.close();
 
   record(
     "landing-1",
-    "The blink is about 6s, static with reduced motion, and paused while any trace runs",
-    blinkPass &&
-      reducedBlinks === "0" &&
-      reducedBlinkState === "off" &&
-      !reducedTransform &&
-      reducedHeld === "0",
+    "The landing slot is empty, and the underline beside it is drawn with reduced motion",
+    landingSlot.empty &&
+      landingSlot.lineAfter &&
+      reducedSlot &&
+      reducedLine.name === "none" &&
+      reducedLine.offset === "0px" &&
+      reducedLine.transform === "none" &&
+      !reducedTransform,
     ["reviewer-empty.png", "first-run-reduced.mp4"],
   );
   record(
     "greeting-1",
     "The greeting shows once per day, and a waiting count replaces the ink-2 line",
     eveningSub === "Nothing waiting · 6 done today." &&
-      eveningCurl === 1 &&
+      eveningSlots === 0 &&
       greetingReturned === 0 &&
       waitingSub === "1 waiting on you · 6 done today." &&
-      waitingCurl === 1 &&
-      curlInCard === 0 &&
-      curlInStream === 0,
+      waitingSlots === 0 &&
+      slotInCard === 0 &&
+      slotInStream === 0,
     ["greeting-evening.png", "greeting-waiting.png"],
   );
 
@@ -952,7 +953,7 @@ async function recordWalk(pageOrigin, reduced, outFile) {
   });
   await page.goto(`${pageOrigin}/?reset=1&scenario=walk&clock=1`, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "dasdevbot runs a small helper on this machine." }).waitFor();
-  await page.locator("[data-curl][data-drawn=yes]").waitFor();
+  await page.locator("[data-glyph-slot]").waitFor();
   await park(page);
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
