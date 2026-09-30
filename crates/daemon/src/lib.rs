@@ -326,17 +326,18 @@ fn load_or_create_audit_seed(data: &Path, store: &Store) -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
-/// True when this process owns the file or group/other can write it.
-/// Non-unix targets fail closed: the file is treated as unsafe.
+/// True unless the file is root-owned, not owned by this process, and not
+/// group- or world-writable. A root caller therefore always refuses the file.
+/// A metadata error and non-unix targets fail closed: the file is unsafe.
 pub(crate) fn role_file_is_unsafe(path: &Path) -> bool {
     #[cfg(unix)]
     {
         let Ok(meta) = fs::metadata(path) else {
-            return false;
+            return true;
         };
         // geteuid is a libc read of the process uid. It cannot unwind.
         let uid = unsafe { libc::geteuid() };
-        meta.uid() == uid || meta.mode() & 0o022 != 0
+        meta.uid() != 0 || meta.uid() == uid || meta.mode() & 0o022 != 0
     }
     #[cfg(not(unix))]
     {
@@ -442,6 +443,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.token, supplied);
+    }
+
+    #[test]
+    fn a_caller_owned_or_missing_role_file_is_unsafe() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-role-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("mine.role");
+        fs::write(&mine, "executor").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&mine, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(role_file_is_unsafe(&mine));
+        assert!(role_file_is_unsafe(&dir.join("missing.role")));
     }
 
     #[test]

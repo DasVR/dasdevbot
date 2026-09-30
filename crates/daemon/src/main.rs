@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use dasdevbot_core::{authorize_secret_name, parse_role, SecretRoleError};
+use dasdevbot_core::{authorize_secret_name, kind, parse_role, SecretRoleError};
 use dasdevbotd::{
     audit_dev_env, audit_key_path, open_provider, parse_sha256_list, plan_secret_set,
     load_role_file, prompt_secret_from_tty, read_piped_secret, serve,
@@ -60,6 +60,7 @@ struct Flags {
     data: PathBuf,
     web: Option<PathBuf>,
     role: String,
+    role_set: bool,
     url: String,
     repo: String,
     reference: String,
@@ -77,6 +78,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut web: Option<PathBuf> = None;
     let mut web_set = false;
     let mut role = "server".to_string();
+    let mut role_set = false;
     let mut url = "http://127.0.0.1:8787".to_string();
     let mut repo = "DasVR/NIL".to_string();
     let mut reference = "phase0".to_string();
@@ -99,7 +101,10 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
                 web = Some(PathBuf::from(value()?));
                 web_set = true;
             }
-            "--role" => role = value()?,
+            "--role" => {
+                role = value()?;
+                role_set = true;
+            }
             "--url" => url = value()?,
             "--repo" => repo = value()?,
             "--ref" => reference = value()?,
@@ -126,14 +131,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             other => return Err(Error::BadRequest(format!("unknown argument {other}"))),
         }
     }
-    if !matches!(
-        role.as_str(),
-        "device" | "server" | "display" | "leader" | "worker" | "executor"
-    ) {
-        return Err(Error::BadRequest(
-            "role must be device, server, display, leader, worker, or executor".into(),
-        ));
-    }
+    check_role(&role)?;
     if !web_set {
         let default = PathBuf::from("apps/desktop/dist");
         if default.join("index.html").is_file() {
@@ -145,6 +143,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         data,
         web,
         role,
+        role_set,
         url,
         repo,
         reference,
@@ -157,8 +156,31 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     })
 }
 
+fn check_role(role: &str) -> Result<(), Error> {
+    if !matches!(
+        role,
+        "device" | "server" | "display" | "leader" | "worker" | "executor"
+    ) {
+        return Err(Error::BadRequest(
+            "role must be device, server, display, leader, worker, or executor".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// serve takes its role only from --role or the fixed role file. No default.
+fn serve_role(flags: &Flags) -> Result<String, Error> {
+    if flags.role_set {
+        return Ok(flags.role.clone());
+    }
+    let role = load_role_file()?;
+    check_role(&role)?;
+    Ok(role)
+}
+
 fn serve_from(args: Vec<String>) -> Result<(), Error> {
-    let flags = flags(args)?;
+    let mut flags = flags(args)?;
+    flags.role = serve_role(&flags)?;
     ensure_loopback(&flags.bind)?;
     let explicit = explicit_token(flags.token);
     eprintln!(
@@ -206,7 +228,13 @@ fn explicit_token(flag: Option<String>) -> Option<String> {
 fn smoke_model(args: Vec<String>) -> Result<(), Error> {
     let flags = flags(args)?;
     if flags.dev_env_secrets {
-        eprintln!("audit secret.dev_env role={}", flags.role);
+        // Audit before the provider can read OLLAMA_API_KEY.
+        let payload = serde_json::json!({
+            "flag": "--dev-env-secrets",
+            "role": flags.role,
+        })
+        .to_string();
+        append_cli_audit(&flags.data, kind::DEV_ENV, &payload)?;
     }
     let provider = match open_provider(&ProviderSettings {
         kind: flags.provider,
@@ -324,17 +352,21 @@ fn authorize_cli_secret(data: &Path, name: &str) -> Result<(), Error> {
 }
 
 fn record_secret_audit(data: &Path, name: &str, last4: String) -> Result<(), Error> {
-    let mut store = Store::open(data)?;
-    let seed = if audit_key_path(data).exists() {
-        let text = fs::read_to_string(audit_key_path(data))?;
-        dasdevbotd::signature_seed(text.trim())?
-    } else {
-        return Err(Error::Forbidden(
-            "audit key is missing; start the daemon before storing a secret".into(),
-        ));
-    };
     let payload = serde_json::json!({"name": name, "last4": last4}).to_string();
-    dasdevbotd::append_audit(&mut store, "secret.set", &payload, &seed)?;
+    append_cli_audit(data, "secret.set", &payload)
+}
+
+/// Appends one row to the hash-chained audit log. Refuses without the audit key.
+fn append_cli_audit(data: &Path, kind: &str, payload: &str) -> Result<(), Error> {
+    let key = audit_key_path(data);
+    if !key.exists() {
+        return Err(Error::Forbidden(
+            "audit key is missing; start the daemon first".into(),
+        ));
+    }
+    let seed = dasdevbotd::signature_seed(fs::read_to_string(key)?.trim())?;
+    let mut store = Store::open(data)?;
+    dasdevbotd::append_audit(&mut store, kind, payload, &seed)?;
     Ok(())
 }
 
@@ -412,6 +444,7 @@ Usage:
                   [--claude-home PATH] [--claude-sha256 HEX] [--dev-env-secrets]
   dasdevbotd smoke-model --provider ollama|ollama-local|claude-cli [--model NAME]
                          [--claude-home PATH] [--claude-sha256 HEX]
+                         [--data data/dasdevbot.sqlite] [--dev-env-secrets]
   dasdevbotd secret set <name> [--stdin]
   dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
                   [--repo DasVR/NIL] [--ref phase0]
@@ -433,10 +466,13 @@ CLAUDE_CONFIG_DIR. `--claude-sha256` is the hex digest of the native ELF.
 as the service user with CLAUDE_CONFIG_DIR set to that dir. See deploy/ubuntu.
 The mock provider is for tests.
 
-The role is `serve --role` or the fixed file /etc/dasdevbot/role
-(C:\\ProgramData\\dasdevbot\\role on Windows). A file next to --data is
-ignored. That file must not be owned by the caller and must not be
-group- or world-writable; otherwise the daemon refuses it. serve mints the
+serve takes its role only from `serve --role` or the fixed file
+/etc/dasdevbot/role (C:\\ProgramData\\dasdevbot\\role on Windows) and refuses
+to start without one. A file next to --data is ignored. That file must be
+root-owned, not owned by the caller (so a root caller always refuses it), and
+not group- or world-writable; otherwise the daemon refuses it.
+`smoke-model --dev-env-secrets` first appends secret.dev_env to the audit log
+and refuses when the audit key next to --data is missing. serve mints the
 bearer when --token and DASDEVBOT_TOKEN are absent. HTTP cannot approve a
 card. Decisions are Tauri IPC only. External cards need a Windows Hello
 signature. Internal cards keep the Phase 1 approval-key path. See
@@ -492,5 +528,39 @@ mod tests {
             }
         }
         let _ = fs::remove_file(literal);
+    }
+
+    #[test]
+    fn serve_without_role_uses_only_the_fixed_file() {
+        let parsed = flags(Vec::new()).unwrap();
+        assert!(!parsed.role_set);
+        let result = serve_role(&parsed);
+        match dasdevbotd::load_role_file() {
+            Err(expected) => {
+                let err = result.unwrap_err();
+                assert_eq!(err.to_string(), expected.to_string(), "{err}");
+            }
+            Ok(role) => assert_eq!(result.unwrap(), role),
+        }
+        let explicit = flags(vec!["--role".into(), "worker".into()]).unwrap();
+        assert_eq!(serve_role(&explicit).unwrap(), "worker");
+    }
+
+    #[test]
+    fn smoke_model_dev_env_without_audit_key_is_refused() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-smoke-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("db.sqlite");
+        let err = smoke_model(vec![
+            "--dev-env-secrets".into(),
+            "--role".into(),
+            "worker".into(),
+            "--data".into(),
+            data.display().to_string(),
+        ])
+        .unwrap_err();
+        // The refusal comes before open_provider can read OLLAMA_API_KEY.
+        assert!(err.to_string().contains("audit key is missing"), "{err}");
+        assert!(!data.exists());
     }
 }
