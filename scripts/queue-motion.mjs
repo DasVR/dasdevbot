@@ -286,14 +286,16 @@ try {
       await route.fulfill({ status: 404, contentType: "text/plain", body: "unused" });
     });
 
+    // Virtual time installed before navigation deadlocks: the document fetch
+    // pauses the clock, and the clock never reaches the load event.
+    await page.goto(origin, { waitUntil: "load" });
+    await page.locator(".review-link").waitFor();
     const bootExpired = onceExpired(client);
     await client.send("Emulation.setVirtualTimePolicy", {
       policy: "pauseIfNetworkFetchesPending",
       budget: BOOT_BUDGET_MS,
       maxVirtualTimeTaskStarvationCount: 400,
-      initialVirtualTime: Date.now() / 1000,
     });
-    await page.goto(origin, { waitUntil: "load" });
     await bootExpired;
 
     const armed = await page.evaluate(() => {
