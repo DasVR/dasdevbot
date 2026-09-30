@@ -68,7 +68,14 @@ The sidecar also pins the Windows Hello key: a second line `hello-pin <fingerpri
 
 Destructive work is denied in phase 1 and never asked. `repo.force_push` records a denied card and does not call the provider. The payload does not choose the tier. HTTP `POST /v1/approvals/{id}/decision` and `/undo` return 403 with a fixed body. Mutating HTTP requires a bearer token, loopback `Host`, and no `Access-Control-Allow-Origin: *`. `--allow-remote` is refused. Voice, CLI, and banners cannot decide.
 
-**External is hard-denied in Phase 1.** `dasdevbot_core::EXTERNAL_TIER_ENABLED` is `false`. `gate::decide` returns `Deny` for external under every policy, `authorize_decision` returns `DecisionDeny::External`, and `prepare` refuses external cards, whatever signature or verifier is present. The external tier is re-enabled only after all three of these pass: H1 (RSA-2048 PKCS#1 v1.5 / SHA-256 Hello verify), H2 (key pinning and audited enrollment and reset), and the hardware Hello test in `docs/hello-hardware-test.md`. Re-enabling it is a separate, reviewed change.
+**External is hard-denied in Phase 1.** `dasdevbot_core::EXTERNAL_TIER_ENABLED` is `false`. `gate::decide` returns `Deny` for external under every policy, `authorize_decision` returns `DecisionDeny::External`, and `prepare` refuses external cards, whatever signature or verifier is present. The code for H1 (RSA-2048 PKCS#1 v1.5 / SHA-256 Hello verify) and H2 (key pinning and audited enrollment and reset) is in place. `EXTERNAL_TIER_ENABLED` may flip only after all of these hold:
+
+1. `docs/hello-hardware-test.md` passes on a real Windows PC.
+2. L1: at startup the daemon cross-checks the Hello pin and the key row against the `hello.enrolled` events in the signed chain, and refuses on any mismatch. Today a same-user process can rewrite the database and the sidecar together.
+3. The first-instance pipe check and pipe-server verification pass on real Windows. The limits in `docs/shell-ipc.md` (pipe squat, integrity level) get a Security Director ruling at that point.
+4. Security Director signs off on the flip itself, as a separate, reviewed change.
+
+PID reuse between the SID lookup and the process open (L2) is accepted, because the pipe DACL covers it.
 
 Internal tiers (`read`, `write_local`, and the other non-external classes) keep the Phase 1 Ed25519 path. `sign_decision` signs with the `approval-key` seed and the daemon verifies that same signature. **That signature proves nothing beyond "a process running as the daemon's uid asked".** The seed is in the same user's keyring, and the daemon both signs and verifies. This is accepted for Phase 1 and must be revisited in Phase 2. The signature is kept as a record that binds the decision to the card, the nonce and the fencing token. It is not an authentication factor.
 
