@@ -53,9 +53,82 @@ pub fn append(
     )?;
     tx.commit()?;
     if let Some(path) = store.audit_tip_path() {
-        crate::write_private(path.to_path_buf(), tip_hash.as_bytes())?;
+        // Keep the Hello pin that shares the sidecar.
+        let mut sidecar = read_sidecar(path)?;
+        sidecar.tip = Some(tip_hash);
+        write_sidecar(path, &sidecar)?;
     }
     Ok(seq)
+}
+
+/// Contents of `<data>.audit-tip`. Line 1 is the tip (may be empty). An
+/// optional `hello-pin <fingerprint>` line pins the Windows Hello key. The old
+/// one-line file is a bare tip.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Sidecar {
+    pub tip: Option<String>,
+    pub hello_pin: Option<String>,
+}
+
+const HELLO_PIN_PREFIX: &str = "hello-pin ";
+
+pub(crate) fn read_sidecar(path: &std::path::Path) -> Result<Sidecar> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Sidecar::default()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut sidecar = Sidecar::default();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if let Some(pin) = line.strip_prefix(HELLO_PIN_PREFIX) {
+            let pin = pin.trim();
+            if !pin.is_empty() {
+                sidecar.hello_pin = Some(pin.to_string());
+            }
+        } else if index == 0 && !line.is_empty() {
+            sidecar.tip = Some(line.to_string());
+        } else if !line.is_empty() {
+            return Err(crate::Error::Forbidden(
+                "audit tip sidecar has an unknown line".into(),
+            ));
+        }
+    }
+    Ok(sidecar)
+}
+
+pub(crate) fn write_sidecar(path: &std::path::Path, sidecar: &Sidecar) -> Result<()> {
+    let mut text = sidecar.tip.clone().unwrap_or_default();
+    text.push('\n');
+    if let Some(pin) = &sidecar.hello_pin {
+        text.push_str(HELLO_PIN_PREFIX);
+        text.push_str(pin);
+        text.push('\n');
+    }
+    crate::write_private(path.to_path_buf(), text.as_bytes())
+}
+
+/// The pinned Hello fingerprint. Memory stores keep it on the store.
+pub(crate) fn read_hello_pin(store: &Store) -> Result<Option<String>> {
+    match store.audit_tip_path() {
+        Some(path) => Ok(read_sidecar(path)?.hello_pin),
+        None => Ok(store.memory_hello_pin().map(str::to_string)),
+    }
+}
+
+/// Set or clear the pin. The tip in the sidecar is kept.
+pub(crate) fn write_hello_pin(store: &mut Store, pin: Option<&str>) -> Result<()> {
+    match store.audit_tip_path() {
+        Some(path) => {
+            let mut sidecar = read_sidecar(path)?;
+            sidecar.hello_pin = pin.map(str::to_string);
+            write_sidecar(path, &sidecar)
+        }
+        None => {
+            store.set_memory_hello_pin(pin.map(str::to_string));
+            Ok(())
+        }
+    }
 }
 
 fn link_hash(seq: i64, prev_hash: &str, kind: &str, created_at: i64, payload: &str) -> String {
@@ -70,9 +143,9 @@ pub fn bind_tip(store: &Store) -> Result<()> {
     let Some(path) = store.audit_tip_path() else {
         return Ok(());
     };
-    let sidecar = read_tip(path)?;
+    let mut sidecar = read_sidecar(path)?;
     let db_tip = latest_tip(store)?;
-    match (db_tip, sidecar) {
+    match (db_tip, sidecar.tip.clone()) {
         (None, Some(_)) => Err(crate::Error::Forbidden(
             "refusing a new audit genesis; a prior tip exists".into(),
         )),
@@ -80,25 +153,10 @@ pub fn bind_tip(store: &Store) -> Result<()> {
             "audit tip sidecar does not match the log".into(),
         )),
         (Some(db), None) => {
-            crate::write_private(path.to_path_buf(), db.as_bytes())?;
-            Ok(())
+            sidecar.tip = Some(db);
+            write_sidecar(path, &sidecar)
         }
         _ => Ok(()),
-    }
-}
-
-fn read_tip(path: &std::path::Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(text))
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err.into()),
     }
 }
 
@@ -224,6 +282,35 @@ mod tests {
             .execute("DELETE FROM audit_log WHERE seq = 1", [])
             .unwrap_err();
         assert!(err.to_string().contains("append-only"));
+    }
+
+    #[test]
+    fn the_sidecar_reads_the_old_format_and_keeps_both_fields() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-sidecar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite.audit-tip");
+        std::fs::write(&path, "abc123\n").unwrap();
+        assert_eq!(
+            read_sidecar(&path).unwrap(),
+            Sidecar {
+                tip: Some("abc123".into()),
+                hello_pin: None
+            }
+        );
+        let both = Sidecar {
+            tip: Some("abc123".into()),
+            hello_pin: Some("f00d".into()),
+        };
+        write_sidecar(&path, &both).unwrap();
+        assert_eq!(read_sidecar(&path).unwrap(), both);
+        let pin_only = Sidecar {
+            tip: None,
+            hello_pin: Some("f00d".into()),
+        };
+        write_sidecar(&path, &pin_only).unwrap();
+        assert_eq!(read_sidecar(&path).unwrap(), pin_only);
+        std::fs::write(&path, "abc123\nsomething else\n").unwrap();
+        assert!(read_sidecar(&path).is_err());
     }
 
     #[test]

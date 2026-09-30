@@ -31,6 +31,8 @@ pub struct Store {
     node_id: String,
     /// Sidecar that survives deletion of this database. Empty for memory stores.
     audit_tip_path: Option<std::path::PathBuf>,
+    /// Hello pin for memory stores. File stores keep it in the sidecar.
+    memory_hello_pin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,11 +170,20 @@ impl Store {
             clock,
             node_id,
             audit_tip_path: None,
+            memory_hello_pin: None,
         })
     }
 
     pub(crate) fn audit_tip_path(&self) -> Option<&std::path::Path> {
         self.audit_tip_path.as_deref()
+    }
+
+    pub(crate) fn memory_hello_pin(&self) -> Option<&str> {
+        self.memory_hello_pin.as_deref()
+    }
+
+    pub(crate) fn set_memory_hello_pin(&mut self, pin: Option<String>) {
+        self.memory_hello_pin = pin;
     }
 
     pub fn node_id(&self) -> &str {
@@ -572,22 +583,73 @@ impl Store {
             .map_err(Error::from)
     }
 
+    /// Pins the first key. A key that does not match the pin or the stored
+    /// row is refused. The audit row is written before the key is stored.
     pub fn enroll_hello_public_key(
-        &self,
+        &mut self,
         blob_type: i64,
         public_key_hex: &str,
         now_ms: u64,
+        audit_seed: &[u8; 32],
     ) -> Result<()> {
-        if self.hello_public_key()?.is_some() {
-            return Err(Error::Forbidden(
-                "a Windows Hello public key is already enrolled".into(),
-            ));
+        let fingerprint = crate::hello_key::hello_fingerprint(blob_type, public_key_hex);
+        let mismatch = || {
+            Error::Forbidden("Windows Hello key does not match the pinned fingerprint".into())
+        };
+        let pin = crate::audit_log::read_hello_pin(self)?;
+        if let Some(pin) = &pin {
+            if *pin != fingerprint {
+                return Err(mismatch());
+            }
         }
-        self.conn.execute(
-            "INSERT INTO hello_public_key (id, blob_type, public_key, created_at) VALUES (1, ?1, ?2, ?3)",
-            params![blob_type, public_key_hex, now_ms as i64],
-        )?;
-        Ok(())
+        let stored = self.hello_public_key()?;
+        if let Some((stored_type, stored_key)) = &stored {
+            if crate::hello_key::hello_fingerprint(*stored_type, stored_key) != fingerprint {
+                return Err(mismatch());
+            }
+            if pin.is_some() {
+                return Ok(());
+            }
+            // A row from before pinning: audit and pin it, same as a first enrollment.
+        }
+        let payload = serde_json::json!({
+            "fingerprint": fingerprint,
+            "blob_type": blob_type,
+        })
+        .to_string();
+        crate::audit_log::append(self, "hello.enrolled", &payload, now_ms, audit_seed)?;
+        if stored.is_none() {
+            self.conn.execute(
+                "INSERT INTO hello_public_key (id, blob_type, public_key, created_at) VALUES (1, ?1, ?2, ?3)",
+                params![blob_type, public_key_hex, now_ms as i64],
+            )?;
+        }
+        crate::audit_log::write_hello_pin(self, Some(&fingerprint))
+    }
+
+    /// Audits the reset first, then drops the row and the pin. The tip stays.
+    pub fn reset_hello_enrollment(
+        &mut self,
+        reason: &str,
+        now_ms: u64,
+        audit_seed: &[u8; 32],
+    ) -> Result<()> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(Error::Forbidden("a Hello reset needs a reason".into()));
+        }
+        let old = match self.hello_public_key()? {
+            Some((blob_type, key)) => Some(crate::hello_key::hello_fingerprint(blob_type, &key)),
+            None => crate::audit_log::read_hello_pin(self)?,
+        };
+        let payload = serde_json::json!({
+            "fingerprint": old,
+            "reason": reason,
+        })
+        .to_string();
+        crate::audit_log::append(self, "hello.reset", &payload, now_ms, audit_seed)?;
+        self.conn.execute("DELETE FROM hello_public_key", [])?;
+        crate::audit_log::write_hello_pin(self, None)
     }
 
     pub fn grants(&self) -> Result<Vec<(String, String, i64)>> {

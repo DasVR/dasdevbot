@@ -167,6 +167,7 @@ fn dispatch(
         "secret" => secret(app, secrets, request),
         "prepare" => prepare(app, request),
         "hello-enroll" => hello_enroll(app, request),
+        "hello-reset" => hello_reset(app, verifier, request),
         _ => Err(Error::BadRequest("unknown shell op".into())),
     }
 }
@@ -318,9 +319,39 @@ fn hello_enroll(app: &App, request: &serde_json::Value) -> crate::Result<serde_j
         let (blob_type, public_key) =
             crate::hello_key::hello_public_key_material().map_err(Error::Forbidden)?;
         let mut store = app.store.lock().expect("store");
-        store.enroll_hello_public_key(blob_type, &public_key, wall_ms())?;
+        store.enroll_hello_public_key(blob_type, &public_key, wall_ms(), &app.audit_seed)?;
         Ok(json!({"enrolled": true}))
     }
+}
+
+/// The consent text for a Hello reset names the action.
+const HELLO_RESET_PROMPT: &str = "reset the Windows Hello approval key";
+
+/// Settings window only, with a reason and a verified user. The reset is
+/// audited before the key and its pin are dropped.
+fn hello_reset(
+    app: &App,
+    verifier: &dyn UserVerifier,
+    request: &serde_json::Value,
+) -> crate::Result<serde_json::Value> {
+    let window = window_of(app, request)?;
+    if window != dasdevbot_core::SETTINGS_WINDOW {
+        return Err(Error::Forbidden(
+            "only the settings window may reset the Windows Hello key".into(),
+        ));
+    }
+    let reason = request
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| Error::Forbidden("a Hello reset needs a reason".into()))?;
+    verifier
+        .verify_user(HELLO_RESET_PROMPT)
+        .map_err(|err| Error::Forbidden(format!("user verification failed: {err}")))?;
+    let mut store = app.store.lock().expect("store");
+    store.reset_hello_enrollment(reason, wall_ms(), &app.audit_seed)?;
+    Ok(json!({"reset": true}))
 }
 
 fn required(request: &serde_json::Value, field: &str) -> crate::Result<String> {
@@ -497,5 +528,84 @@ mod tests {
             .to_string(),
         );
         assert!(missing.contains("unauthorized") || missing.contains("ok\":false"), "{missing}");
+    }
+
+    #[test]
+    fn a_hello_reset_needs_settings_a_reason_and_the_user() {
+        use crate::hello_key::X509_SPKI_BLOB;
+        let dir = std::env::temp_dir().join(format!("dasdevbot-reset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (app, _rx) = build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: None,
+                role: "executor".into(),
+                token: Some("0123456789abcdef0123456789abcdef".into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let keys = MemorySecrets::new();
+        let peer = self_uid();
+        app.store
+            .lock()
+            .unwrap()
+            .enroll_hello_public_key(X509_SPKI_BLOB, "aa", 10, &app.audit_seed)
+            .unwrap();
+        let reset = |allow: bool, window_secret: &str, reason: &str| {
+            handle_line(
+                &app,
+                &TestVerifier { allow },
+                &keys,
+                peer,
+                &json!({
+                    "op": "hello-reset",
+                    "token": app.token,
+                    "window_secret": window_secret,
+                    "reason": reason,
+                })
+                .to_string(),
+            )
+        };
+        let resets = || {
+            app.store
+                .lock()
+                .unwrap()
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE kind = 'hello.reset'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let card = reset(true, &app.window_secrets.card, "lost device");
+        assert!(card.contains("settings window"), "{card}");
+        let unknown = reset(true, "not-a-window", "lost device");
+        assert!(unknown.contains("unauthorized"), "{unknown}");
+        let empty = reset(true, &app.window_secrets.settings, "   ");
+        assert!(empty.contains("reason"), "{empty}");
+        let denied = reset(false, &app.window_secrets.settings, "lost device");
+        assert!(denied.contains("user verification"), "{denied}");
+        assert_eq!(resets(), 0);
+        let refused = app
+            .store
+            .lock()
+            .unwrap()
+            .enroll_hello_public_key(X509_SPKI_BLOB, "bb", 20, &app.audit_seed)
+            .unwrap_err();
+        assert!(refused.to_string().contains("pinned fingerprint"), "{refused}");
+        let accepted = reset(true, &app.window_secrets.settings, "lost device");
+        assert!(accepted.contains("\"ok\":true"), "{accepted}");
+        assert_eq!(resets(), 1);
+        let mut store = app.store.lock().unwrap();
+        store
+            .enroll_hello_public_key(X509_SPKI_BLOB, "bb", 30, &app.audit_seed)
+            .unwrap();
+        assert_eq!(
+            store.hello_public_key().unwrap(),
+            Some((X509_SPKI_BLOB, "bb".to_string()))
+        );
+        assert!(crate::audit_log::verify(&store, &app.audit_seed).unwrap());
     }
 }
