@@ -8,7 +8,7 @@ mod turn;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 
-pub use provider::{from_env, LlmProvider, MockProvider};
+pub use provider::{from_env, smoke_xai, LlmProvider, MockProvider};
 pub use server::serve;
 pub use store::Store;
 
@@ -41,6 +41,8 @@ pub struct App {
     pub role: String,
     pub worker_id: String,
     pub wake: mpsc::Sender<()>,
+    /// Set by [`serve`] after the iroh endpoint binds. Empty when p2p is off.
+    pub endpoint_id: Mutex<Option<String>>,
 }
 
 pub struct Config {
@@ -69,6 +71,7 @@ pub fn build_app(
         provider: Arc::from(provider),
         store: Mutex::new(store),
         wake,
+        endpoint_id: Mutex::new(None),
     });
     Ok((app, rx))
 }

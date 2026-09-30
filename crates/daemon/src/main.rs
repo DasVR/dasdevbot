@@ -32,6 +32,7 @@ fn run() -> Result<(), Error> {
         match first.as_str() {
             "serve" => serve_from(rest),
             "emit" => emit(rest),
+            "smoke-xai" => smoke_xai(rest),
             "help" => {
                 print_help();
                 Ok(())
@@ -155,6 +156,14 @@ fn emit(args: Vec<String>) -> Result<(), Error> {
     Ok(())
 }
 
+fn smoke_xai(args: Vec<String>) -> Result<(), Error> {
+    if !args.is_empty() {
+        return Err(Error::BadRequest("smoke-xai takes no arguments".into()));
+    }
+    dasdevbotd::smoke_xai()?;
+    Ok(())
+}
+
 fn provider_label() -> &'static str {
     match env::var("XAI_API_KEY") {
         Ok(key) if !key.trim().is_empty() => "xai",
@@ -186,10 +195,15 @@ Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
                   [--web apps/desktop/dist] [--role server|device|display]
   dasdevbotd emit [--url http://127.0.0.1:8787] [--repo DasVR/NIL] [--ref phase0]
+  dasdevbotd smoke-xai
 
 The provider is xAI chat completions when XAI_API_KEY is set.
 Otherwise every draft is produced by the labeled mock provider.
+smoke-xai does not use the mock: it skips when XAI_API_KEY is unset.
 XAI_MODEL overrides the model (default grok-4.6).
+
+serve binds an iroh endpoint when the binary is built with the p2p feature
+(on by default). Build with --no-default-features to leave iroh out.
 "
     );
 }

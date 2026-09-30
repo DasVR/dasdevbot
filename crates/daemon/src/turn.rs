@@ -384,6 +384,7 @@ mod tests {
             role: "server".into(),
             worker_id: "owner".into(),
             wake,
+            endpoint_id: Mutex::new(None),
         };
         run_turn(&app, &job).unwrap();
         assert_eq!(app.provider.as_ref().id(), "boom");

@@ -161,6 +161,33 @@ impl LlmProvider for XaiProvider {
     }
 }
 
+/// One real xAI completion. Returns `Ok(false)` when `XAI_API_KEY` is unset.
+/// Does not substitute a mock response.
+pub fn smoke_xai() -> Result<bool, ProviderError> {
+    let key = match std::env::var("XAI_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            eprintln!("dasdevbotd smoke-xai: skipped, XAI_API_KEY is not set");
+            return Ok(false);
+        }
+    };
+    let provider = XaiProvider::from_env(key);
+    let started = std::time::Instant::now();
+    let completion = provider.complete(&CompletionRequest {
+        model: provider.model.clone(),
+        system: "Reply with the single word pong.".into(),
+        user: "ping".into(),
+        max_tokens: 16,
+    })?;
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "provider={} model={} latency_ms={latency_ms:.1} input_tokens={} output_tokens={}",
+        completion.provider, completion.model, completion.input_tokens, completion.output_tokens
+    );
+    println!("{}", completion.text);
+    Ok(true)
+}
+
 pub fn from_env() -> Box<dyn LlmProvider> {
     match std::env::var("XAI_API_KEY") {
         Ok(key) if !key.trim().is_empty() => Box::new(XaiProvider::from_env(key)),

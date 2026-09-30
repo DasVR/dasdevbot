@@ -498,11 +498,13 @@
       cancelHello();
       return;
     }
+    checkOffset = 1;
     committing = "approve";
     await settleDecision("approve");
   }
 
   async function beginApprove(): Promise<void> {
+    checkOffset = 1;
     if (needsHello) {
       helloOpen = true;
       return;
@@ -529,6 +531,7 @@
       checkOffset = 0;
       await wait(tokenMs("--dur-base", 120));
     }
+    checkOffset = 1;
     await beginApprove();
   }
 
@@ -604,7 +607,7 @@
     holdKind = null;
     holdSealed = true;
     if (kind === "approve") {
-      checkOffset = 0;
+      checkOffset = 1;
       void beginApprove();
       return;
     }
@@ -1366,14 +1369,8 @@
     box-shadow: var(--highlight-top), var(--shadow-puff);
   }
 
-  .approve:active:not(:disabled) {
-    background: var(--ink-press);
-    border-color: var(--ink-press);
-    box-shadow: var(--shadow-press);
-  }
-
+  .approve:active:not(:disabled),
   .deny:active:not(:disabled) {
-    background: var(--paper-sunken);
     box-shadow: var(--shadow-press);
   }
 
@@ -1677,17 +1674,13 @@
       transform: none;
     }
 
-    .approve:active:not(:disabled) {
-      background: var(--ink-press);
-      border-color: var(--ink-press);
-      box-shadow: var(--highlight-top), var(--shadow-puff);
+    .approve:active:not(:disabled),
+    .deny:active:not(:disabled) {
       transition: none;
     }
 
     .deny:active:not(:disabled) {
-      background: var(--paper-sunken);
-      box-shadow: var(--highlight-top), var(--shadow-puff);
-      transition: none;
+      background: color-mix(in oklab, var(--ink-1) 14%, var(--paper-raised));
     }
 
     .face-idle,
