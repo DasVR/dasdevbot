@@ -90,6 +90,10 @@
     stroke-linejoin: round;
   }
 
+  svg path {
+    vector-effect: non-scaling-stroke;
+  }
+
   svg.line {
     stroke-width: var(--icon-stroke);
   }

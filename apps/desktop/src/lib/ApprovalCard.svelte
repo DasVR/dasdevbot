@@ -92,7 +92,7 @@
   let holdSealed = false;
 
   const locked = $derived(busy || committing !== null);
-  const duration = $derived(holdDurationMs(effect, holdMs ?? tokenMs("--dur-hold", 600)));
+  const duration = $derived(holdDurationMs(effect, holdMs));
   const showUndo = $derived(
     !pending &&
       !approval.committed &&
@@ -637,7 +637,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <article
   {@attach bindCard}
-  class={["card", floating ? "glass" : "paper", playRise && "rise"]}
+  class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
   style:--arrow-delay={ARROW_DELAY}
   style:--arrow-head-draw={ARROW_HEAD_DRAW}
   style:--reduced-fade={REDUCED_FADE_EASE}
@@ -773,7 +773,7 @@
             onkeydown={onApproveKeydown}
             onclick={() => void onApproveClick()}
           >
-            {#if holdKind === "approve"}
+            {#if holdKind === "approve" || checkOffset < 1}
               <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
                 <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
               </svg>
@@ -875,9 +875,16 @@
     padding: var(--s-2) var(--s-2) var(--s-5);
   }
 
+  .card.glass.receipt {
+    padding: 10px 14px 10px 12px;
+    border: 1px solid var(--hairline);
+    min-height: 52px;
+  }
+
   .card.paper {
     background: var(--convex), var(--paper-raised);
-    backdrop-filter: none;
+    -webkit-backdrop-filter: blur(0px) saturate(100%);
+    backdrop-filter: blur(0px) saturate(100%);
     border-radius: var(--r-md);
     border: 1px solid var(--hairline);
     box-shadow: var(--highlight-top), var(--shadow-puff);
@@ -891,7 +898,7 @@
   }
 
   .card.rise {
-    animation: rise var(--dur-stage) var(--ease-out) both;
+    animation: rise var(--dur-stage) var(--ease-out) backwards;
   }
 
   @keyframes rise {
@@ -1122,6 +1129,10 @@
     stroke-width: var(--icon-stroke);
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  .key path {
+    vector-effect: non-scaling-stroke;
   }
 
   .key {
@@ -1508,10 +1519,6 @@
     .approve:active:not(:disabled),
     .deny:active:not(:disabled) {
       transition: none;
-    }
-
-    .approve:active:not(:disabled) {
-      background: color-mix(in oklab, black 18%, var(--ink-1));
     }
 
     .deny:active:not(:disabled) {

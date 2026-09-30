@@ -392,15 +392,9 @@
               <h2>{reviewer.name}</h2>
               {#if reviewer.status === "working"}
                 <span class="agent-status">{reviewer.status}</span>
-              {:else if filingUndo}
-                <span class="agent-status">
-                  {#if filingSeconds > 0}
-                    filing · undo {filingSeconds}s
-                  {:else}
-                    filing
-                  {/if}
-                </span>
-              {:else if reviewer.status === "blocked"}
+              {:else if filingUndo && filingSeconds > 0}
+                <span class="agent-status">filing · undo {filingSeconds}s</span>
+              {:else if reviewer.status === "blocked" && !filingUndo}
                 <span class="agent-status need">
                   <span class="need-dot" aria-hidden="true"></span>
                   {reviewer.status}
