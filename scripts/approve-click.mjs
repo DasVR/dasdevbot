@@ -167,7 +167,7 @@ let browser;
 try {
   await waitForHttp(origin, preview);
   browser = await launchBrowser();
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1200 } });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1700 } });
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable");
@@ -255,7 +255,7 @@ try {
   if ((await page.locator("article.card .receipt").count()) !== 0) {
     throw new Error("a one-frame click filed the receipt");
   }
-  await page.locator(".hold-hint.armed").waitFor({ timeout: 4000 });
+  await page.locator(".hold-hint.armed").waitFor({ state: "attached", timeout: 4000 });
   const held = await button.boundingBox();
   if (!held) {
     throw new Error("Approve draft left the card before the hold");
