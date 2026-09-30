@@ -49,9 +49,11 @@ From another shell, against a running daemon:
 ./target/release/dasdevbotd emit --repo DasVR/NIL --ref phase0
 ```
 
-Useful flags: `--bind`, `--data` (default `data/dasdevbot.sqlite`), `--web`, `--role server|device|display`. The role is recorded; phase 0 behavior does not change with it. Non-loopback binds need `--allow-remote`.
+Useful flags: `--bind`, `--data` (default `data/dasdevbot.sqlite`), `--web`, `--role server|device|display`, `--token`, `--dev`. The role is recorded; phase 0 behavior does not change with it. Non-loopback binds need `--allow-remote`, and that flag refuses to start unless `--token` or `DASDEVBOT_TOKEN` is set.
 
-Set `XAI_API_KEY` before `serve` to call xAI. Leave it unset to stay on the mock provider. Do not commit the key.
+`serve` mints a bearer for mutating routes, writes it to `<data>.token` (mode 0600), and injects it into the desktop HTML. The API does not return it. `emit` reads that file, or `--token`.
+
+Set `XAI_API_KEY` before `serve` to call xAI. Leave it unset to stay on the mock provider. Do not commit the key. `XAI_BASE_URL` is used only when its host is `api.x.ai`, unless you pass `--dev`.
 
 One real call, with no mock fallback:
 

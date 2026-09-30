@@ -100,9 +100,10 @@ pub struct XaiProvider {
 }
 
 impl XaiProvider {
-    pub fn from_env(api_key: String) -> Self {
+    pub fn from_env(api_key: String, dev: bool) -> Self {
         let model = std::env::var("XAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        let base = std::env::var("XAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.into());
+        let configured = std::env::var("XAI_BASE_URL").ok();
+        let base = resolve_xai_base(configured.as_deref(), dev);
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(90))
             .build();
@@ -171,7 +172,8 @@ pub fn smoke_xai() -> Result<bool, ProviderError> {
             return Ok(false);
         }
     };
-    let provider = XaiProvider::from_env(key);
+    // The smoke call always goes to api.x.ai; it never honors a dev base URL.
+    let provider = XaiProvider::from_env(key, false);
     let started = std::time::Instant::now();
     let completion = provider.complete(&CompletionRequest {
         model: provider.model.clone(),
@@ -188,11 +190,43 @@ pub fn smoke_xai() -> Result<bool, ProviderError> {
     Ok(true)
 }
 
-pub fn from_env() -> Box<dyn LlmProvider> {
+pub fn from_env(dev: bool) -> Box<dyn LlmProvider> {
     match std::env::var("XAI_API_KEY") {
-        Ok(key) if !key.trim().is_empty() => Box::new(XaiProvider::from_env(key)),
+        Ok(key) if !key.trim().is_empty() => Box::new(XaiProvider::from_env(key, dev)),
         _ => Box::new(MockProvider::new()),
     }
+}
+
+/// `XAI_BASE_URL` is ignored unless its host is `api.x.ai`, or `dev` is set.
+pub fn resolve_xai_base(configured: Option<&str>, dev: bool) -> String {
+    let Some(raw) = configured.map(str::trim).filter(|value| !value.is_empty()) else {
+        return DEFAULT_BASE.to_string();
+    };
+    if dev || xai_host_is_official(raw) {
+        return raw.to_string();
+    }
+    eprintln!(
+        "dasdevbotd: ignoring XAI_BASE_URL because its host is not api.x.ai (pass --dev to override)"
+    );
+    DEFAULT_BASE.to_string()
+}
+
+fn xai_host_is_official(raw: &str) -> bool {
+    let Some(rest) = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    if rest.contains('@') {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.starts_with('[') {
+        return false;
+    }
+    let host = authority.split(':').next().unwrap_or("");
+    host.eq_ignore_ascii_case("api.x.ai")
 }
 
 pub fn chat_body(model: &str, req: &CompletionRequest) -> Value {
@@ -272,6 +306,35 @@ mod tests {
         assert!(done.text.contains("refresh()"));
         assert!(done.input_tokens >= 2);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn xai_base_url_must_be_the_official_host_unless_dev() {
+        assert_eq!(
+            resolve_xai_base(Some("https://api.x.ai/v1"), false),
+            "https://api.x.ai/v1"
+        );
+        assert_eq!(
+            resolve_xai_base(Some("https://API.X.AI:443/v1"), false),
+            "https://API.X.AI:443/v1"
+        );
+        assert_eq!(
+            resolve_xai_base(Some("https://evil.example/v1"), false),
+            DEFAULT_BASE
+        );
+        assert_eq!(
+            resolve_xai_base(Some("https://api.x.ai.evil.com/v1"), false),
+            DEFAULT_BASE
+        );
+        assert_eq!(
+            resolve_xai_base(Some("https://user:secret@api.x.ai/v1"), false),
+            DEFAULT_BASE
+        );
+        assert_eq!(
+            resolve_xai_base(Some("https://evil.example/v1"), true),
+            "https://evil.example/v1"
+        );
+        assert_eq!(resolve_xai_base(None, false), DEFAULT_BASE);
     }
 
     #[test]

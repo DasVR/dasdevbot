@@ -270,6 +270,24 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return target.closest(".composer") !== null;
 }
 
+function sessionToken(): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  return (
+    document.querySelector('meta[name="dasdevbot-token"]')?.getAttribute("content")?.trim() ?? ""
+  );
+}
+
+function jsonHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = sessionToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/v1/snapshot");
   if (!response.ok) {
@@ -282,7 +300,7 @@ export async function getSnapshot(): Promise<Snapshot> {
 export async function emitPush(forced = false): Promise<void> {
   const response = await fetch("/v1/events", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
     body: JSON.stringify({
       source: "demo",
       kind: "repo.push",
@@ -309,7 +327,7 @@ export async function decide(id: string, decision: Decision, reason?: string): P
   }
   const response = await fetch(`/v1/approvals/${id}/decision`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
     body: JSON.stringify(body),
   });
   if (!response.ok) {
@@ -320,7 +338,7 @@ export async function decide(id: string, decision: Decision, reason?: string): P
 export async function undo(id: string): Promise<void> {
   const response = await fetch(`/v1/approvals/${id}/undo`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: jsonHeaders(),
     body: "{}",
   });
   if (!response.ok) {

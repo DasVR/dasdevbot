@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use dasdevbotd::{serve, Error};
+use dasdevbotd::{require_explicit_token, serve, session_token_path, Error};
 
 fn main() -> ExitCode {
     match run() {
@@ -53,6 +53,8 @@ struct Flags {
     repo: String,
     reference: String,
     allow_remote: bool,
+    dev: bool,
+    token: Option<String>,
 }
 
 fn flags(args: Vec<String>) -> Result<Flags, Error> {
@@ -65,6 +67,8 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut repo = "DasVR/NIL".to_string();
     let mut reference = "phase0".to_string();
     let mut allow_remote = false;
+    let mut dev = false;
+    let mut token: Option<String> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         let mut value = || {
@@ -83,6 +87,8 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             "--repo" => repo = value()?,
             "--ref" => reference = value()?,
             "--allow-remote" => allow_remote = true,
+            "--dev" => dev = true,
+            "--token" => token = Some(value()?),
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -110,12 +116,16 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         repo,
         reference,
         allow_remote,
+        dev,
+        token,
     })
 }
 
 fn serve_from(args: Vec<String>) -> Result<(), Error> {
     let flags = flags(args)?;
     ensure_loopback(&flags.bind, flags.allow_remote)?;
+    let explicit = explicit_token(flags.token);
+    require_explicit_token(flags.allow_remote, explicit.as_deref())?;
     eprintln!(
         "dasdevbotd starting role={} data={} provider={}",
         flags.role,
@@ -127,9 +137,21 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
             data: flags.data,
             web_root: flags.web,
             role: flags.role,
+            dev: flags.dev,
+            token: explicit,
         })?,
         &flags.bind,
     )
+}
+
+fn explicit_token(flag: Option<String>) -> Option<String> {
+    if let Some(token) = flag.filter(|token| !token.trim().is_empty()) {
+        return Some(token);
+    }
+    match env::var("DASDEVBOT_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => Some(token),
+        _ => None,
+    }
 }
 
 fn emit(args: Vec<String>) -> Result<(), Error> {
@@ -146,7 +168,9 @@ fn emit(args: Vec<String>) -> Result<(), Error> {
         },
         "idempotency_key": format!("cli-{}", uuid::Uuid::new_v4())
     });
+    let token = emit_token(&flags)?;
     let response = ureq::post(&endpoint)
+        .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
         .map_err(|err| Error::BadRequest(format!("emit failed: {err}")))?;
     let text = response
@@ -162,6 +186,20 @@ fn smoke_xai(args: Vec<String>) -> Result<(), Error> {
     }
     dasdevbotd::smoke_xai()?;
     Ok(())
+}
+
+fn emit_token(flags: &Flags) -> Result<String, Error> {
+    if let Some(token) = explicit_token(flags.token.clone()) {
+        return Ok(token);
+    }
+    let path = session_token_path(&flags.data);
+    match std::fs::read_to_string(&path) {
+        Ok(token) if !token.trim().is_empty() => Ok(token.trim().to_string()),
+        _ => Err(Error::BadRequest(format!(
+            "missing bearer token; pass --token or set DASDEVBOT_TOKEN (looked at {})",
+            path.display()
+        ))),
+    }
 }
 
 fn provider_label() -> &'static str {
@@ -194,13 +232,21 @@ dasdevbotd — phase 0 spike
 Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
                   [--web apps/desktop/dist] [--role server|device|display]
-  dasdevbotd emit [--url http://127.0.0.1:8787] [--repo DasVR/NIL] [--ref phase0]
+                  [--token TOKEN] [--dev]
+  dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
+                  [--repo DasVR/NIL] [--ref phase0]
   dasdevbotd smoke-xai
+
+Mutating routes require the per-launch bearer. serve writes it next to the
+database as <data>.token (mode 0600) and injects it into the desktop HTML.
+It is not returned by the API. --allow-remote refuses to start unless
+--token or DASDEVBOT_TOKEN is set.
 
 The provider is xAI chat completions when XAI_API_KEY is set.
 Otherwise every draft is produced by the labeled mock provider.
 smoke-xai does not use the mock: it skips when XAI_API_KEY is unset.
 XAI_MODEL overrides the model (default grok-4.6).
+XAI_BASE_URL is ignored unless its host is api.x.ai, or --dev is set.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.

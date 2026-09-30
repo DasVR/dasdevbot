@@ -385,6 +385,7 @@ mod tests {
             worker_id: "owner".into(),
             wake,
             endpoint_id: Mutex::new(None),
+            token: "test-token".into(),
         };
         run_turn(&app, &job).unwrap();
         assert_eq!(app.provider.as_ref().id(), "boom");
