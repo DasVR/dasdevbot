@@ -1,8 +1,19 @@
+import { fileURLToPath } from "node:url";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { defineConfig } from "vite";
 
+const root = fileURLToPath(new URL(".", import.meta.url));
+
 export default defineConfig({
   plugins: [svelte()],
+  build: {
+    rollupOptions: {
+      input: {
+        main: `${root}index.html`,
+        gallery: `${root}gallery.html`,
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

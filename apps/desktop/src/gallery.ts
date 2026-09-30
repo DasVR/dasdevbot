@@ -1,5 +1,5 @@
 import { mount } from "svelte";
-import App from "./App.svelte";
+import IconGallery from "./lib/IconGallery.svelte";
 import "./app.css";
 
 const target = document.getElementById("app");
@@ -7,4 +7,4 @@ if (!target) {
   throw new Error("missing #app");
 }
 
-mount(App, { target });
+mount(IconGallery, { target });

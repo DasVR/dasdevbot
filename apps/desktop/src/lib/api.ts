@@ -1,11 +1,12 @@
+import { tokenMs } from "./cssTokens";
+
 export type EffectClass = "read" | "write_local" | "external" | "destructive";
 export type Decision = "approve" | "deny";
 export type ApprovalStatus = "pending" | "approved" | "denied" | "expired";
 
+/** User hold setting. The locked range is 400 to 1500. */
 export const HOLD_MS_MIN = 400;
 export const HOLD_MS_MAX = 1500;
-export const HOLD_MS_DEFAULT = 600;
-export const HOLD_MS_DESTRUCTIVE = 1200;
 export const SEEN_LOCK_MS = 800;
 
 export interface Agent {
@@ -182,15 +183,15 @@ function sentenceCase(action: string): string {
 
 export function clampHoldMs(ms: number): number {
   if (!Number.isFinite(ms)) {
-    return HOLD_MS_DEFAULT;
+    return tokenMs("--dur-hold", HOLD_MS_MIN);
   }
   return Math.min(HOLD_MS_MAX, Math.max(HOLD_MS_MIN, Math.round(ms)));
 }
 
-export function holdDurationMs(effect: EffectClass | null, setting: number): number {
-  const base = clampHoldMs(setting);
+export function holdDurationMs(effect: EffectClass | null, setting?: number): number {
+  const base = setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
   if (effect === "destructive") {
-    return clampHoldMs(Math.max(base, HOLD_MS_DESTRUCTIVE));
+    return clampHoldMs(Math.max(base, tokenMs("--dur-hold-destructive", HOLD_MS_MAX)));
   }
   return base;
 }

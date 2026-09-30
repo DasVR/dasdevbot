@@ -90,6 +90,13 @@
   --dur-soft:  360ms; /* card content crossfade, deny settle */
   --dur-draw:  300ms; /* pen strokes: check, risk arrow, deny strike */
   --dur-stage: 520ms; /* card enter/exit, glass ramp, sheets */
+  /* Loop and hold constants (INTERACTIONS A7, CD-approved 2026-09-30) */
+  --dur-trace-read:  2100ms; /* reading trace loop period */
+  --dur-trace-write: 1700ms; /* writing trace loop period */
+  --dur-retract:      160ms; /* early hold release retracts the stroke */
+  --dur-hold:         600ms; /* external approve / deny hold (user setting 400 to 1500) */
+  --dur-hold-destructive: 1200ms; /* dormant in Phase 1: destructive is denied by policy (Security C1) */
+  --dur-stamp:        400ms;
   --ease-out:    cubic-bezier(0.22, 1, 0.36, 1);   /* default: quick start, long soft landing */
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);   /* crossfades, position swaps < 8px */
   --ease-press:  cubic-bezier(0.3, 0, 0.5, 1);     /* press-in (squash) */
