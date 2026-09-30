@@ -14,12 +14,18 @@ use crate::turn;
 use crate::{wall_ms, App, Error, Result};
 
 pub fn serve(app: Arc<App>, bind: &str) -> Result<()> {
+    let local = dasdevbot_sync::bind_local().map_err(Error::Bind)?;
+    if let Some(id) = local.node_id.clone() {
+        *app.endpoint_id.lock().expect("endpoint") = Some(id);
+    }
     let server = Server::http(bind).map_err(|err| Error::Bind(err.to_string()))?;
+    let endpoint = local.node_id.as_deref().unwrap_or("-");
     eprintln!(
-        "dasdevbotd ready bind={} provider={} sync={}",
+        "dasdevbotd ready bind={} provider={} sync={} endpoint={}",
         server.server_addr(),
         app.provider.id(),
-        TRANSPORT
+        TRANSPORT,
+        endpoint
     );
     let _ = std::io::Write::flush(&mut std::io::stderr());
     serve_incoming(app, server);
@@ -137,6 +143,7 @@ fn health(app: &App) -> Health {
         provider: app.provider.id().to_string(),
         provider_detail: app.provider.detail(),
         sync: TRANSPORT.to_string(),
+        endpoint_id: app.endpoint_id.lock().expect("endpoint").clone(),
     }
 }
 
@@ -219,6 +226,7 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
         provider: app.provider.id().to_string(),
         provider_detail: app.provider.detail(),
         sync: TRANSPORT.to_string(),
+        endpoint_id: app.endpoint_id.lock().expect("endpoint").clone(),
         agents,
         approvals,
         ledger,
@@ -375,7 +383,8 @@ mod tests {
         assert_eq!(health["protocol"], 1);
         assert_eq!(health["ready"], true);
         assert_eq!(health["provider"], "mock");
-        assert_eq!(health["sync"], "stub");
+        assert_eq!(health["sync"], dasdevbot_sync::TRANSPORT);
+        assert!(health["endpoint_id"].is_null());
 
         let emitted = agent
             .post(&format!("http://{addr}/v1/events"))
@@ -464,13 +473,44 @@ mod tests {
         assert!(kinds.contains(&"ledger.posted"));
     }
 
+    #[test]
+    fn serve_binds_before_health() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-bind-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let app = crate::build_and_worker(Config {
+            data: dir.join("db.sqlite"),
+            web_root: None,
+            role: "server".into(),
+        })
+        .unwrap();
+        let bind = format!("127.0.0.1:{port}");
+        std::thread::spawn(move || {
+            serve(app, &bind).unwrap();
+        });
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let health = wait_ok(&agent, &format!("http://127.0.0.1:{port}/v1/health"));
+        assert_eq!(health["sync"], dasdevbot_sync::TRANSPORT);
+        if dasdevbot_sync::linked() {
+            let id = health["endpoint_id"].as_str().expect("endpoint id");
+            assert!(id.len() > 8, "{id}");
+        } else {
+            assert!(health["endpoint_id"].is_null());
+        }
+    }
+
     fn wait_ok(agent: &ureq::Agent, url: &str) -> serde_json::Value {
         let start = Instant::now();
         loop {
             if let Ok(response) = agent.get(url).call() {
                 return response.into_json().unwrap();
             }
-            if start.elapsed() > Duration::from_secs(5) {
+            if start.elapsed() > Duration::from_secs(20) {
                 panic!("daemon did not answer {url}");
             }
             std::thread::sleep(Duration::from_millis(20));

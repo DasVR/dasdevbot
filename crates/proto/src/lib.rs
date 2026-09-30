@@ -19,6 +19,8 @@ pub struct Health {
     pub provider: String,
     pub provider_detail: String,
     pub sync: String,
+    /// iroh node id when `serve` bound an endpoint. Absent when p2p is off.
+    pub endpoint_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +121,7 @@ pub struct Snapshot {
     pub provider: String,
     pub provider_detail: String,
     pub sync: String,
+    pub endpoint_id: Option<String>,
     pub agents: Vec<AgentView>,
     pub approvals: Vec<ApprovalView>,
     pub ledger: Vec<LedgerView>,
