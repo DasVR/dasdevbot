@@ -480,7 +480,7 @@ Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
                   [--web apps/desktop/dist] [--token TOKEN]
                   [--role server|leader|worker|executor|device|display]
-                  [--provider ollama|ollama-local|claude-cli] [--model NAME]
+                  [--provider ollama|ollama-local|claude-cli|mock] [--model NAME]
                   [--claude-home PATH] [--claude-sha256 HEX] [--dev-env-secrets]
   dasdevbotd smoke-model --provider ollama|ollama-local|claude-cli [--model NAME]
                          [--claude-home PATH] [--claude-sha256 HEX]
@@ -507,7 +507,11 @@ That directory is the CLI's HOME, and <claude-home>/claude-config is its
 CLAUDE_CONFIG_DIR. `--claude-sha256` is the hex digest of the native ELF.
 `serve` on the server role refuses to start without it. On Ubuntu, log in once
 as the service user with CLAUDE_CONFIG_DIR set to that dir. See deploy/ubuntu.
-The mock provider is for tests.
+`serve --provider mock` is a demo: canned drafts, no model, no network, no
+key. It is explicit only, never a fallback, refused on the server role and
+under smoke-model, and runs on the device or executor role (the executor is
+the role that drafts cards). Cards keep their tier from the event kind, and
+the external and destructive denials are unchanged.
 
 serve takes its role only from `serve --role` or the fixed file
 /etc/dasdevbot/role (C:\\ProgramData\\dasdevbot\\role on Windows) and refuses
@@ -686,5 +690,31 @@ mod tests {
         // The refusal comes before open_provider can read OLLAMA_API_KEY.
         assert!(err.to_string().contains("audit key is missing"), "{err}");
         assert!(!data.exists());
+    }
+
+    #[test]
+    fn serve_provider_mock_is_refused_on_the_server_role() {
+        let parsed = flags(vec!["--provider".into(), "mock".into()]).unwrap();
+        assert_eq!(parsed.provider, ProviderKind::Mock);
+        let default = flags(Vec::new()).unwrap();
+        assert_eq!(default.provider, ProviderKind::Ollama);
+        let dir = temp_dir("mock-server");
+        let data = dir.join("dasdevbot.sqlite");
+        let err = serve_from(vec![
+            "--role".into(),
+            "server".into(),
+            "--provider".into(),
+            "mock".into(),
+            "--data".into(),
+            data.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provider mock is demo-only and refused on the server role"),
+            "{err}"
+        );
+        assert!(!data.exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

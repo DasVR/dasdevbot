@@ -720,7 +720,7 @@
             </span>
           </span>
           {#if approval.provider === "mock"}
-            <span class="prov">mock provider, not written by a model</span>
+            <span class="prov">mock · demo draft, not written by a model</span>
           {/if}
         </summary>
         <p class="draft">
