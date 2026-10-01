@@ -30,6 +30,17 @@
     "Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.";
   const QUIET_HELLO = "Confirm with Windows Hello";
 
+  /** Resting ink is fully clipped. The hold opens it from the left. */
+  function inkClip(progress: number): string {
+    if (progress <= 0) {
+      return "inset(0px 100% 0px 0px)";
+    }
+    if (progress >= 1) {
+      return "inset(0px 0px 0px 0px)";
+    }
+    return `inset(0px ${((1 - progress) * 100).toFixed(3)}% 0px 0px)`;
+  }
+
   /** Risk arrow waits after the card rise. No default-motion token is 120ms. */
   const ARROW_DELAY = "120ms";
   /** Arrow head draws after the shaft. No default token is 160ms. */
@@ -98,6 +109,14 @@
 
   const locked = $derived(busy || committing !== null);
   const duration = $derived(holdDurationMs(effect, holdMs));
+  /** Hold progress, 0 at rest and 1 when the ink is fully open. */
+  const inkProgress = $derived.by(() => {
+    if (reducedMotion.current) {
+      return holdKind === "approve" || helloOpen || checkOffset < 1 ? 1 : 0;
+    }
+    return 1 - checkOffset;
+  });
+  const approveInkClip = $derived(inkClip(inkProgress));
   const showUndo = $derived(
     !pending &&
       !approval.committed &&
@@ -863,13 +882,16 @@
             onpointerleave={onApprovePointerEnd}
             onpointercancel={onApprovePointerEnd}
           >
-            {#if holdKind === "approve" || checkOffset < 1}
-              <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
-                <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
-              </svg>
-            {/if}
             <span class="face">
               <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
+            </span>
+            <span class="ink" aria-hidden="true" style:clip-path={approveInkClip}>
+              {#if holdKind === "approve" || checkOffset < 1}
+                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
+                </svg>
+              {/if}
+              <span class="face">Approve draft</span>
             </span>
           </button>
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
@@ -1315,6 +1337,21 @@
     outline-offset: 2px;
   }
 
+  .approve > .ink {
+    position: absolute;
+    inset: -1.5px;
+    z-index: 1;
+    border-radius: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0)), var(--ink-1);
+    color: var(--paper-raised);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16);
+    clip-path: inset(0px 100% 0px 0px);
+  }
+
   .approve .pen {
     stroke: var(--paper-raised);
   }
@@ -1323,7 +1360,7 @@
     width: 18px;
     height: 18px;
     position: absolute;
-    left: 18px;
+    left: 19.5px;
   }
 
   .face {
@@ -1562,7 +1599,8 @@
       background: color-mix(in oklab, var(--ink-1) 14%, var(--paper-raised));
     }
 
-    .face-idle {
+    .face-idle,
+    .approve > .ink {
       transition: none;
     }
   }
