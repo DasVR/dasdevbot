@@ -6,11 +6,10 @@ use std::time::Instant;
 
 use dasdevbot_core::{authorize_secret_name, kind, parse_role, SecretRoleError};
 use dasdevbotd::{
-    audit_dev_env, audit_key_path, open_provider, parse_sha256_list, plan_secret_set,
-    load_role_file, prompt_secret_from_tty, read_piped_secret, serve,
-    session_token_path,
-    url_exposes_bearer, CommandKind, CompletionRequest, Config, Error,
-    ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource, Store,
+    audit_dev_env, audit_key_path, load_role_file, open_provider, parse_sha256_list,
+    plan_secret_set, prompt_secret_from_tty, read_piped_secret, serve, session_token_path,
+    url_exposes_bearer, CommandKind, CompletionRequest, Config, Error, ProviderError, ProviderKind,
+    ProviderSettings, SecretHandle, SecretSource, Store,
 };
 
 fn main() -> ExitCode {
@@ -299,7 +298,11 @@ fn secret_command(args: Vec<String>) -> Result<(), Error> {
 
 #[cfg(unix)]
 fn secret_set(args: Vec<String>) -> Result<(), Error> {
-    secret_set_at(dasdevbotd::configured_data_path(), args, &dasdevbotd::KeyringHandle)
+    secret_set_at(
+        dasdevbotd::configured_data_path(),
+        args,
+        &dasdevbotd::KeyringHandle,
+    )
 }
 
 #[cfg(not(unix))]
@@ -613,7 +616,10 @@ mod tests {
             &keys,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("only into the daemon database"), "{err}");
+        assert!(
+            err.to_string().contains("only into the daemon database"),
+            "{err}"
+        );
         assert!(keys.writes.lock().unwrap().is_empty());
         assert!(!throwaway.exists());
         assert!(!audit_key_path(&throwaway).exists());

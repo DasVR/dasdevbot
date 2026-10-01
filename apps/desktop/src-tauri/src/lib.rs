@@ -187,10 +187,7 @@ fn exchange(data: &Path, body: &Value) -> Result<Value, String> {
     }
 }
 
-fn write_and_read(
-    mut stream: impl std::io::Read + Write,
-    body: &Value,
-) -> Result<Value, String> {
+fn write_and_read(mut stream: impl std::io::Read + Write, body: &Value) -> Result<Value, String> {
     serde_json::to_writer(&mut stream, body).map_err(|err| err.to_string())?;
     stream.write_all(b"\n").map_err(|err| err.to_string())?;
     stream.flush().map_err(|err| err.to_string())?;
@@ -209,7 +206,9 @@ fn write_and_read(
 }
 
 fn open_shell() -> ShellState {
-    ShellState { data: daemon_data() }
+    ShellState {
+        data: daemon_data(),
+    }
 }
 
 /// Session bearer for the webview. The daemon never embeds this in HTML.

@@ -182,7 +182,9 @@ pub enum WriteAuth {
 }
 
 pub fn cover_tokens(estimate: u64) -> Option<u64> {
-    estimate.checked_mul(HEADROOM_NUMERATOR).map(|scaled| scaled.div_ceil(HEADROOM_DENOMINATOR))
+    estimate
+        .checked_mul(HEADROOM_NUMERATOR)
+        .map(|scaled| scaled.div_ceil(HEADROOM_DENOMINATOR))
 }
 
 /// Credits still inside the provider window.
@@ -375,8 +377,13 @@ pub fn admit(input: AdmitInput) -> Admission {
 }
 
 enum SlotDecision {
-    Open { headroom: u64, epoch: Option<u64> },
-    Quota { until_ms: Option<u64> },
+    Open {
+        headroom: u64,
+        epoch: Option<u64>,
+    },
+    Quota {
+        until_ms: Option<u64>,
+    },
     Slot,
     Overflow,
     /// No caps row. Fail closed. Do not fall through to another provider.
@@ -483,14 +490,26 @@ mod tests {
 
     #[test]
     fn a_signal_cannot_raise_headroom_above_the_ledger() {
-        assert_eq!(effective_headroom(100, SignalRead::Present(LimitSignal {
-            remaining: u64::MAX,
-            reset_at_ms: None,
-        })), 100);
-        assert_eq!(effective_headroom(1_000, SignalRead::Present(LimitSignal {
-            remaining: 40,
-            reset_at_ms: None,
-        })), 40);
+        assert_eq!(
+            effective_headroom(
+                100,
+                SignalRead::Present(LimitSignal {
+                    remaining: u64::MAX,
+                    reset_at_ms: None,
+                })
+            ),
+            100
+        );
+        assert_eq!(
+            effective_headroom(
+                1_000,
+                SignalRead::Present(LimitSignal {
+                    remaining: 40,
+                    reset_at_ms: None,
+                })
+            ),
+            40
+        );
         assert_eq!(effective_headroom(1_000, SignalRead::Failed), 1_000);
         assert_eq!(effective_headroom(1_000, SignalRead::Absent), 1_000);
     }
@@ -765,11 +784,23 @@ mod tests {
         );
 
         assert_eq!(
-            authorize_spend(Role::Executor, "executor-1", &writer(2, "executor-1", 10_000), 1, 0),
+            authorize_spend(
+                Role::Executor,
+                "executor-1",
+                &writer(2, "executor-1", 10_000),
+                1,
+                0
+            ),
             WriteAuth::StaleEpoch
         );
         assert_eq!(
-            authorize_spend(Role::Worker, "executor-1", &writer(1, "executor-1", 10_000), 1, 0),
+            authorize_spend(
+                Role::Worker,
+                "executor-1",
+                &writer(1, "executor-1", 10_000),
+                1,
+                0
+            ),
             WriteAuth::NotExecutor
         );
     }

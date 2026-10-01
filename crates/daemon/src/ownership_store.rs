@@ -22,9 +22,9 @@ pub fn insert_chat(store: &Store, id: &str, device_node: &str, title: &str) -> R
 
 /// `include_device_chats` is ignored. Chats are never part of the server batch.
 pub fn server_batch(store: &Store, _include_device_chats: bool) -> Result<Vec<JobMeta>> {
-    let mut stmt = store.connection().prepare(
-        "SELECT id, agent_id, status FROM jobs ORDER BY created_at, id",
-    )?;
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT id, agent_id, status FROM jobs ORDER BY created_at, id")?;
     let rows = stmt.query_map([], |row| {
         Ok(JobMeta {
             id: row.get(0)?,

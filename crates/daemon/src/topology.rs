@@ -1,6 +1,8 @@
 //! Leader lease in SQLite. The leader assigns work. Workers only claim their own.
 
-use dasdevbot_core::{claim_leader, dispatch_allowed, may_seek_leadership, parse_role, Claim, LeaderLease};
+use dasdevbot_core::{
+    claim_leader, dispatch_allowed, may_seek_leadership, parse_role, Claim, LeaderLease,
+};
 use rusqlite::{params, OptionalExtension};
 
 use crate::store::Store;
@@ -90,12 +92,17 @@ mod tests {
             .unwrap()
             .unwrap();
         tick(&mut store, "worker", "worker-b", 10).unwrap();
-        assert!(store.claim_assigned("worker-b", 10, 1_000).unwrap().is_none());
+        assert!(store
+            .claim_assigned("worker-b", 10, 1_000)
+            .unwrap()
+            .is_none());
         tick(&mut store, "leader", "leader-a", 20).unwrap();
         tick(&mut store, "leader", "leader-b", 30).unwrap();
         let holder: String = store
             .connection()
-            .query_row("SELECT holder FROM leader_lease WHERE id = 1", [], |row| row.get(0))
+            .query_row("SELECT holder FROM leader_lease WHERE id = 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(holder, "leader-a");
         let assigned: String = store
@@ -107,7 +114,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(assigned, "worker-b");
-        assert!(store.claim_assigned("worker-a", 40, 1_000).unwrap().is_none());
-        assert!(store.claim_assigned("worker-b", 40, 1_000).unwrap().is_some());
+        assert!(store
+            .claim_assigned("worker-a", 40, 1_000)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .claim_assigned("worker-b", 40, 1_000)
+            .unwrap()
+            .is_some());
     }
 }

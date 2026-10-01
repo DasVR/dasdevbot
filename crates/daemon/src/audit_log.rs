@@ -249,7 +249,13 @@ pub fn audit_tool_use_blocked(
         "cli_version": cli_version,
     })
     .to_string();
-    append(store, "provider.tool_use_blocked", &payload, now_ms, audit_seed)
+    append(
+        store,
+        "provider.tool_use_blocked",
+        &payload,
+        now_ms,
+        audit_seed,
+    )
 }
 
 #[cfg(test)]

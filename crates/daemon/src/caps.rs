@@ -3,7 +3,7 @@
 //! A full slot cap waits as `waiting_on_slot`, not `waiting_on_quota`.
 
 use dasdevbot_core::{
-    admit, parse_role, AdmitInput, Admission, BudgetAccess, DenyReason, LedgerAccess,
+    admit, parse_role, Admission, AdmitInput, BudgetAccess, DenyReason, LedgerAccess,
     LedgerSnapshot, ProviderSlot, ReserveWrite, Role, SignalRead, TeammateBudget, WindowKind,
     WriterLease,
 };
@@ -109,8 +109,7 @@ pub fn admit_job(store: &mut Store, request: AdmitRequest<'_>) -> Admission {
                 job_id: request.job_id,
                 teammate_id: request.teammate_id,
             },
-        )
-        {
+        ) {
             Ok(()) => Admission::Admit {
                 provider,
                 reserved,
@@ -168,7 +167,12 @@ fn commit(store: &mut Store, held: ReservationCommit<'_>) -> std::result::Result
     tx.execute(
         "INSERT INTO budget_reservations (job_id, teammate_id, provider, tokens)
          VALUES (?1, ?2, ?3, ?4)",
-        params![held.job_id, held.teammate_id, held.provider, held.reserved as i64],
+        params![
+            held.job_id,
+            held.teammate_id,
+            held.provider,
+            held.reserved as i64
+        ],
     )
     .map_err(|_| CasError::Write)?;
     if let Some(epoch) = held.epoch {
@@ -274,9 +278,7 @@ pub fn reserve_attempt(
         )
         .optional()?;
     let Some(provider) = row else {
-        return Err(crate::Error::Forbidden(
-            "no reservation to extend".into(),
-        ));
+        return Err(crate::Error::Forbidden("no reservation to extend".into()));
     };
     let hold = tokens as i64;
     let tx = store.connection_mut().unchecked_transaction()?;
@@ -353,9 +355,7 @@ pub fn commit_attempt(
         )
         .optional()?;
     let Some((provider, hold)) = row else {
-        return Err(crate::Error::Forbidden(
-            "no reservation to commit".into(),
-        ));
+        return Err(crate::Error::Forbidden("no reservation to commit".into()));
     };
     if hold <= 0 {
         return Err(crate::Error::Forbidden(
@@ -475,7 +475,12 @@ fn charge_teammate(tx: &rusqlite::Transaction<'_>, teammate_id: &str, tokens: i6
     Ok(())
 }
 
-pub fn release_reservation(store: &mut Store, job_id: &str, writer_id: &str, now_ms: u64) -> Result<()> {
+pub fn release_reservation(
+    store: &mut Store,
+    job_id: &str,
+    writer_id: &str,
+    now_ms: u64,
+) -> Result<()> {
     let row = store
         .connection()
         .query_row(
@@ -517,18 +522,34 @@ pub fn release_reservation(store: &mut Store, job_id: &str, writer_id: &str, now
             ));
         }
     }
-    tx.execute("DELETE FROM budget_reservations WHERE job_id = ?1", [job_id])?;
+    tx.execute(
+        "DELETE FROM budget_reservations WHERE job_id = ?1",
+        [job_id],
+    )?;
     tx.commit()?;
     Ok(())
 }
 
-pub fn park_job(store: &Store, job_id: &str, owner: &str, status: &str, provider: &str, until_ms: Option<u64>) -> Result<bool> {
+pub fn park_job(
+    store: &Store,
+    job_id: &str,
+    owner: &str,
+    status: &str,
+    provider: &str,
+    until_ms: Option<u64>,
+) -> Result<bool> {
     let changed = store.connection().execute(
         "UPDATE jobs
          SET status = ?1, lease_owner = NULL, lease_until_ms = NULL,
              admit_provider = ?2, quota_until_ms = ?3
          WHERE id = ?4 AND lease_owner = ?5 AND status = 'leased'",
-        params![status, provider, until_ms.map(|ms| ms as i64), job_id, owner],
+        params![
+            status,
+            provider,
+            until_ms.map(|ms| ms as i64),
+            job_id,
+            owner
+        ],
     )?;
     Ok(changed == 1)
 }
@@ -613,11 +634,7 @@ fn load_ledger(store: &Store, provider: &str) -> Result<LedgerAccess> {
     let window = match row.3.as_str() {
         "monthly" => WindowKind::Monthly,
         "signal_reset" => WindowKind::SignalReset,
-        _ => {
-            return Err(crate::Error::BadRequest(
-                "unknown ledger window".into(),
-            ))
-        }
+        _ => return Err(crate::Error::BadRequest("unknown ledger window".into())),
     };
     Ok(LedgerAccess::Ready(LedgerSnapshot {
         provider: provider.to_string(),

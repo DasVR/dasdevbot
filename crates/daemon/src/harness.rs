@@ -42,9 +42,7 @@ pub fn execute(
         let mut state = HarnessState::wake();
         state = state.advance(Step::Begin).map_err(harness_err)?;
         state = state.advance(Step::Planned).map_err(harness_err)?;
-        state = state
-            .advance(Step::Checkpoint)
-            .map_err(harness_err)?;
+        state = state.advance(Step::Checkpoint).map_err(harness_err)?;
         save(&store, run.job_id, &state, run.now_ms)?;
         state
     };
@@ -59,16 +57,12 @@ pub fn execute(
         RunEnd::FailedClosed { tool_use: true, .. } => {
             audit_tool_use_attempted(&mut store, run.now_ms, run.audit_seed)?;
             let version = run.cli_version.lock().expect("cli version").clone();
-            audit_tool_use_blocked(
-                &mut store,
-                run.now_ms,
-                run.audit_seed,
-                run.job_id,
-                &version,
-            )?;
+            audit_tool_use_blocked(&mut store, run.now_ms, run.audit_seed, run.job_id, &version)?;
             fence_job(&store, run.job_id, run.lease_owner, "failed")?;
         }
-        RunEnd::FailedClosed { tool_use: false, .. } => {
+        RunEnd::FailedClosed {
+            tool_use: false, ..
+        } => {
             fence_job(&store, run.job_id, run.lease_owner, "failed")?;
         }
         RunEnd::Done { .. } => {
@@ -87,11 +81,9 @@ fn harness_err(_: dasdevbot_core::HarnessError) -> Error {
 fn fence_job(store: &Store, job_id: &str, lease_owner: Option<&str>, status: &str) -> Result<()> {
     let current: Option<String> = store
         .connection()
-        .query_row(
-            "SELECT status FROM jobs WHERE id = ?1",
-            [job_id],
-            |row| row.get(0),
-        )
+        .query_row("SELECT status FROM jobs WHERE id = ?1", [job_id], |row| {
+            row.get(0)
+        })
         .optional()?;
     let Some(current) = current else {
         return Ok(());
@@ -111,9 +103,7 @@ fn fence_job(store: &Store, job_id: &str, lease_owner: Option<&str>, status: &st
         rusqlite::params![status, job_id, owner],
     )?;
     if changed != 1 {
-        return Err(Error::Forbidden(
-            "job status update lost the lease".into(),
-        ));
+        return Err(Error::Forbidden("job status update lost the lease".into()));
     }
     Ok(())
 }
@@ -250,7 +240,11 @@ mod tests {
         assert_eq!(charges, 1);
 
         let retry = Script {
-            stops: vec![ProviderStop::Retry, ProviderStop::Retry, ProviderStop::Retry],
+            stops: vec![
+                ProviderStop::Retry,
+                ProviderStop::Retry,
+                ProviderStop::Retry,
+            ],
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let mut charges = 0u32;
@@ -307,7 +301,10 @@ mod tests {
             )
             .unwrap();
         assert!(blocked.contains("\"job_id\":\"job-tool\""), "{blocked}");
-        assert!(blocked.contains("\"cli_version\":\"test-cli\""), "{blocked}");
+        assert!(
+            blocked.contains("\"cli_version\":\"test-cli\""),
+            "{blocked}"
+        );
         assert!(!blocked.contains("SECRET"));
         drop(store);
         let store = Store::open(&path).unwrap();

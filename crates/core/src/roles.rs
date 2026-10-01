@@ -139,7 +139,12 @@ mod tests {
         }
         assert!(may_hold_github_credential(Role::Executor));
         assert!(may_write_admission_ledger(Role::Executor));
-        for name in ["gh-app", "secret:github/reviewer-NIL", "ollama-cloud", "anthropic"] {
+        for name in [
+            "gh-app",
+            "secret:github/reviewer-NIL",
+            "ollama-cloud",
+            "anthropic",
+        ] {
             assert_eq!(
                 authorize_secret_name(Role::Executor, name),
                 Err(SecretRoleError::NotAllowed),

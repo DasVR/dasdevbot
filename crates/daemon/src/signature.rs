@@ -20,7 +20,9 @@ pub fn decision_message(
     fencing: u64,
     action_hash: &str,
 ) -> String {
-    format!("v1\n{approval_id}\n{decision}\n{reason}\n{window}\n{nonce}\n{fencing}\n{action_hash}\n")
+    format!(
+        "v1\n{approval_id}\n{decision}\n{reason}\n{window}\n{nonce}\n{fencing}\n{action_hash}\n"
+    )
 }
 
 pub fn undo_message(
@@ -50,7 +52,8 @@ pub fn payload_hash(
     action_hash: &str,
 ) -> String {
     blake3::hash(
-        format!("{purpose}\n{approval_id}\n{decision}\n{reason}\n{window}\n{action_hash}").as_bytes(),
+        format!("{purpose}\n{approval_id}\n{decision}\n{reason}\n{window}\n{action_hash}")
+            .as_bytes(),
     )
     .to_hex()
     .to_string()

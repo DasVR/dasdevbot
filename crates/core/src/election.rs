@@ -14,12 +14,7 @@ pub enum Claim {
     Rejected { holder: String, fencing: u64 },
 }
 
-pub fn claim(
-    current: Option<LeaderLease>,
-    candidate: &str,
-    now_ms: u64,
-    ttl_ms: u64,
-) -> Claim {
+pub fn claim(current: Option<LeaderLease>, candidate: &str, now_ms: u64, ttl_ms: u64) -> Claim {
     match current {
         Some(lease) if now_ms < lease.until_ms && lease.holder != candidate => Claim::Rejected {
             holder: lease.holder,

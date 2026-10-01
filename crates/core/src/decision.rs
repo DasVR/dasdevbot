@@ -90,7 +90,12 @@ mod tests {
             Err(DecisionDeny::Destructive)
         );
         assert_eq!(
-            authorize_decision(Surface::TauriIpc, MAIN_WINDOW, false, EffectClass::WriteLocal),
+            authorize_decision(
+                Surface::TauriIpc,
+                MAIN_WINDOW,
+                false,
+                EffectClass::WriteLocal
+            ),
             Err(DecisionDeny::WrongWindow)
         );
         assert_eq!(
@@ -98,7 +103,12 @@ mod tests {
             Err(DecisionDeny::External)
         );
         assert_eq!(
-            authorize_decision(Surface::TauriIpc, CARD_WINDOW, false, EffectClass::WriteLocal),
+            authorize_decision(
+                Surface::TauriIpc,
+                CARD_WINDOW,
+                false,
+                EffectClass::WriteLocal
+            ),
             Ok(())
         );
         assert_eq!(authorize_secret_window(SETTINGS_WINDOW), Ok(()));

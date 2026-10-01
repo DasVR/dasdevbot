@@ -73,7 +73,12 @@ pub fn verify_stored(store: &Store, message: &str, signature_hex: &str) -> Resul
     let Some(signature) = crate::signature::decode_hex_bytes(signature_hex) else {
         return Ok(false);
     };
-    Ok(verify_cng(blob_type, &public_key, message.as_bytes(), &signature))
+    Ok(verify_cng(
+        blob_type,
+        &public_key,
+        message.as_bytes(),
+        &signature,
+    ))
 }
 
 #[cfg(not(windows))]
@@ -185,15 +190,15 @@ mod win {
         buffer_bytes(&buffer)
     }
 
-    fn buffer_bytes(
-        buffer: &windows::Storage::Streams::IBuffer,
-    ) -> Result<Vec<u8>, String> {
+    fn buffer_bytes(buffer: &windows::Storage::Streams::IBuffer) -> Result<Vec<u8>, String> {
         let reader = DataReader::FromBuffer(buffer).map_err(|err| err.to_string())?;
         let len = reader
             .UnconsumedBufferLength()
             .map_err(|err| err.to_string())? as usize;
         let mut bytes = vec![0u8; len];
-        reader.ReadBytes(&mut bytes).map_err(|err| err.to_string())?;
+        reader
+            .ReadBytes(&mut bytes)
+            .map_err(|err| err.to_string())?;
         Ok(bytes)
     }
 }
@@ -204,11 +209,10 @@ mod cng {
     use sha2::Digest;
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
-        BCryptDestroyKey, BCryptVerifySignature, CryptDecodeObjectEx,
-        CryptImportPublicKeyInfoEx2, BCRYPT_KEY_HANDLE, BCRYPT_PAD_PKCS1,
-        BCRYPT_PKCS1_PADDING_INFO, BCRYPT_SHA256_ALGORITHM, CERT_PUBLIC_KEY_INFO,
-        CRYPT_DECODE_ALLOC_FLAG, CRYPT_IMPORT_PUBLIC_KEY_FLAGS, X509_ASN_ENCODING,
-        X509_PUBLIC_KEY_INFO,
+        BCryptDestroyKey, BCryptVerifySignature, CryptDecodeObjectEx, CryptImportPublicKeyInfoEx2,
+        BCRYPT_KEY_HANDLE, BCRYPT_PAD_PKCS1, BCRYPT_PKCS1_PADDING_INFO, BCRYPT_SHA256_ALGORITHM,
+        CERT_PUBLIC_KEY_INFO, CRYPT_DECODE_ALLOC_FLAG, CRYPT_IMPORT_PUBLIC_KEY_FLAGS,
+        X509_ASN_ENCODING, X509_PUBLIC_KEY_INFO,
     };
 
     /// OID of rsaEncryption. Anything else is refused.
@@ -339,7 +343,10 @@ mod tests {
         assert_eq!(payload["fingerprint"], fingerprint);
         assert_eq!(payload["blob_type"], X509_SPKI_BLOB);
         assert!(audit_log::verify(&store, &SEED).unwrap());
-        assert_eq!(audit_log::read_hello_pin(&store).unwrap(), Some(fingerprint));
+        assert_eq!(
+            audit_log::read_hello_pin(&store).unwrap(),
+            Some(fingerprint)
+        );
         assert!(pinned_public_key(&store).unwrap().is_some());
         // The same key again is accepted without a second audit row.
         store
@@ -432,7 +439,10 @@ mod tests {
         let sidecar = audit_log::read_sidecar(&crate::audit_tip_path(&data)).unwrap();
         assert_eq!(sidecar.hello_pin, Some(fingerprint.clone()));
         let mut store = Store::open(&data).unwrap();
-        assert_eq!(audit_log::read_hello_pin(&store).unwrap(), Some(fingerprint));
+        assert_eq!(
+            audit_log::read_hello_pin(&store).unwrap(),
+            Some(fingerprint)
+        );
         assert!(audit_log::verify(&store, &SEED).unwrap());
         assert!(pinned_public_key(&store).unwrap().is_some());
         let err = store
@@ -456,7 +466,10 @@ mod tests {
             .unwrap();
         let reset = payloads(&store, "hello.reset");
         let payload: serde_json::Value = serde_json::from_str(&reset[0]).unwrap();
-        assert_eq!(payload["fingerprint"], hello_fingerprint(X509_SPKI_BLOB, KEY_A));
+        assert_eq!(
+            payload["fingerprint"],
+            hello_fingerprint(X509_SPKI_BLOB, KEY_A)
+        );
         assert_eq!(payload["reason"], "lost device");
         let sidecar = audit_log::read_sidecar(&crate::audit_tip_path(&data)).unwrap();
         assert!(sidecar.tip.is_some());
@@ -482,14 +495,23 @@ mod hardware {
         let (blob_type, spki_hex) = hello_public_key_material().expect("Hello key");
         assert_eq!(blob_type, X509_SPKI_BLOB);
         let spki = crate::signature::decode_hex_bytes(&spki_hex).expect("hex");
-        println!("spki_len={} fingerprint={}", spki.len(), hello_fingerprint(blob_type, &spki_hex));
+        println!(
+            "spki_len={} fingerprint={}",
+            spki.len(),
+            hello_fingerprint(blob_type, &spki_hex)
+        );
         let message = "v1\nhardware-test\napprove\n\ncard\nnonce\n1\nhash\n";
         let prompt = consent_prompt("approve", "post_pr_comment", "DasVR/NIL");
         let signature_hex = sign_approval_message(message, &prompt).expect("Hello signature");
         let signature = crate::signature::decode_hex_bytes(&signature_hex).expect("hex");
         println!("signature_len={}", signature.len());
         assert_eq!(signature.len(), 256, "RSA-2048 signature");
-        assert!(cng::verify(blob_type, &spki, message.as_bytes(), &signature));
+        assert!(cng::verify(
+            blob_type,
+            &spki,
+            message.as_bytes(),
+            &signature
+        ));
         assert!(!cng::verify(blob_type, &spki, b"tampered", &signature));
         let mut flipped = signature.clone();
         flipped[10] ^= 1;
@@ -497,7 +519,12 @@ mod hardware {
         let mut other = spki.clone();
         let last = other.len() - 5;
         other[last] ^= 1;
-        assert!(!cng::verify(blob_type, &other, message.as_bytes(), &signature));
+        assert!(!cng::verify(
+            blob_type,
+            &other,
+            message.as_bytes(),
+            &signature
+        ));
         let mut store = Store::open_memory().expect("store");
         store
             .enroll_hello_public_key(blob_type, &spki_hex, 1, &[7u8; 32])

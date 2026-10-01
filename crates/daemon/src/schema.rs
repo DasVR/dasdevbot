@@ -149,6 +149,9 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
             return Ok(());
         }
     }
-    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+        [],
+    )?;
     Ok(())
 }

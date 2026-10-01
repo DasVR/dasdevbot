@@ -148,10 +148,7 @@ pub fn undo_decision(store: &mut Store, request: UndoRequest<'_>) -> Result<Deci
         return accept_external_undo(store, request, &class_name, &action, &draft);
     }
     let target = store.approval_target(request.approval_id)?;
-    verify_user(
-        request.verifier,
-        &consent_prompt("undo", &action, &target),
-    )?;
+    verify_user(request.verifier, &consent_prompt("undo", &action, &target))?;
     let status = store.approval_status(request.approval_id)?;
     let action_hash = action_hash(&class_name, &action, &draft);
     let payload_hash = payload_hash(
@@ -228,12 +225,18 @@ fn accept_external_decision(
             "external tier is denied without Windows Hello".into(),
         ));
     }
-    let signature = request.client_signature.filter(|text| !text.is_empty()).ok_or_else(|| {
-        Error::Forbidden("external tier requires a Windows Hello signature".into())
-    })?;
-    let nonce = request.client_nonce.filter(|text| !text.is_empty()).ok_or_else(|| {
-        Error::Forbidden("external tier requires a Windows Hello signature".into())
-    })?;
+    let signature = request
+        .client_signature
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| {
+            Error::Forbidden("external tier requires a Windows Hello signature".into())
+        })?;
+    let nonce = request
+        .client_nonce
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| {
+            Error::Forbidden("external tier requires a Windows Hello signature".into())
+        })?;
     // No daemon-side prompt here. The shell's named consent and the
     // key-bound RequestSignAsync are the user check for this tier.
     let action_hash = action_hash(class_name, action, draft);
@@ -279,12 +282,18 @@ fn accept_external_undo(
             "external tier is denied without Windows Hello".into(),
         ));
     }
-    let signature = request.client_signature.filter(|text| !text.is_empty()).ok_or_else(|| {
-        Error::Forbidden("external tier requires a Windows Hello signature".into())
-    })?;
-    let nonce = request.client_nonce.filter(|text| !text.is_empty()).ok_or_else(|| {
-        Error::Forbidden("external tier requires a Windows Hello signature".into())
-    })?;
+    let signature = request
+        .client_signature
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| {
+            Error::Forbidden("external tier requires a Windows Hello signature".into())
+        })?;
+    let nonce = request
+        .client_nonce
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| {
+            Error::Forbidden("external tier requires a Windows Hello signature".into())
+        })?;
     // No daemon-side prompt; see accept_external_decision.
     let action_hash = action_hash(class_name, action, draft);
     let record = store.commit_signed_undo(
@@ -325,7 +334,10 @@ pub struct PrepareRequest<'a> {
 }
 
 /// Issue the nonce an external signature must cover. Internal cards do not need it.
-pub fn prepare_signature(store: &mut Store, request: PrepareRequest<'_>) -> Result<serde_json::Value> {
+pub fn prepare_signature(
+    store: &mut Store,
+    request: PrepareRequest<'_>,
+) -> Result<serde_json::Value> {
     let PrepareRequest {
         approval_id,
         decision,
@@ -356,7 +368,11 @@ pub fn prepare_signature(store: &mut Store, request: PrepareRequest<'_>) -> Resu
     }
     let target = store.approval_target(approval_id)?;
     let action_hash = action_hash(&class_name, &action, &draft);
-    let prompt_decision = if purpose == UNDO_PURPOSE { "undo" } else { decision };
+    let prompt_decision = if purpose == UNDO_PURPOSE {
+        "undo"
+    } else {
+        decision
+    };
     let prompt = consent_prompt(prompt_decision, &action, &target);
     let (message, nonce) = if purpose == UNDO_PURPOSE {
         let status = store.approval_status(approval_id)?;
@@ -459,7 +475,9 @@ mod tests {
     use crate::secrets::{MemorySecrets, Secret, SecretError, SecretHandle, APPROVAL_KEY_NAME};
     use crate::store::NewApproval;
     use crate::verify_user::{TestVerifier, UserVerifier, UserVerifyError};
-    use dasdevbot_core::{authorize_decision, DecisionDeny, EffectClass, Surface, CARD_WINDOW, MAIN_WINDOW};
+    use dasdevbot_core::{
+        authorize_decision, DecisionDeny, EffectClass, Surface, CARD_WINDOW, MAIN_WINDOW,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -554,9 +572,27 @@ mod tests {
         let keys = secrets();
         let verifier = allow();
         let id = pending(&mut store, "write_local");
-        let err = sign(&mut store, &keys, &verifier, &id, MAIN_WINDOW, false, "approve").unwrap_err();
+        let err = sign(
+            &mut store,
+            &keys,
+            &verifier,
+            &id,
+            MAIN_WINDOW,
+            false,
+            "approve",
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Forbidden(_)));
-        let err = sign(&mut store, &keys, &verifier, &id, CARD_WINDOW, true, "approve").unwrap_err();
+        let err = sign(
+            &mut store,
+            &keys,
+            &verifier,
+            &id,
+            CARD_WINDOW,
+            true,
+            "approve",
+        )
+        .unwrap_err();
         assert!(matches!(err, Error::Forbidden(_)));
         assert_eq!(
             authorize_decision(Surface::Http, CARD_WINDOW, false, EffectClass::External),
@@ -575,11 +611,29 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, Error::Forbidden(_)));
         let denied = TestVerifier { allow: false };
-        let err = sign(&mut store, &keys, &denied, &id, CARD_WINDOW, false, "approve").unwrap_err();
+        let err = sign(
+            &mut store,
+            &keys,
+            &denied,
+            &id,
+            CARD_WINDOW,
+            false,
+            "approve",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("user verification"));
         assert_eq!(store.approval_status(&id).unwrap(), "pending");
 
-        let signed = sign(&mut store, &keys, &verifier, &id, CARD_WINDOW, false, "approve").unwrap();
+        let signed = sign(
+            &mut store,
+            &keys,
+            &verifier,
+            &id,
+            CARD_WINDOW,
+            false,
+            "approve",
+        )
+        .unwrap();
         assert_eq!(signed.status, "approved");
         let payload: String = store
             .connection()
@@ -595,11 +649,18 @@ mod tests {
         let action_hash = body["action_hash"].as_str().unwrap();
         assert_eq!(body["fencing"], 7);
         assert_eq!(body["window"], CARD_WINDOW);
-        assert_eq!(action_hash, super::action_hash("write_local", "post_pr_comment", "draft"));
+        assert_eq!(
+            action_hash,
+            super::action_hash("write_local", "post_pr_comment", "draft")
+        );
         let message = decision_message(&id, "approve", "", CARD_WINDOW, nonce, 7, action_hash);
-        assert!(signature::verify_decision_signature(&keys, &message, signature));
+        assert!(signature::verify_decision_signature(
+            &keys, &message, signature
+        ));
         let tampered = decision_message(&id, "deny", "", CARD_WINDOW, nonce, 7, action_hash);
-        assert!(!signature::verify_decision_signature(&keys, &tampered, signature));
+        assert!(!signature::verify_decision_signature(
+            &keys, &tampered, signature
+        ));
         let replay = store
             .commit_signed_decision(
                 &id,
@@ -659,7 +720,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, Error::Forbidden(_)));
-        assert_eq!(store.approval_effect_class(&destructive).unwrap(), "destructive");
+        assert_eq!(
+            store.approval_effect_class(&destructive).unwrap(),
+            "destructive"
+        );
         let kinds: Vec<String> = store
             .connection()
             .prepare("SELECT kind FROM audit_log")
@@ -678,7 +742,16 @@ mod tests {
         let keys = secrets();
         let verifier = allow();
         let id = pending(&mut store, "write_local");
-        sign(&mut store, &keys, &verifier, &id, CARD_WINDOW, false, "approve").unwrap();
+        sign(
+            &mut store,
+            &keys,
+            &verifier,
+            &id,
+            CARD_WINDOW,
+            false,
+            "approve",
+        )
+        .unwrap();
         let err = undo_decision(
             &mut store,
             UndoRequest {
@@ -743,8 +816,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, Error::Forbidden(_)));
-        let err = store_secret("", "settings", "ollama", &github, &keys, &mut store, &AUDIT_SEED)
-            .unwrap_err();
+        let err = store_secret(
+            "",
+            "settings",
+            "ollama",
+            &github,
+            &keys,
+            &mut store,
+            &AUDIT_SEED,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("role"));
         let err = store_secret(
             "executor",
@@ -904,7 +985,10 @@ mod tests {
             &AUDIT_SEED,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("audit_log") || err.to_string().contains("sqlite"), "{err}");
+        assert!(
+            err.to_string().contains("audit_log") || err.to_string().contains("sqlite"),
+            "{err}"
+        );
         assert_eq!(keys.sets.load(Ordering::SeqCst), 0);
         assert!(keys.get("ollama").unwrap().is_none());
     }

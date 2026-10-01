@@ -384,7 +384,11 @@ fn stop_after_provider_error(
     cli_version: &Mutex<String>,
 ) -> Result<dasdevbot_core::ProviderStop> {
     let mut store = app.store.lock().expect("store");
-    if let ProviderError::ToolUseAttempted { cli_version: version, event } = err {
+    if let ProviderError::ToolUseAttempted {
+        cli_version: version,
+        event,
+    } = err
+    {
         *cli_version.lock().expect("cli version") = version.clone();
         let payload = json!({
             "job_id": job.id,
@@ -857,7 +861,13 @@ fn deny_unknown(
         ledger_note: "unknown event kind is denied".into(),
         project: String::new(),
     };
-    store.record_gate_denial(wall_ms(), owner, &approval, "unknown event kind", audit_seed)?;
+    store.record_gate_denial(
+        wall_ms(),
+        owner,
+        &approval,
+        "unknown event kind",
+        audit_seed,
+    )?;
     Ok(())
 }
 

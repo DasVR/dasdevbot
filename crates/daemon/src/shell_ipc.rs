@@ -263,7 +263,10 @@ fn dispatch(
     if !crate::tokens_equal(token, &app.token) {
         return Err(Error::Unauthorized);
     }
-    let op = request.get("op").and_then(|value| value.as_str()).unwrap_or("");
+    let op = request
+        .get("op")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     match op {
         "decide" => decide(app, verifier, secrets, request),
         "undo" => undo(app, verifier, secrets, request),
@@ -489,8 +492,14 @@ mod tests {
         let one = crate::shell_pipe_name(std::path::Path::new("a/db.sqlite"));
         assert!(one.starts_with(r"\\.\pipe\dasdevbot-"), "{one}");
         assert_eq!(one.len(), r"\\.\pipe\dasdevbot-".len() + 32);
-        assert_eq!(one, crate::shell_pipe_name(std::path::Path::new("a/db.sqlite")));
-        assert_ne!(one, crate::shell_pipe_name(std::path::Path::new("b/db.sqlite")));
+        assert_eq!(
+            one,
+            crate::shell_pipe_name(std::path::Path::new("a/db.sqlite"))
+        );
+        assert_ne!(
+            one,
+            crate::shell_pipe_name(std::path::Path::new("b/db.sqlite"))
+        );
     }
 
     #[test]
@@ -638,7 +647,10 @@ mod tests {
             })
             .to_string(),
         );
-        assert!(missing.contains("unauthorized") || missing.contains("ok\":false"), "{missing}");
+        assert!(
+            missing.contains("unauthorized") || missing.contains("ok\":false"),
+            "{missing}"
+        );
     }
 
     #[test]
@@ -705,7 +717,10 @@ mod tests {
             .unwrap()
             .enroll_hello_public_key(X509_SPKI_BLOB, "bb", 20, &app.audit_seed)
             .unwrap_err();
-        assert!(refused.to_string().contains("pinned fingerprint"), "{refused}");
+        assert!(
+            refused.to_string().contains("pinned fingerprint"),
+            "{refused}"
+        );
         let accepted = reset(true, &app.window_secrets.settings, "lost device");
         assert!(accepted.contains("\"ok\":true"), "{accepted}");
         assert_eq!(resets(), 1);

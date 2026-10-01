@@ -2,8 +2,8 @@
 
 mod audit_log;
 mod caps;
-mod hello_key;
 mod harness;
+mod hello_key;
 pub mod ipc;
 mod ownership_store;
 mod provider;
@@ -43,8 +43,8 @@ pub use secrets::{
     plan_secret_set, prompt_secret_from_tty, read_piped_secret, CommandKind, KeyringHandle,
     SecretHandle, SecretSource,
 };
-pub use signature::{DECISION_PURPOSE, UNDO_PURPOSE};
 pub use server::{serve, url_exposes_bearer};
+pub use signature::{DECISION_PURPOSE, UNDO_PURPOSE};
 pub use store::Store;
 pub use turn::audit_dev_env;
 

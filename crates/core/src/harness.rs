@@ -129,11 +129,9 @@ impl HarnessState {
                 Step::Tool => Phase::Act,
                 Step::NeedApproval => Phase::RequestApproval,
                 Step::Checkpoint => Phase::Checkpoint,
-                Step::Begin
-                | Step::Planned
-                | Step::Asked
-                | Step::Resume
-                | Step::Finish => return Err(HarnessError::Illegal),
+                Step::Begin | Step::Planned | Step::Asked | Step::Resume | Step::Finish => {
+                    return Err(HarnessError::Illegal)
+                }
             },
             Phase::RequestApproval => match step {
                 Step::Asked => Phase::Checkpoint,
@@ -219,6 +217,9 @@ mod tests {
         assert!(paused.advance(Step::Finish).is_err());
         let resumed = paused.resume();
         assert_eq!(resumed.life(), JobLife::Running);
-        assert_eq!(resumed.advance(Step::Finish).unwrap().phase, Phase::Finished);
+        assert_eq!(
+            resumed.advance(Step::Finish).unwrap().phase,
+            Phase::Finished
+        );
     }
 }

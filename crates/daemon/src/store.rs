@@ -593,9 +593,8 @@ impl Store {
         audit_seed: &[u8; 32],
     ) -> Result<()> {
         let fingerprint = crate::hello_key::hello_fingerprint(blob_type, public_key_hex);
-        let mismatch = || {
-            Error::Forbidden("Windows Hello key does not match the pinned fingerprint".into())
-        };
+        let mismatch =
+            || Error::Forbidden("Windows Hello key does not match the pinned fingerprint".into());
         let pin = crate::audit_log::read_hello_pin(self)?;
         if let Some(pin) = &pin {
             if *pin != fingerprint {
@@ -656,9 +655,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT agent_id, effect_class, expires_at FROM grants ORDER BY agent_id, effect_class",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);

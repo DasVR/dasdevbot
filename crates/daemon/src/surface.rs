@@ -16,8 +16,10 @@ mod tests {
 
     #[test]
     fn sign_is_card_only_and_secrets_are_main_or_settings() {
-        let card: serde_json::Value = serde_json::from_str(&read("src-tauri/capabilities/card-window.json")).unwrap();
-        let main: serde_json::Value = serde_json::from_str(&read("src-tauri/capabilities/main-window.json")).unwrap();
+        let card: serde_json::Value =
+            serde_json::from_str(&read("src-tauri/capabilities/card-window.json")).unwrap();
+        let main: serde_json::Value =
+            serde_json::from_str(&read("src-tauri/capabilities/main-window.json")).unwrap();
         let settings: serde_json::Value =
             serde_json::from_str(&read("src-tauri/capabilities/settings-window.json")).unwrap();
         let voice: serde_json::Value =
@@ -53,12 +55,16 @@ mod tests {
         assert!(commands.contains("window.label()"));
         assert!(commands.contains("generate_handler!"));
         assert!(!commands.contains("card_window()"));
-        assert!(std::fs::read_to_string(desktop().join("src-tauri/Cargo.toml"))
-            .unwrap()
-            .contains("tauri"));
-        assert!(std::fs::read_to_string(desktop().join("src-tauri/src/main.rs"))
-            .unwrap()
-            .contains("dasdevbot_desktop_lib::run"));
+        assert!(
+            std::fs::read_to_string(desktop().join("src-tauri/Cargo.toml"))
+                .unwrap()
+                .contains("tauri")
+        );
+        assert!(
+            std::fs::read_to_string(desktop().join("src-tauri/src/main.rs"))
+                .unwrap()
+                .contains("dasdevbot_desktop_lib::run")
+        );
         for label in ["\"main\"", "\"card\"", "\"settings\"", "\"voice\""] {
             assert!(conf.contains(label), "{label}");
         }
