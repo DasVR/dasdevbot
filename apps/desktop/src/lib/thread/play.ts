@@ -20,6 +20,11 @@ const STAGE_MS = 520;
 const SOFT_MS = 360;
 const BASE_MS = 240;
 const DRAW_MS = 300;
+/**
+ * Card video: the landed card sits until the ink clip, 2300ms after landing.
+ * thread.html's cursor path is 1019ms (cardLanded 9571 to holdStart 10590).
+ */
+const CARD_VIDEO_HOLD_LEAD = 1281;
 
 const marks: Record<string, number> = {};
 let origin = 0;
@@ -147,6 +152,9 @@ export async function playStory(host: PlayHost): Promise<void> {
     return;
   }
   mark("cardLanded");
+  if (!reduced) {
+    await host.sleep(CARD_VIDEO_HOLD_LEAD);
+  }
   await host.sleep(160);
   await showCursor(host);
   const approve = center('article.card[tabindex="0"] button.approve', 0.56, 0.58);
