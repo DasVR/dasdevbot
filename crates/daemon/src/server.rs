@@ -1215,12 +1215,15 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let app = crate::build_and_worker(Config {
-            data: dir.join("db.sqlite"),
-            web_root: None,
-            role: "server".into(),
-            token: Some(STRONG_TOKEN.into()),
-        })
+        let app = crate::build_and_worker(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: None,
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
         .unwrap();
         let bind = format!("127.0.0.1:{port}");
         std::thread::spawn(move || {

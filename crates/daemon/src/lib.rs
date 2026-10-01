@@ -1,6 +1,7 @@
 //! dasdevbotd library surface. The binary is a thin CLI over [`serve`].
 
 mod provider;
+mod secrets;
 mod server;
 mod store;
 mod turn;
@@ -14,13 +15,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-pub use provider::{from_env, smoke_xai, LlmProvider, MockProvider};
+pub use provider::{
+    open_provider, parse_sha256_list, CompletionRequest, LlmProvider, MockProvider, ProviderError,
+    ProviderKind, ProviderSettings,
+};
+pub use secrets::{
+    plan_secret_set, prompt_secret_from_tty, read_piped_secret, CommandKind, KeyringHandle,
+    SecretHandle, SecretSetPlan, SecretSource,
+};
 pub use server::{serve, url_exposes_bearer};
 
 const MIN_TOKEN_BYTES: usize = 32;
 pub use store::Store;
-
-use provider::ProviderError;
+pub use turn::audit_dev_env;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -67,8 +74,7 @@ pub struct Config {
     pub token: Option<String>,
 }
 
-pub fn build_and_worker(config: Config) -> Result<Arc<App>> {
-    let provider = from_env();
+pub fn build_and_worker(config: Config, provider: Box<dyn LlmProvider>) -> Result<Arc<App>> {
     let (app, rx) = build_app(config, provider)?;
     turn::spawn_worker(Arc::clone(&app), rx);
     Ok(app)

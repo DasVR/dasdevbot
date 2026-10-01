@@ -8,7 +8,7 @@ These numbers were measured on this machine. They are not estimates.
 | CPU | Intel(R) Xeon(R) Processor, 4 cores |
 | Memory | `MemTotal` 16398384 kB. `MemAvailable` was 4606568 kB after the round 2 benches. |
 | Rust | `rustc 1.98.1 (48a229cea 2026-09-01)` via `rust-toolchain.toml` |
-| Provider during RSS events | **mock**. `XAI_API_KEY` was unset. ureq and rustls are linked in both binaries. |
+| Provider during RSS events | **mock**. No provider key was set, so the run used the mock provider. That binary predates the Ollama and Claude CLI providers. ureq and rustls are linked in both binaries. These numbers were not re-measured after the provider change. |
 | iroh | 1.3.0, default crate features, behind `p2p` (on by default). `presets::Minimal`, portmapper disabled, no peers. |
 
 ## Profile
@@ -194,13 +194,3 @@ Cold start, seven runs, milliseconds:
 11.153
 median_ms 6.193
 ```
-
-## smoke-xai
-
-`XAI_API_KEY` was unset in this environment. The command was:
-
-```bash
-./target/release/dasdevbotd smoke-xai
-```
-
-It printed `dasdevbotd smoke-xai: skipped, XAI_API_KEY is not set` and exited 0. No completion was invented, so this document has no latency or token counts for xAI.
