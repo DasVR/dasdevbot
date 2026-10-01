@@ -94,6 +94,7 @@
   let holdFrame = 0;
   let morphTimer = 0;
   let holdSealed = false;
+  let holdSource: "key" | "pointer" | null = null;
 
   const locked = $derived(busy || committing !== null);
   const duration = $derived(holdDurationMs(effect, holdMs));
@@ -496,26 +497,42 @@
     await settleDecision("approve");
   }
 
-  async function onApproveClick(): Promise<void> {
-    if (locked || denyOpen || !pending) {
+  function cancelHello(): void {
+    if (!helloOpen || committing !== null) {
       return;
     }
-    committing = "approve";
-    const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
-    await animateNumber(
-      1,
-      0,
-      drawMs,
-      (value) => {
-        checkOffset = value;
-      },
-      tokenEase("--ease-draw"),
-    );
-    if (reducedMotion.current) {
-      checkOffset = 0;
-      await wait(tokenMs("--dur-base", 120));
+    helloOpen = false;
+    holdSealed = false;
+    holdSource = null;
+    retract("approve", 1 - checkOffset);
+  }
+
+  function onApprovePointerDown(event: PointerEvent): void {
+    if (event.button !== 0) {
+      return;
     }
-    await settleDecision("approve");
+    event.preventDefault();
+    if (holdKind || helloOpen) {
+      return;
+    }
+    cardEl?.focus();
+    holdSource = "pointer";
+    startHold("approve");
+    if (holdKind !== "approve") {
+      holdSource = null;
+    }
+  }
+
+  function onApprovePointerEnd(): void {
+    if (holdSource !== "pointer") {
+      return;
+    }
+    holdSource = null;
+    if (holdSealed) {
+      holdSealed = false;
+      return;
+    }
+    cancelHold();
   }
 
   async function confirmDeny(): Promise<void> {
@@ -599,7 +616,7 @@
   }
 
   function startHold(kind: HoldKind): void {
-    if (locked || denyOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
+    if (locked || denyOpen || helloOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
       return;
     }
     cancelAnimationFrame(holdFrame);
@@ -627,6 +644,11 @@
   }
 
   function onWindowKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape" && helloOpen && !event.repeat) {
+      event.preventDefault();
+      cancelHello();
+      return;
+    }
     if (event.repeat || isTextEntry(event.target)) {
       return;
     }
@@ -651,19 +673,28 @@
     }
     if (event.key === "Enter") {
       event.preventDefault();
+      holdSource = "key";
       startHold("approve");
+      if (holdKind !== "approve") {
+        holdSource = null;
+      }
     } else if (event.key === "Backspace") {
       event.preventDefault();
+      holdSource = "key";
       startHold("deny");
+      if (holdKind !== "deny") {
+        holdSource = null;
+      }
     }
   }
 
   function onWindowKeyup(event: KeyboardEvent): void {
     const released =
       event.key === "Enter" || event.key === "Backspace" || event.key === "Meta" || event.key === "Control";
-    if (!released) {
+    if (!released || holdSource === "pointer") {
       return;
     }
+    holdSource = null;
     if (holdSealed) {
       holdSealed = false;
       return;
@@ -675,9 +706,7 @@
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
-    if (!seenArmed || locked) {
-      event.preventDefault();
-    }
+    event.preventDefault();
   }
 
   async function onUndoClick(): Promise<void> {
@@ -725,9 +754,11 @@
   onfocusout={() => {
     queueMicrotask(() => {
       syncFocus();
-      if (document.activeElement !== cardEl) {
-        cancelHold();
+      const active = document.activeElement;
+      if (cardEl && active instanceof Node && cardEl.contains(active)) {
+        return;
       }
+      cancelHold();
     });
   }}
 >
@@ -827,7 +858,10 @@
             type="button"
             disabled={busy}
             onkeydown={onApproveKeydown}
-            onclick={() => void onApproveClick()}
+            onpointerdown={onApprovePointerDown}
+            onpointerup={onApprovePointerEnd}
+            onpointerleave={onApprovePointerEnd}
+            onpointercancel={onApprovePointerEnd}
           >
             {#if holdKind === "approve" || checkOffset < 1}
               <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
@@ -836,12 +870,6 @@
             {/if}
             <span class="face">
               <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
-              <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
-                <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
-                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
-                </svg>
-                Approved
-              </span>
             </span>
           </button>
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
@@ -932,7 +960,7 @@
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border-radius: var(--r-xl);
     box-shadow: var(--glass-edge), var(--shadow-press);
-    padding: var(--s-2) var(--s-2) var(--s-4);
+    padding: var(--s-2) var(--s-2) 16px;
   }
 
   .card.glass.receipt {
@@ -1298,17 +1326,12 @@
     left: 18px;
   }
 
-  .check.inline {
-    position: static;
-  }
-
   .face {
     display: grid;
     place-items: center;
   }
 
-  .face-idle,
-  .face-done {
+  .face-idle {
     grid-area: 1 / 1;
     display: inline-flex;
     align-items: center;
@@ -1317,16 +1340,8 @@
     transition: opacity var(--dur-soft) var(--ease-in-out);
   }
 
-  .face-done {
-    opacity: 0;
-  }
-
   .face-idle.gone {
     opacity: 0;
-  }
-
-  .face-done.show {
-    opacity: 1;
   }
 
   .hello {
@@ -1547,8 +1562,7 @@
       background: color-mix(in oklab, var(--ink-1) 14%, var(--paper-raised));
     }
 
-    .face-idle,
-    .face-done {
+    .face-idle {
       transition: none;
     }
   }

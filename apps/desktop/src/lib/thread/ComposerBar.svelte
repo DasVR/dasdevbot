@@ -86,6 +86,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    width: var(--thread-width);
     height: var(--bar-height);
     padding: 0 10px;
     border-radius: var(--r-2xl);
@@ -250,6 +251,7 @@
 
   .send:active:not(:disabled) {
     background: var(--ink-press);
+    transition: none;
   }
 
   .chip {
@@ -293,12 +295,14 @@
     }
 
     .send:active:not(:disabled) {
+      background: var(--ink-press);
       transform: none;
+      transition: none;
     }
   }
 
   @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-    .composer.lit {
+    .composer {
       background: var(--glass-fill-solid);
     }
   }
