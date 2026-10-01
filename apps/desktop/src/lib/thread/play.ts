@@ -427,6 +427,7 @@ export function fileAsk(frame: ThreadFrame): void {
   if (step) {
     step.phase = "done";
     step.elapsed = STORY.post.secs;
+    step.undo = null;
   }
 }
 
@@ -587,6 +588,12 @@ export function undoAsk(frame: ThreadFrame): void {
     decision_event_id: null,
     reason: null,
   };
+  const step = toolBlock(turn, "tools-post")?.steps[0];
+  if (step) {
+    step.phase = "waiting";
+    step.elapsed = "waiting on you";
+    step.undo = null;
+  }
 }
 
 export function settleAsk(frame: ThreadFrame, decision: "approve" | "deny"): void {
@@ -595,11 +602,12 @@ export function settleAsk(frame: ThreadFrame, decision: "approve" | "deny"): voi
     return;
   }
   const approved = decision === "approve";
+  const until = Date.now() + 6_000;
   turn.approval = {
     ...turn.approval,
     status: approved ? "approved" : "denied",
     committed: false,
-    undo_until: Date.now() + 6_000,
+    undo_until: until,
     decided_at: Date.now(),
     decision_event_id: "ev_4b1e07",
   };
@@ -607,5 +615,6 @@ export function settleAsk(frame: ThreadFrame, decision: "approve" | "deny"): voi
   if (step) {
     step.phase = "done";
     step.elapsed = approved ? "approved · undo open" : "denied · undo open";
+    step.undo = { verb: approved ? "approved" : "denied", until };
   }
 }

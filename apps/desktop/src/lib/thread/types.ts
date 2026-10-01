@@ -13,6 +13,8 @@ export interface ToolStepView {
   elapsed: string;
   trace: TraceKind;
   phase: StepPhase;
+  /** Open undo window on the post step. The row counts `<verb> · undo Ns` down to it. */
+  undo?: { verb: "approved" | "denied"; until: number } | null;
 }
 
 export interface ToolBlockView {

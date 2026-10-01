@@ -120,8 +120,19 @@ function waitingSnapshot() {
   });
 }
 
+/** Filed receipt. An open undo window keeps the full card up, so this one is committed. */
 function receiptSnapshot() {
   const card = approval("approved");
+  card.committed = true;
+  card.undo_until = null;
+  return decidedSnapshot(card);
+}
+
+function undoSnapshot() {
+  return decidedSnapshot(approval("approved"));
+}
+
+function decidedSnapshot(card) {
   return snapshot({
     status: "blocked",
     approvals: [card],
@@ -414,6 +425,7 @@ try {
         await page.locator(".hold-hint.armed").waitFor({ timeout: 4000 });
       },
     ],
+    ["undo", undoSnapshot(), async () => page.locator("article.card .undo-open").waitFor()],
     ["receipt", receiptSnapshot(), async () => page.locator("article.card .receipt").waitFor()],
     ["destructive", destructiveSnapshot(), async () => page.locator(".deny").waitFor()],
   ];

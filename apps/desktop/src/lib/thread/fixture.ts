@@ -238,6 +238,9 @@ function reviewerAsk(card: Approval | null, waiting: ToolStepView["phase"]): Thr
   if (card && card.status === "approved" && !card.committed) {
     post.elapsed = "approved · undo open";
     post.phase = "done";
+    if (card.undo_until != null) {
+      post.undo = { verb: "approved", until: card.undo_until };
+    }
   }
   return turn({
     id: "turn-ask",

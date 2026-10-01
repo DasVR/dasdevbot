@@ -4,6 +4,8 @@
  * input the thread video starts on. Stamps read t+N ms fN on both sides.
  *
  * Usage: node scripts/video-match.mjs [origin]
+ * REDUCED=1 captures reduced motion (files get a -reduced suffix). DPR (default 2)
+ * sets the capture pixel ratio; the app pane is downsampled to 1440x900.
  * Expects the desktop preview. Writes
  *   docs/review/thread/thread-vs-video-1440.mp4
  *   docs/review/thread/card-vs-video-1440.mp4
@@ -13,12 +15,14 @@ import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { relative } from "node:path";
 
 const require = createRequire(new URL("../apps/desktop/package.json", import.meta.url));
 const { chromium } = require("playwright");
 
 const origin = process.argv[2] ?? "http://127.0.0.1:4173";
 const reviewDir = fileURLToPath(new URL("../docs/review/thread/", import.meta.url));
+const repoDir = fileURLToPath(new URL("../", import.meta.url));
 const refDir = fileURLToPath(new URL("../docs/reference/thread/", import.meta.url));
 const FRAME_MS = 16.667;
 const WIDTH = 1440;
@@ -26,6 +30,13 @@ const HEIGHT = 900;
 const FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 /** Card video frame 0 matches the thread video just before the card lifts. */
 const CARD_ALIGN_MS = 8400;
+/** The card video's hold press lands 3474ms after its frame 0 (full motion: holdStart 11874 - 8400). */
+const CARD_HOLD_OFFSET_MS = 3474;
+/** REDUCED=1 captures with prefers-reduced-motion: reduce. */
+const REDUCED = process.env.REDUCED === "1";
+/** Device pixel ratio of the app capture. The app pane is downsampled to the video's 1440x900. */
+const DPR = Number(process.env.DPR ?? 2);
+const SUFFIX = REDUCED ? "-reduced" : "";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -266,11 +277,14 @@ function stampFilter(title) {
   ].join(",");
 }
 
+const appScale = `scale=${WIDTH}:${HEIGHT}:flags=lanczos`;
+const appTitle = `App DPR ${DPR}${REDUCED ? " reduced" : ""}`;
+
 async function stack(appPath, refPath, out, startFrame, count) {
   const appChain =
     startFrame > 0
-      ? `[0:v]trim=start_frame=${startFrame}:end_frame=${startFrame + count},setpts=PTS-STARTPTS,${stampFilter("App")}[app]`
-      : `[0:v]${stampFilter("App")}[app]`;
+      ? `[0:v]trim=start_frame=${startFrame}:end_frame=${startFrame + count},setpts=PTS-STARTPTS,${appScale},${stampFilter(appTitle)}[app]`
+      : `[0:v]${appScale},${stampFilter(appTitle)}[app]`;
   const filter = [
     appChain,
     `[1:v]${stampFilter("Video")}[vid]`,
@@ -292,7 +306,7 @@ async function stack(appPath, refPath, out, startFrame, count) {
     "-preset",
     "veryfast",
     "-crf",
-    "18",
+    "23",
     "-fps_mode",
     "passthrough",
     out,
@@ -311,9 +325,9 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({
   viewport: { width: WIDTH, height: HEIGHT },
-  deviceScaleFactor: 1,
+  deviceScaleFactor: DPR,
   timezoneId: "America/New_York",
-  reducedMotion: "no-preference",
+  reducedMotion: REDUCED ? "reduce" : "no-preference",
 });
 const page = await context.newPage();
 await page.goto(`${origin}/?capture=1`, { waitUntil: "networkidle" });
@@ -324,7 +338,7 @@ const cdp = await context.newCDPSession(page);
 await cdp.send("Emulation.setDeviceMetricsOverride", {
   width: WIDTH,
   height: HEIGHT,
-  deviceScaleFactor: 1,
+  deviceScaleFactor: DPR,
   mobile: false,
 });
 await page.evaluate(() => {
@@ -332,13 +346,24 @@ await page.evaluate(() => {
 });
 await page.evaluate(() => window.__clock.step(0));
 
-const appPath = "/tmp/thread-app-1440.mp4";
+const appPath = `/tmp/thread-app-1440${SUFFIX}.mp4`;
+const steps = [];
+let duplicateSteps = 0;
+let prevClock = null;
 const pipe = openPipe(appPath);
 let cardFrame = -1;
 const started = Date.now();
 try {
   for (let frame = 0; frame < threadFrames; frame += 1) {
     const clock = await page.evaluate(() => window.__clock.now);
+    if (prevClock !== null) {
+      const dt = clock - prevClock;
+      steps.push(dt);
+      if (Math.abs(dt - FRAME_MS) > 0.001) {
+        duplicateSteps += 1;
+      }
+    }
+    prevClock = clock;
     if (cardFrame < 0 && clock >= CARD_ALIGN_MS) {
       cardFrame = frame;
     }
@@ -364,13 +389,17 @@ const marks = await page.evaluate(() => ({ ...(window.__thread?.marks ?? {}), cl
 await pipe.done;
 await browser.close();
 
+if (REDUCED && marks.holdStart != null) {
+  // Reduced motion runs a shorter story. Align the card video on its hold press instead.
+  cardFrame = Math.round((marks.holdStart - CARD_HOLD_OFFSET_MS) / FRAME_MS);
+}
 if (cardFrame < 0 || cardFrame + cardFrames > threadFrames) {
   throw new Error(`card slice ${cardFrame} + ${cardFrames} does not fit in ${threadFrames}`);
 }
 
 mkdirSync(reviewDir, { recursive: true });
-const threadOut = `${reviewDir}thread-vs-video-1440.mp4`;
-const cardOut = `${reviewDir}card-vs-video-1440.mp4`;
+const threadOut = `${reviewDir}thread-vs-video-1440${SUFFIX}.mp4`;
+const cardOut = `${reviewDir}card-vs-video-1440${SUFFIX}.mp4`;
 await stack(appPath, `${refDir}thread.mp4`, threadOut, 0, threadFrames);
 await stack(appPath, `${refDir}approval-hold-undo-file.mp4`, cardOut, cardFrame, cardFrames);
 
@@ -383,10 +412,21 @@ const report = {
   cardFrame,
   cardAlignMs: CARD_ALIGN_MS,
   marks,
-  threadOut,
-  cardOut,
+  dpr: DPR,
+  reduced: REDUCED,
+  crf: 23,
+  clockStepMin: Math.min(...steps),
+  clockStepMax: Math.max(...steps),
+  duplicateSteps,
+  threadOut: relative(repoDir, threadOut),
+  cardOut: relative(repoDir, cardOut),
+  threadOutFrames: await frameCount(threadOut),
+  cardOutFrames: await frameCount(cardOut),
   videoFirstActionFrame: 88,
   sendStartMs: marks.sendStart ?? null,
 };
-writeFileSync(`${reviewDir}video-match.json`, JSON.stringify(report, null, 2));
+if (duplicateSteps > 0) {
+  throw new Error(`${duplicateSteps} clock steps were not ${FRAME_MS}ms`);
+}
+writeFileSync(`${reviewDir}video-match${SUFFIX}.json`, JSON.stringify(report, null, 2));
 console.log(JSON.stringify(report, null, 2));

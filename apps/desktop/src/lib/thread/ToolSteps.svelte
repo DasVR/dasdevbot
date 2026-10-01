@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { undoClock, undoSecondsLeft } from "../ApprovalCard.svelte";
   import { CHECK_PATH, CHEVRON_PATH, READING_PATH, WRITING_PATH } from "../pen";
   import { arrive, collapseHeight } from "./motion";
   import type { ToolBlockView, ToolStepView, TraceKind } from "./types";
@@ -92,7 +93,11 @@
         {/if}
       </span>
       <span class="say">{step.say}</span>
-      <span class={["el", step.phase === "waiting" && "need"]}>{step.elapsed || "0.0s"}</span>
+      <span class={["el", step.phase === "waiting" && "need"]}
+        >{step.undo
+          ? `${step.undo.verb} · undo ${undoSecondsLeft(step.undo.until, undoClock.now)}s`
+          : step.elapsed || "0.0s"}</span
+      >
       {#if step.detail && step.phase !== "done"}
         <p class="dt" out:collapseHeight>{step.detail}</p>
       {/if}
