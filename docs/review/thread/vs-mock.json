@@ -40,9 +40,9 @@
       "clockStepMax": 16.66700000000128,
       "duplicateSteps": 0,
       "encodedDuplicateFrames": 0,
-      "appConsecutiveIdenticalFrames": 452,
+      "appConsecutiveIdenticalFrames": 432,
       "reducedTransforms": null,
-      "bytes": 15846149
+      "bytes": 15860606
     },
     {
       "file": "docs/review/thread/approval-vs-mock.mp4",
@@ -59,9 +59,9 @@
       "clockStepMax": 16.66700000000128,
       "duplicateSteps": 0,
       "encodedDuplicateFrames": 0,
-      "appConsecutiveIdenticalFrames": 203,
+      "appConsecutiveIdenticalFrames": 183,
       "reducedTransforms": null,
-      "bytes": 5240102
+      "bytes": 5246546
     },
     {
       "file": "docs/review/thread/thread-vs-mock-reduced.mp4",
@@ -78,9 +78,9 @@
       "clockStepMax": 16.66700000000128,
       "duplicateSteps": 0,
       "encodedDuplicateFrames": 0,
-      "appConsecutiveIdenticalFrames": 748,
+      "appConsecutiveIdenticalFrames": 727,
       "reducedTransforms": [],
-      "bytes": 10549200
+      "bytes": 10553914
     },
     {
       "file": "docs/review/thread/approval-vs-mock-reduced.mp4",
@@ -97,9 +97,9 @@
       "clockStepMax": 16.66700000000037,
       "duplicateSteps": 0,
       "encodedDuplicateFrames": 0,
-      "appConsecutiveIdenticalFrames": 495,
+      "appConsecutiveIdenticalFrames": 474,
       "reducedTransforms": [],
-      "bytes": 4917572
+      "bytes": 4925988
     }
   ],
   "runs": {
