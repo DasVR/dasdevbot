@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use dasdevbotd::{serve, Error};
+use dasdevbotd::{serve, session_token_path, url_exposes_bearer, Error};
 
 fn main() -> ExitCode {
     match run() {
@@ -52,7 +52,7 @@ struct Flags {
     url: String,
     repo: String,
     reference: String,
-    allow_remote: bool,
+    token: Option<String>,
 }
 
 fn flags(args: Vec<String>) -> Result<Flags, Error> {
@@ -64,7 +64,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut url = "http://127.0.0.1:8787".to_string();
     let mut repo = "DasVR/NIL".to_string();
     let mut reference = "phase0".to_string();
-    let mut allow_remote = false;
+    let mut token: Option<String> = None;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         let mut value = || {
@@ -82,7 +82,12 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             "--url" => url = value()?,
             "--repo" => repo = value()?,
             "--ref" => reference = value()?,
-            "--allow-remote" => allow_remote = true,
+            "--allow-remote" => {
+                return Err(Error::BadRequest(
+                    "refusing --allow-remote until Phase 1 or TLS".into(),
+                ));
+            }
+            "--token" => token = Some(value()?),
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -109,13 +114,14 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         url,
         repo,
         reference,
-        allow_remote,
+        token,
     })
 }
 
 fn serve_from(args: Vec<String>) -> Result<(), Error> {
     let flags = flags(args)?;
-    ensure_loopback(&flags.bind, flags.allow_remote)?;
+    ensure_loopback(&flags.bind)?;
+    let explicit = explicit_token(flags.token);
     eprintln!(
         "dasdevbotd starting role={} data={} provider={}",
         flags.role,
@@ -127,9 +133,20 @@ fn serve_from(args: Vec<String>) -> Result<(), Error> {
             data: flags.data,
             web_root: flags.web,
             role: flags.role,
+            token: explicit,
         })?,
         &flags.bind,
     )
+}
+
+fn explicit_token(flag: Option<String>) -> Option<String> {
+    if let Some(token) = flag.filter(|token| !token.trim().is_empty()) {
+        return Some(token);
+    }
+    match env::var("DASDEVBOT_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => Some(token),
+        _ => None,
+    }
 }
 
 fn emit(args: Vec<String>) -> Result<(), Error> {
@@ -146,7 +163,14 @@ fn emit(args: Vec<String>) -> Result<(), Error> {
         },
         "idempotency_key": format!("cli-{}", uuid::Uuid::new_v4())
     });
+    let token = emit_token(&flags)?;
+    if url_exposes_bearer(&flags.url, &token) {
+        return Err(Error::BadRequest(
+            "bearer token must be sent only in the Authorization header".into(),
+        ));
+    }
     let response = ureq::post(&endpoint)
+        .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
         .map_err(|err| Error::BadRequest(format!("emit failed: {err}")))?;
     let text = response
@@ -164,6 +188,20 @@ fn smoke_xai(args: Vec<String>) -> Result<(), Error> {
     Ok(())
 }
 
+fn emit_token(flags: &Flags) -> Result<String, Error> {
+    if let Some(token) = explicit_token(flags.token.clone()) {
+        return Ok(token);
+    }
+    let path = session_token_path(&flags.data);
+    match std::fs::read_to_string(&path) {
+        Ok(token) if !token.trim().is_empty() => Ok(token.trim().to_string()),
+        _ => Err(Error::BadRequest(format!(
+            "missing bearer token; pass --token or set DASDEVBOT_TOKEN (looked at {})",
+            path.display()
+        ))),
+    }
+}
+
 fn provider_label() -> &'static str {
     match env::var("XAI_API_KEY") {
         Ok(key) if !key.trim().is_empty() => "xai",
@@ -171,18 +209,13 @@ fn provider_label() -> &'static str {
     }
 }
 
-fn ensure_loopback(bind: &str, allow_remote: bool) -> Result<(), Error> {
-    if allow_remote {
-        return Ok(());
-    }
+fn ensure_loopback(bind: &str) -> Result<(), Error> {
     let host = bind.rsplit_once(':').map(|(host, _)| host).unwrap_or(bind);
     let host = host.trim_matches(['[', ']']);
     if host == "127.0.0.1" || host == "localhost" || host == "::1" {
         Ok(())
     } else {
-        Err(Error::BadRequest(
-            "refusing a non-loopback bind without --allow-remote".into(),
-        ))
+        Err(Error::BadRequest("refusing a non-loopback bind".into()))
     }
 }
 
@@ -194,13 +227,23 @@ dasdevbotd — phase 0 spike
 Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
                   [--web apps/desktop/dist] [--role server|device|display]
-  dasdevbotd emit [--url http://127.0.0.1:8787] [--repo DasVR/NIL] [--ref phase0]
+                  [--token TOKEN]
+  dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
+                  [--repo DasVR/NIL] [--ref phase0]
   dasdevbotd smoke-xai
+
+Mutating routes require the per-launch bearer in the Authorization header.
+serve writes it next to the database as <data>.token (mode 0600). The daemon
+does not put it in HTML, does not return it from the API, and does not log it.
+A request that puts it in the URL or query string is rejected. The token must
+be at least 32 bytes. --allow-remote is refused until Phase 1 or TLS, including
+together with --web. The bind stays on loopback.
 
 The provider is xAI chat completions when XAI_API_KEY is set.
 Otherwise every draft is produced by the labeled mock provider.
 smoke-xai does not use the mock: it skips when XAI_API_KEY is unset.
 XAI_MODEL overrides the model (default grok-4.6).
+The xAI base URL is the compile-time constant https://api.x.ai/v1.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.

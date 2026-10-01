@@ -4,7 +4,9 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 const DEFAULT_MODEL: &str = "grok-4.6";
-const DEFAULT_BASE: &str = "https://api.x.ai/v1";
+
+/// Official xAI chat-completions base. Every build pins this.
+pub const XAI_BASE: &str = "https://api.x.ai/v1";
 
 /// Tokens reserved before a provider call. A turn whose agent cannot cover this does not call.
 pub const RESERVE_TOKENS: u64 = 256;
@@ -95,21 +97,20 @@ Wrap it in try/finally so the next session can take the lock."
 pub struct XaiProvider {
     api_key: String,
     model: String,
-    base: String,
+    base: &'static str,
     agent: ureq::Agent,
 }
 
 impl XaiProvider {
     pub fn from_env(api_key: String) -> Self {
         let model = std::env::var("XAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-        let base = std::env::var("XAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.into());
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(90))
             .build();
         Self {
             api_key,
             model,
-            base,
+            base: XAI_BASE,
             agent,
         }
     }
@@ -171,6 +172,7 @@ pub fn smoke_xai() -> Result<bool, ProviderError> {
             return Ok(false);
         }
     };
+    // Uses the pinned XAI_BASE; the environment cannot redirect it.
     let provider = XaiProvider::from_env(key);
     let started = std::time::Instant::now();
     let completion = provider.complete(&CompletionRequest {
@@ -272,6 +274,13 @@ mod tests {
         assert!(done.text.contains("refresh()"));
         assert!(done.input_tokens >= 2);
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn xai_base_is_pinned_to_the_official_host() {
+        assert_eq!(XAI_BASE, "https://api.x.ai/v1");
+        let provider = XaiProvider::from_env("test-key".into());
+        assert_eq!(provider.base, XAI_BASE);
     }
 
     #[test]

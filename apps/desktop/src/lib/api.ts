@@ -270,6 +270,60 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return target.closest(".composer") !== null;
 }
 
+type TauriInternals = {
+  invoke?: (cmd: string) => Promise<unknown>;
+};
+
+function shellToken(): string {
+  const shell = globalThis as typeof globalThis & { __DASDEVBOT_TOKEN?: unknown };
+  const value = shell.__DASDEVBOT_TOKEN;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function metaToken(): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  return (
+    document.querySelector('meta[name="dasdevbot-token"]')?.getAttribute("content")?.trim() ?? ""
+  );
+}
+
+function tauriInternals(): TauriInternals | null {
+  const host = globalThis as typeof globalThis & { __TAURI_INTERNALS__?: TauriInternals };
+  return host.__TAURI_INTERNALS__ ?? null;
+}
+
+async function sessionToken(): Promise<string> {
+  const fromShell = shellToken();
+  if (fromShell) {
+    return fromShell;
+  }
+  const fromMeta = metaToken();
+  if (fromMeta) {
+    return fromMeta;
+  }
+  const invoke = tauriInternals()?.invoke;
+  if (!invoke) {
+    return "";
+  }
+  try {
+    const value = await invoke("session_token");
+    return typeof value === "string" ? value.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+async function jsonHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = await sessionToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/v1/snapshot");
   if (!response.ok) {
@@ -282,7 +336,7 @@ export async function getSnapshot(): Promise<Snapshot> {
 export async function emitPush(forced = false): Promise<void> {
   const response = await fetch("/v1/events", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await jsonHeaders(),
     body: JSON.stringify({
       source: "demo",
       kind: "repo.push",
@@ -309,7 +363,7 @@ export async function decide(id: string, decision: Decision, reason?: string): P
   }
   const response = await fetch(`/v1/approvals/${id}/decision`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await jsonHeaders(),
     body: JSON.stringify(body),
   });
   if (!response.ok) {
@@ -320,7 +374,7 @@ export async function decide(id: string, decision: Decision, reason?: string): P
 export async function undo(id: string): Promise<void> {
   const response = await fetch(`/v1/approvals/${id}/undo`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await jsonHeaders(),
     body: "{}",
   });
   if (!response.ok) {

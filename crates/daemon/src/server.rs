@@ -15,6 +15,9 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::turn;
 use crate::{wall_ms, App, Error, Result};
 
+/// Same policy as the Tauri shell, plus `frame-ancestors 'none'`.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8787 http://localhost:8787; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+
 pub fn serve(app: Arc<App>, bind: &str) -> Result<()> {
     let local = dasdevbot_sync::bind_local().map_err(Error::Bind)?;
     if let Some(id) = local.node_id.clone() {
@@ -35,19 +38,22 @@ pub fn serve(app: Arc<App>, bind: &str) -> Result<()> {
 }
 
 pub fn serve_incoming(app: Arc<App>, server: Server) {
+    let port = bound_port(&server);
     for mut request in server.incoming_requests() {
-        let response = handle(&app, &mut request);
+        let response = handle(&app, &mut request, port);
         let _ = request.respond(response);
     }
 }
 
-pub fn handle(app: &App, request: &mut Request) -> Response<Cursor<Vec<u8>>> {
-    match dispatch(app, request) {
+pub fn handle(app: &App, request: &mut Request, port: u16) -> Response<Cursor<Vec<u8>>> {
+    match dispatch(app, request, port) {
         Ok(response) => response,
         Err(err) => {
             let code = match &err {
                 Error::NotFound(_) => 404,
                 Error::BadRequest(_) | Error::IdempotencyConflict(_) => 400,
+                Error::Unauthorized => 401,
+                Error::Forbidden(_) => 403,
                 _ => 500,
             };
             json_response(
@@ -60,9 +66,22 @@ pub fn handle(app: &App, request: &mut Request) -> Response<Cursor<Vec<u8>>> {
     }
 }
 
-fn dispatch(app: &App, request: &mut Request) -> Result<Response<Cursor<Vec<u8>>>> {
-    if request.method() == &Method::Options {
-        return Ok(empty(204));
+fn dispatch(app: &App, request: &mut Request, port: u16) -> Result<Response<Cursor<Vec<u8>>>> {
+    if url_exposes_bearer(request.url(), &app.token) {
+        return Err(Error::Forbidden(
+            "bearer token must be sent only in the Authorization header".into(),
+        ));
+    }
+    if !host_is_loopback(request, port) {
+        return Err(Error::Forbidden("rejected host".into()));
+    }
+    if is_mutating(request.method()) {
+        if !origin_is_allowed(request, port) {
+            return Err(Error::Forbidden("rejected origin".into()));
+        }
+        if !bearer_matches(request, &app.token) {
+            return Err(Error::Unauthorized);
+        }
     }
     let path = request.url().split('?').next().unwrap_or("/").to_string();
     let matched = path.clone();
@@ -453,18 +472,158 @@ fn read_body(request: &mut Request) -> Result<String> {
     Ok(body)
 }
 
+fn bound_port(server: &Server) -> u16 {
+    server
+        .server_addr()
+        .to_string()
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+        .unwrap_or(0)
+}
+
+fn is_mutating(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::Post | Method::Put | Method::Patch | Method::Delete
+    )
+}
+
+/// DNS rebinding sends the attacker's hostname while the socket is loopback.
+fn host_is_loopback(request: &Request, port: u16) -> bool {
+    let ip = format!("127.0.0.1:{port}");
+    let name = format!("localhost:{port}");
+    let v6 = format!("[::1]:{port}");
+    let mut saw = false;
+    for header in request.headers() {
+        if !header.field.equiv("Host") {
+            continue;
+        }
+        saw = true;
+        let value = header.value.as_str().trim();
+        if value != ip && value != name && value != v6 {
+            return false;
+        }
+    }
+    saw
+}
+
+/// A browser cross-origin POST carries `Origin`. Non-browser clients omit it.
+fn origin_is_allowed(request: &Request, port: u16) -> bool {
+    let ip = format!("http://127.0.0.1:{port}");
+    let name = format!("http://localhost:{port}");
+    for header in request.headers() {
+        if !header.field.equiv("Origin") {
+            continue;
+        }
+        let value = header.value.as_str().trim();
+        if value != ip && value != name {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when the request target carries a bearer in the path or query.
+///
+/// The error path must not echo `url` or `token`. Callers reject the request
+/// and accept the secret only from the Authorization header.
+pub fn url_exposes_bearer(url: &str, token: &str) -> bool {
+    if !token.is_empty() {
+        if url.contains(token) {
+            return true;
+        }
+        let decoded = percent_decode(url);
+        if decoded.contains(token) || percent_decode(&decoded).contains(token) {
+            return true;
+        }
+    }
+    query_names_a_credential(url)
+}
+
+fn query_names_a_credential(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    query.split('&').any(|pair| {
+        let name = pair.split_once('=').map(|(name, _)| name).unwrap_or(pair);
+        let name = percent_decode(&percent_decode(name));
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "token" | "access_token" | "bearer"
+        )
+    })
+}
+
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (from_hex(bytes[index + 1]), from_hex(bytes[index + 2])) {
+                out.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn bearer_matches(request: &Request, token: &str) -> bool {
+    for header in request.headers() {
+        if !header.field.equiv("Authorization") {
+            continue;
+        }
+        let Some(presented) = presented_bearer(header.value.as_str()) else {
+            continue;
+        };
+        if constant_time_eq(presented, token) {
+            return true;
+        }
+    }
+    false
+}
+
+fn presented_bearer(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.trim().split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Some(rest.trim())
+    } else {
+        None
+    }
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 fn json_response(code: u16, body: &impl serde::Serialize) -> Response<Cursor<Vec<u8>>> {
     let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     with_headers(
         Response::from_data(bytes).with_status_code(StatusCode(code)),
         "application/json",
-    )
-}
-
-fn empty(code: u16) -> Response<Cursor<Vec<u8>>> {
-    with_headers(
-        Response::from_data(Vec::new()).with_status_code(StatusCode(code)),
-        "text/plain",
     )
 }
 
@@ -474,10 +633,10 @@ fn with_headers(
 ) -> Response<Cursor<Vec<u8>>> {
     response
         .with_header(header("Content-Type", content_type))
-        .with_header(header("Access-Control-Allow-Origin", "*"))
-        .with_header(header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"))
-        .with_header(header("Access-Control-Allow-Headers", "Content-Type"))
         .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Content-Security-Policy", CONTENT_SECURITY_POLICY))
+        .with_header(header("X-Frame-Options", "DENY"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -491,7 +650,11 @@ mod tests {
     use crate::turn::spawn_worker;
     use crate::Config;
     use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpStream};
     use std::time::{Duration, Instant};
+
+    const STRONG_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     #[test]
     fn ipc_round_trip_approval_is_recorded_and_not_executed() {
@@ -502,10 +665,12 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
+                token: None,
             },
             Box::new(MockProvider::new()),
         )
         .unwrap();
+        let token = app.token.clone();
         spawn_worker(Arc::clone(&app), rx);
         let server = Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_string();
@@ -524,6 +689,7 @@ mod tests {
 
         let emitted = agent
             .post(&format!("http://{addr}/v1/events"))
+            .set("Authorization", &format!("Bearer {token}"))
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
@@ -538,6 +704,7 @@ mod tests {
 
         let replay = agent
             .post(&format!("http://{addr}/v1/events"))
+            .set("Authorization", &format!("Bearer {token}"))
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
@@ -589,6 +756,7 @@ mod tests {
             .post(&format!(
                 "http://{addr}/v1/approvals/{approval_id}/decision"
             ))
+            .set("Authorization", &format!("Bearer {token}"))
             .send_json(json!({"decision": "approve"}))
             .unwrap()
             .into_json::<DecisionResponse>()
@@ -619,6 +787,7 @@ mod tests {
 
         let undone = agent
             .post(&format!("http://{addr}/v1/approvals/{approval_id}/undo"))
+            .set("Authorization", &format!("Bearer {token}"))
             .send_json(json!({}))
             .unwrap()
             .into_json::<dasdevbot_proto::UndoResponse>()
@@ -629,6 +798,7 @@ mod tests {
             .post(&format!(
                 "http://{addr}/v1/approvals/{approval_id}/decision"
             ))
+            .set("Authorization", &format!("Bearer {token}"))
             .send_json(json!({
                 "decision": "deny",
                 "reason": "Not worth a comment on a phase-0 branch"
@@ -683,10 +853,12 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
+                token: None,
             },
             Box::new(MockProvider::new()),
         )
         .unwrap();
+        let token = app.token.clone();
         spawn_worker(Arc::clone(&app), rx);
         let server = Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_string();
@@ -700,6 +872,7 @@ mod tests {
 
         let emitted = agent
             .post(&format!("http://{addr}/v1/events"))
+            .set("Authorization", &format!("Bearer {token}"))
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
@@ -726,6 +899,316 @@ mod tests {
     }
 
     #[test]
+    fn cross_origin_post_to_the_decision_route_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-cors-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: None,
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let token = app.token.clone();
+        spawn_worker(Arc::clone(&app), rx);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let port = addr.rsplit_once(':').unwrap().1;
+        std::thread::spawn(move || serve_incoming(app, server));
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        agent
+            .post(&format!("http://{addr}/v1/events"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({
+                "source": "demo",
+                "kind": "repo.push",
+                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "idempotency_key": "cors-push-1"
+            }))
+            .unwrap();
+        let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
+        let approval_id = snap["approvals"][0]["id"].as_str().unwrap();
+        let decision_url = format!("http://{addr}/v1/approvals/{approval_id}/decision");
+
+        let denied = agent
+            .post(&decision_url)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Origin", "https://evil.example")
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        match denied {
+            ureq::Error::Status(403, response) => {
+                assert!(response.header("Access-Control-Allow-Origin").is_none());
+                let body = response.into_string().unwrap();
+                assert!(body.contains("rejected origin"), "{body}");
+            }
+            other => panic!("cross-origin decision was not forbidden: {other}"),
+        }
+
+        let rebound = agent
+            .post(&decision_url)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Host", &format!("evil.example:{port}"))
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        match rebound {
+            ureq::Error::Status(403, response) => {
+                let body = response.into_string().unwrap();
+                assert!(body.contains("rejected host"), "{body}");
+            }
+            other => panic!("rebinding decision was not forbidden: {other}"),
+        }
+
+        let missing = agent
+            .post(&decision_url)
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        match missing {
+            ureq::Error::Status(401, _) => {}
+            other => panic!("decision without a bearer was not rejected: {other}"),
+        }
+
+        let options = agent.request("OPTIONS", &decision_url).call();
+        match options {
+            Err(ureq::Error::Status(status, response)) => {
+                assert_ne!(status, 204);
+                assert!(response.header("Access-Control-Allow-Origin").is_none());
+            }
+            Ok(response) => panic!("preflight succeeded with {}", response.status()),
+            Err(err) => panic!("preflight failed closed the wrong way: {err}"),
+        }
+
+        let still = agent
+            .get(&format!("http://{addr}/v1/snapshot"))
+            .call()
+            .unwrap()
+            .into_json::<serde_json::Value>()
+            .unwrap();
+        assert_eq!(still["approvals"][0]["status"], "pending");
+        assert!(still["approvals"][0]["expires_at"].as_u64().is_some());
+    }
+
+    #[test]
+    fn get_root_does_not_contain_the_token() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-html-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let page = "<!doctype html><head></head><body>ok</body>";
+        fs::write(dir.join("index.html"), page).unwrap();
+        fs::write(dir.join("app.js"), "console.log('desk');").unwrap();
+        let (app, _rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: Some(dir.clone()),
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let token = app.token.clone();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        let root = agent
+            .get(&format!("http://{addr}/"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert_eq!(root, page);
+        assert!(!root.contains(&token), "GET / contained the bearer");
+        let script = agent
+            .get(&format!("http://{addr}/app.js"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(!script.contains(&token), "static file contained the bearer");
+        let health = agent
+            .get(&format!("http://{addr}/v1/health"))
+            .call()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(!health.contains(&token), "health contained the bearer");
+    }
+
+    #[test]
+    fn missing_host_header_is_rejected() {
+        let (addr, token) = serve_fixture(None);
+        let response = raw_http(
+            &addr,
+            "GET /v1/health HTTP/1.1\r\nConnection: close\r\n\r\n",
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 403") || response.starts_with("HTTP/1.0 403"),
+            "missing Host was not rejected"
+        );
+        assert!(response.contains("rejected host"));
+        assert!(!response.contains(&token), "response echoed the bearer");
+    }
+
+    #[test]
+    fn ipv6_loopback_host_is_accepted() {
+        let (addr, _token) = serve_fixture(None);
+        let port = addr.rsplit_once(':').unwrap().1;
+        let response = raw_http(
+            &addr,
+            &format!("GET /v1/health HTTP/1.1\r\nHost: [::1]:{port}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"),
+            "ipv6 loopback host was rejected"
+        );
+        assert!(response.contains("\"ready\":true"));
+    }
+
+    #[test]
+    fn responses_carry_frame_and_content_type_headers() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-hdr-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("index.html"), "<!doctype html><body>ok</body>").unwrap();
+        let (app, _rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: Some(dir),
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let health_url = format!("http://{addr}/v1/health");
+        let start = Instant::now();
+        let health = loop {
+            if let Ok(response) = agent.get(&health_url).call() {
+                break response;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!("daemon did not answer {health_url}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_security_headers(&health);
+        let page = agent.get(&format!("http://{addr}/")).call().unwrap();
+        assert_security_headers(&page);
+    }
+
+    #[test]
+    fn bearer_in_the_query_string_is_rejected_and_not_echoed() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-query-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root: None,
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let token = app.token.clone();
+        spawn_worker(Arc::clone(&app), rx);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        agent
+            .post(&format!("http://{addr}/v1/events"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({
+                "source": "demo",
+                "kind": "repo.push",
+                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "idempotency_key": "query-push-1"
+            }))
+            .unwrap();
+        let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
+        let approval_id = snap["approvals"][0]["id"].as_str().unwrap();
+
+        let leaked = agent
+            .post(&format!(
+                "http://{addr}/v1/approvals/{approval_id}/decision?token={token}"
+            ))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        match leaked {
+            ureq::Error::Status(403, response) => {
+                let body = response.into_string().unwrap();
+                assert!(body.contains("Authorization"), "{body}");
+                assert!(!body.contains(&token), "response echoed the bearer");
+            }
+            other => panic!("query-string bearer was not forbidden: {other}"),
+        }
+
+        let named = agent
+            .post(&format!(
+                "http://{addr}/v1/approvals/{approval_id}/decision?access_token=not-the-secret"
+            ))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        match named {
+            ureq::Error::Status(403, response) => {
+                let body = response.into_string().unwrap();
+                assert!(
+                    !body.contains("not-the-secret"),
+                    "response echoed the query"
+                );
+                assert!(!body.contains(&token), "response echoed the bearer");
+            }
+            other => panic!("access_token query was not forbidden: {other}"),
+        }
+
+        let still = agent
+            .get(&format!("http://{addr}/v1/snapshot"))
+            .call()
+            .unwrap()
+            .into_json::<serde_json::Value>()
+            .unwrap();
+        assert_eq!(still["approvals"][0]["status"], "pending");
+    }
+
+    #[test]
+    fn url_credential_check_covers_path_query_and_percent_encoding() {
+        let token = "desktop-only-token";
+        assert!(!url_exposes_bearer("/v1/health", token));
+        assert!(url_exposes_bearer(&format!("/v1/{token}/decision"), token));
+        assert!(url_exposes_bearer("/v1/health?token=other", token));
+        assert!(url_exposes_bearer("/v1/health?Access_Token=other", token));
+        assert!(url_exposes_bearer("/v1/health?bearer", token));
+        assert!(url_exposes_bearer(
+            "/v1/health?token=%64esktop-only-token",
+            token
+        ));
+        assert!(!url_exposes_bearer("/v1/health?note=phase0", token));
+        assert!(!url_exposes_bearer("/v1/health", ""));
+    }
+
+    #[test]
     fn serve_binds_before_health() {
         let dir = std::env::temp_dir().join(format!("dasdevbot-bind-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -736,6 +1219,7 @@ mod tests {
             data: dir.join("db.sqlite"),
             web_root: None,
             role: "server".into(),
+            token: Some(STRONG_TOKEN.into()),
         })
         .unwrap();
         let bind = format!("127.0.0.1:{port}");
@@ -754,6 +1238,58 @@ mod tests {
         } else {
             assert!(health["endpoint_id"].is_null());
         }
+    }
+
+    fn serve_fixture(web_root: Option<std::path::PathBuf>) -> (String, String) {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-fix-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, _rx) = crate::build_app(
+            Config {
+                data: dir.join("db.sqlite"),
+                web_root,
+                role: "server".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        let token = app.token.clone();
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        std::thread::spawn(move || serve_incoming(app, server));
+        (addr, token)
+    }
+
+    fn raw_http(addr: &str, request: &str) -> String {
+        let start = Instant::now();
+        loop {
+            if let Ok(mut stream) = TcpStream::connect(addr) {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream.write_all(request.as_bytes()).unwrap();
+                let _ = stream.shutdown(Shutdown::Write);
+                let mut buf = String::new();
+                let _ = stream.read_to_string(&mut buf);
+                if !buf.is_empty() {
+                    return buf;
+                }
+            }
+            if start.elapsed() > Duration::from_secs(2) {
+                panic!("no HTTP response from {addr}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_security_headers(response: &ureq::Response) {
+        assert_eq!(
+            response.header("Content-Security-Policy"),
+            Some(CONTENT_SECURITY_POLICY)
+        );
+        assert!(CONTENT_SECURITY_POLICY.contains("frame-ancestors 'none'"));
+        assert_eq!(response.header("X-Frame-Options"), Some("DENY"));
+        assert_eq!(response.header("X-Content-Type-Options"), Some("nosniff"));
     }
 
     fn wait_ok(agent: &ureq::Agent, url: &str) -> serde_json::Value {
