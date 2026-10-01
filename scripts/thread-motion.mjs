@@ -526,6 +526,12 @@ async function capture(browser, { reduced, width, height, out, shootFrames }) {
   rmSync(temp, { force: true });
   const { context, page } = await openCompare(browser, { reduced, width, height });
   const cdp = await context.newCDPSession(page);
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: width * 2,
+    height: height + 32,
+    deviceScaleFactor: 2,
+    mobile: false,
+  });
   const label = `${reduced ? "reduced" : "full"} ${width}`;
   let pipe = null;
   let captured = 0;
@@ -610,13 +616,16 @@ async function capture(browser, { reduced, width, height, out, shootFrames }) {
   const cssH = height + 32;
   const scaleX = size.width / cssW;
   const scaleY = size.height / cssH;
-  const cropW = Math.round(width * scaleX);
-  const cropH = Math.round(cssH * scaleY);
-  const cropX = Math.round(width * scaleX);
+  const even = (value) => value - (value % 2);
+  const cropW = even(Math.round(width * scaleX));
+  const cropH = even(Math.round(cssH * scaleY));
+  const cropX = even(Math.round(width * scaleX));
+  const outW = Math.round(width * 2);
+  const outH = Math.round(cssH * 2);
   const filter = [
     "[0:v]split[a][b]",
-    `[a]${pane(0, 0, cropW, cropH, width, cssH)}[left]`,
-    `[b]${pane(cropX, 0, cropW, cropH, width, cssH)}[right]`,
+    `[a]${pane(0, 0, cropW, cropH, outW, outH)}[left]`,
+    `[b]${pane(cropX, 0, cropW, cropH, outW, outH)}[right]`,
     "[left][right]hstack=inputs=2",
   ].join(";");
   await runFfmpeg([
@@ -636,8 +645,6 @@ async function capture(browser, { reduced, width, height, out, shootFrames }) {
     "18",
     "-fps_mode",
     "passthrough",
-    "-r",
-    "60",
     out,
   ]);
   rmSync(temp, { force: true });
