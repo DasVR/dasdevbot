@@ -320,32 +320,28 @@ static void walk_claude_md(const char *found) {
     }
 }
 
-static int user_source(const char *sources) {
+static int has_source(const char *sources, const char *name) {
     if (sources == NULL || sources[0] == 0) {
         return 1;
     }
     char padded[1024];
+    char want[64];
     snprintf(padded, sizeof padded, ",%s,", sources);
-    return strstr(padded, ",user,") != NULL;
+    snprintf(want, sizeof want, ",%s,", name);
+    return strstr(padded, want) != NULL;
 }
 
-static void hostile(const struct cfg *cfg, int argc, char **argv) {
-    const char *home = getenv("HOME");
-    if (home != NULL && cfg->home_record[0] != 0) {
-        FILE *file = fopen(cfg->home_record, "w");
-        if (file != NULL) {
-            fprintf(file, "%s\n", home);
-            fclose(file);
+static int has_flag(int argc, char **argv, const char *flag) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], flag) == 0) {
+            return 1;
         }
     }
-    const char *sources = flag_value(argc, argv, "--setting-sources");
-    const char *settings = flag_value(argc, argv, "--settings");
-    int hooks_off = settings != NULL && strstr(settings, "disableAllHooks") != NULL;
-    if (!user_source(sources) || hooks_off || home == NULL) {
-        return;
-    }
-    char settings_path[8192];
-    snprintf(settings_path, sizeof settings_path, "%s/.claude/settings.json", home);
+    return 0;
+}
+
+/* Runs every `touch PATH` command found in a settings file. */
+static void run_touches(const char *settings_path, const char *needle) {
     FILE *file = fopen(settings_path, "r");
     if (file == NULL) {
         return;
@@ -354,19 +350,95 @@ static void hostile(const struct cfg *cfg, int argc, char **argv) {
     size_t n = fread(buf, 1, sizeof buf - 1, file);
     fclose(file);
     buf[n] = 0;
-    char *touch = strstr(buf, "touch ");
-    if (touch == NULL) {
+    char *cursor = buf;
+    while ((cursor = strstr(cursor, needle)) != NULL) {
+        char *touch = strstr(cursor, "touch ");
+        if (touch == NULL) {
+            return;
+        }
+        touch += 6;
+        char marker[4096];
+        size_t i = 0;
+        while (touch[i] != 0 && touch[i] != '"' && touch[i] != ' ' && touch[i] != ';' &&
+               i + 1 < sizeof marker) {
+            marker[i] = touch[i];
+            i++;
+        }
+        marker[i] = 0;
+        touch_path(marker);
+        cursor = touch;
+    }
+}
+
+/* Project root: the nearest ancestor of the cwd that holds .git, else the cwd. */
+static void project_root(char *out, size_t cap) {
+    char dir[4096];
+    if (getcwd(dir, sizeof dir) == NULL) {
+        out[0] = 0;
         return;
     }
-    touch += 6;
-    char marker[4096];
-    size_t i = 0;
-    while (touch[i] != 0 && touch[i] != '"' && touch[i] != ' ' && i + 1 < sizeof marker) {
-        marker[i] = touch[i];
-        i++;
+    snprintf(out, cap, "%s", dir);
+    while (dir[0] != 0 && strcmp(dir, "/") != 0) {
+        char git[8192];
+        snprintf(git, sizeof git, "%s/.git", dir);
+        if (access(git, F_OK) == 0) {
+            snprintf(out, cap, "%s", dir);
+            return;
+        }
+        char *slash = strrchr(dir, '/');
+        if (slash == NULL || slash == dir) {
+            return;
+        }
+        *slash = 0;
     }
-    marker[i] = 0;
-    touch_path(marker);
+}
+
+/*
+ * Models what Claude Code 2.1.285 did offline (unshare -rn) with planted settings:
+ * - User settings come from $CLAUDE_CONFIG_DIR, else $HOME/.claude.
+ * - Project settings come from the project root's .claude/settings.json.
+ * - Hooks run unless --settings sets disableAllHooks, --safe-mode or --restricted is
+ *   passed, or --setting-sources omits that source.
+ * - A project or user apiKeyHelper runs unless --restricted is passed or the source is
+ *   omitted. disableAllHooks and --safe-mode did not stop it.
+ */
+static void hostile(const struct cfg *cfg, int argc, char **argv) {
+    const char *home = getenv("HOME");
+    const char *config = getenv("CLAUDE_CONFIG_DIR");
+    if (cfg->home_record[0] != 0) {
+        FILE *file = fopen(cfg->home_record, "w");
+        if (file != NULL) {
+            fprintf(file, "%s\n%s\n", home ? home : "", config ? config : "");
+            fclose(file);
+        }
+    }
+    const char *sources = flag_value(argc, argv, "--setting-sources");
+    const char *settings = flag_value(argc, argv, "--settings");
+    int restricted = has_flag(argc, argv, "--restricted");
+    int hooks_off = restricted || has_flag(argc, argv, "--safe-mode") ||
+                    (settings != NULL && strstr(settings, "disableAllHooks") != NULL);
+    char user_settings[8192] = {0};
+    if (config != NULL && config[0] != 0) {
+        snprintf(user_settings, sizeof user_settings, "%s/settings.json", config);
+    } else if (home != NULL) {
+        snprintf(user_settings, sizeof user_settings, "%s/.claude/settings.json", home);
+    }
+    char root[4096];
+    char project_settings[8192];
+    project_root(root, sizeof root);
+    snprintf(project_settings, sizeof project_settings, "%s/.claude/settings.json", root);
+    if (!restricted && has_source(sources, "user") && user_settings[0] != 0) {
+        if (!hooks_off) {
+            run_touches(user_settings, "\"hooks\"");
+        }
+        run_touches(user_settings, "\"apiKeyHelper\"");
+    }
+    if (!restricted && has_source(sources, "project")) {
+        if (!hooks_off) {
+            run_touches(project_settings, "\"hooks\"");
+        }
+        run_touches(project_settings, "\"apiKeyHelper\"");
+    }
 }
 
 static void grandchild(const struct cfg *cfg) {
@@ -423,7 +495,8 @@ int main(int argc, char **argv) {
     drain_stdin();
     if (strcmp(cfg.mode, "argv") == 0) {
         if (!env_is("DISABLE_AUTOUPDATER", "1") || !env_is("DISABLE_UPDATES", "1") ||
-            !env_is("PATH", "/usr/bin:/bin")) {
+            !env_is("PATH", "/usr/bin:/bin") || getenv("CLAUDE_CONFIG_DIR") == NULL ||
+            strstr(getenv("CLAUDE_CONFIG_DIR"), "/claude-config") == NULL) {
             touch_path(cfg.executed);
             return 2;
         }

@@ -1,13 +1,17 @@
 //! Claude Pro through the official Claude Code CLI.
 //!
 //! The supported version is pinned. Tools are disabled. The prompt is stdin.
+//! The child gets `HOME={claude_home}` and a dedicated
+//! `CLAUDE_CONFIG_DIR={claude_home}/claude-config`, and runs with `--restricted`,
+//! `--safe-mode`, `--setting-sources project,local` and `disableAllHooks`, so no
+//! settings-file hook or `apiKeyHelper` command runs.
 //! `--dangerously-skip-permissions` is never passed, and `claude setup-token`
 //! output is never read. Stream events other than `rate_limit_event` and
 //! `result` are dropped and the raw stream is never logged.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -42,6 +46,29 @@ pub const SETTING_SOURCES: &str = "project,local";
 /// CLI reference: `--settings` accepts inline JSON and overrides file settings for the session.
 /// The hooks guide uses this to set `disableAllHooks`.
 pub const DISABLE_HOOKS_SETTINGS: &str = r#"{"disableAllHooks":true}"#;
+/// Dedicated `CLAUDE_CONFIG_DIR` under `claude_home`. The child never reads `~/.claude`,
+/// the operator's config dir, or an inherited `CLAUDE_CONFIG_DIR`. Log in once with the
+/// same value so the credentials land here (deploy/ubuntu/README.md).
+pub const CLAUDE_CONFIG_DIR_NAME: &str = "claude-config";
+/// Flags that must be on every completion argv. `complete` fails closed if one is missing.
+///
+/// Checked offline against 2.1.285 under `unshare -rn` (no network), with a planted
+/// SessionStart/UserPromptSubmit hook and an `apiKeyHelper` command in the config dir and
+/// in the cwd's `.claude/settings.json`:
+/// - no flags: every hook and the project `apiKeyHelper` ran.
+/// - `--setting-sources project,local` alone: the project hooks still ran.
+/// - `--settings '{"disableAllHooks":true}'`: no hook ran, but the project `apiKeyHelper` ran.
+/// - `--safe-mode`: no hook ran, but the project `apiKeyHelper` ran.
+/// - `--restricted`: nothing ran. It ignores user, project and local settings files.
+///
+/// The full set below ran nothing and was accepted together.
+pub const REQUIRED_ISOLATION_ARGS: &[&str] = &[
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--no-session-persistence",
+    "--safe-mode",
+    "--restricted",
+];
 
 const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -59,6 +86,9 @@ pub enum RateStatus {
     Allowed,
     Warning,
     Rejected,
+    /// A `rate_limit_event` whose status could not be read. Treated like `Rejected`
+    /// for scheduling: the job pauses and nothing is assumed to be allowed.
+    Unknown,
 }
 
 impl RateStatus {
@@ -67,6 +97,7 @@ impl RateStatus {
             Self::Allowed => "allowed",
             Self::Warning => "warning",
             Self::Rejected => "rejected",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -111,6 +142,7 @@ impl ClaudeCli {
     ) -> Result<Self, ProviderError> {
         let bin = resolve_executable(bin)?;
         let claude_home = require_claude_home(claude_home)?;
+        require_config_dir(&claude_home)?;
         warn_install_owner(&bin);
         let identity = file_identity(&bin)?;
         let (memfd, sha256) = snapshot_memfd(&bin)?;
@@ -154,6 +186,8 @@ impl ClaudeCli {
         };
         let args = claude_command_args(self.model.as_deref(), &prompt_file);
         refuse_forbidden_args(&args)?;
+        require_isolation_args(&args)?;
+        require_config_dir(&self.claude_home)?;
         let stdout = run_cli(
             &exec_path(&self.memfd),
             &args,
@@ -212,6 +246,8 @@ pub fn claude_command_args(model: Option<&str>, system_prompt_file: &Path) -> Ve
         "1".to_string(),
         "--disable-slash-commands".to_string(),
         "--no-session-persistence".to_string(),
+        "--safe-mode".to_string(),
+        "--restricted".to_string(),
         "--setting-sources".to_string(),
         SETTING_SOURCES.to_string(),
         "--settings".to_string(),
@@ -234,6 +270,10 @@ pub fn child_env_from(claude_home: &Path, vars: &[(&str, &str)]) -> Vec<(String,
         .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
         .collect();
     out.push(("HOME".to_string(), claude_home.display().to_string()));
+    out.push((
+        "CLAUDE_CONFIG_DIR".to_string(),
+        claude_config_dir(claude_home).display().to_string(),
+    ));
     out.push(("PATH".to_string(), CLAUDE_CHILD_PATH.to_string()));
     out.push(("DISABLE_AUTOUPDATER".to_string(), "1".to_string()));
     out.push(("DISABLE_UPDATES".to_string(), "1".to_string()));
@@ -254,6 +294,77 @@ fn child_env(claude_home: &Path) -> Vec<(String, String)> {
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     child_env_from(claude_home, &borrowed)
+}
+
+pub fn claude_config_dir(claude_home: &Path) -> PathBuf {
+    claude_home.join(CLAUDE_CONFIG_DIR_NAME)
+}
+
+/// Creates `{claude_home}/claude-config` mode 0700, or accepts an existing one only when it
+/// is a real directory (not a symlink) owned by this process and mode 0700.
+fn require_config_dir(claude_home: &Path) -> Result<PathBuf, ProviderError> {
+    let dir = claude_config_dir(claude_home);
+    match fs::symlink_metadata(&dir) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .map_err(|err| {
+                    ProviderError::Failed(format!(
+                        "could not create the claude config dir ({})",
+                        err.kind()
+                    ))
+                })?;
+            set_mode(&dir, 0o700)?;
+        }
+        Err(err) => {
+            return Err(ProviderError::Failed(format!(
+                "claude config dir could not be read ({})",
+                err.kind()
+            )));
+        }
+        Ok(meta) => {
+            if !meta.file_type().is_dir() {
+                return Err(ProviderError::Failed(
+                    "refusing the claude config dir because it is not a directory".into(),
+                ));
+            }
+            let euid = unsafe { libc::geteuid() };
+            if meta.uid() != euid {
+                return Err(ProviderError::Failed(
+                    "refusing the claude config dir because it is not owned by this process".into(),
+                ));
+            }
+            if meta.mode() & 0o777 != 0o700 {
+                return Err(ProviderError::Failed(
+                    "refusing the claude config dir because it is not mode 0700".into(),
+                ));
+            }
+        }
+    }
+    Ok(dir)
+}
+
+fn require_isolation_args(args: &[String]) -> Result<(), ProviderError> {
+    let has_pair = |flag: &str, value: &str| {
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    };
+    let ok = REQUIRED_ISOLATION_ARGS
+        .iter()
+        .all(|flag| args.iter().any(|arg| arg == flag))
+        && has_pair("--setting-sources", SETTING_SOURCES)
+        && has_pair("--settings", DISABLE_HOOKS_SETTINGS)
+        && has_pair("--mcp-config", EMPTY_MCP_CONFIG)
+        && has_pair("--disallowedTools", DISALLOWED_TOOLS)
+        && has_pair("--tools", "");
+    if ok {
+        Ok(())
+    } else {
+        Err(ProviderError::Failed(
+            "refusing a claude argv without the isolation flags".into(),
+        ))
+    }
 }
 
 fn refuse_forbidden_args(args: &[String]) -> Result<(), ProviderError> {
@@ -904,11 +1015,8 @@ pub fn interpret_stream(stream: &str, model: Option<&str>) -> Result<Completion,
     let parsed = parse_stream(stream)?;
     if let Some(rate) = &parsed.rate {
         log_provider(&rate_log_line(rate));
-        if rate.status == RateStatus::Rejected {
-            return Err(ProviderError::LimitReached(LimitReached {
-                message: "claude-cli usage limit reached".into(),
-                resets_at: rate.resets_at,
-            }));
+        if let Some(limit) = pause_for(rate) {
+            return Err(ProviderError::LimitReached(limit));
         }
     }
     let (quota, note) = match &parsed.rate {
@@ -953,46 +1061,58 @@ pub fn interpret_stream(stream: &str, model: Option<&str>) -> Result<Completion,
 fn parse_stream(stream: &str) -> Result<ParsedStream, ProviderError> {
     let mut rate: Option<RateObservation> = None;
     let mut result: Option<ParsedStream> = None;
+    let mut result_error = false;
     for line in stream.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let Ok(value) = serde_json::from_str::<Value>(line) else {
+            // stream-json escapes model text inside one JSON line, so a line that does
+            // not parse came from the CLI itself. A broken rate event pauses.
+            if line.contains("\"rate_limit_event\"") {
+                rate = Some(prefer_rate(rate, RateObservation::unknown()));
+            }
             continue;
         };
-        let Some(kind) = value.get("type").and_then(|item| item.as_str()) else {
+        if is_rate_event(&value) {
+            rate = Some(prefer_rate(rate, parse_rate_event(&value)));
             continue;
-        };
-        match kind {
-            "rate_limit_event" => {
-                if let Some(observed) = parse_rate_event(&value) {
-                    rate = Some(prefer_rate(rate, observed));
-                }
+        }
+        if value.get("type").and_then(|item| item.as_str()) != Some("result") {
+            continue;
+        }
+        if value.get("is_error").and_then(Value::as_bool) == Some(true) {
+            // The text of an error result (for example a logout notice) is
+            // never used as a draft and never logged.
+            result_error = true;
+            result = None;
+            continue;
+        }
+        if result_error {
+            continue;
+        }
+        if let Some(text) = value.get("result").and_then(|item| item.as_str()) {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                continue;
             }
-            "result" => {
-                if let Some(text) = value.get("result").and_then(|item| item.as_str()) {
-                    let text = text.trim().to_string();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    result = Some(ParsedStream {
-                        text,
-                        input_tokens: value["usage"]["input_tokens"].as_u64(),
-                        output_tokens: value["usage"]["output_tokens"].as_u64(),
-                        rate: None,
-                    });
-                }
-            }
-            _ => {}
+            result = Some(ParsedStream {
+                text,
+                input_tokens: value["usage"]["input_tokens"].as_u64(),
+                output_tokens: value["usage"]["output_tokens"].as_u64(),
+                rate: None,
+            });
         }
     }
     let Some(mut parsed) = result else {
-        if let Some(rate) = rate.filter(|rate| rate.status == RateStatus::Rejected) {
-            return Err(ProviderError::LimitReached(LimitReached {
-                message: "claude-cli usage limit reached".into(),
-                resets_at: rate.resets_at,
-            }));
+        if let Some(limit) = rate.as_ref().and_then(pause_for) {
+            return Err(ProviderError::LimitReached(limit));
+        }
+        if result_error {
+            return Err(ProviderError::Failed(
+                "claude-cli result reported an error".into(),
+            ));
         }
         return Err(ProviderError::Failed(
             "claude-cli returned no result".into(),
@@ -1013,45 +1133,130 @@ fn severity(status: RateStatus) -> u8 {
     match status {
         RateStatus::Allowed => 0,
         RateStatus::Warning => 1,
-        RateStatus::Rejected => 2,
+        RateStatus::Unknown => 2,
+        RateStatus::Rejected => 3,
     }
 }
 
-/// Reads `type`, `status`, `resetsAt`, and `utilization`. Envelope fields such as
-/// `session_id` and `uuid`, and any other keys, are ignored. Utilization outside
-/// 0..=1, or a value that is not a finite fraction, drops only the percentage.
-/// The status is kept. Re-validate this against a stream captured from Claude
-/// Code 2.1.285 before treating the field set as final.
-fn parse_rate_event(value: &Value) -> Option<RateObservation> {
-    let obj = value.as_object()?;
-    if obj.get("type").and_then(|item| item.as_str()) != Some("rate_limit_event") {
-        return None;
+/// `Rejected` and `Unknown` pause the job. `Allowed` and `Warning` do not.
+fn pause_for(rate: &RateObservation) -> Option<LimitReached> {
+    let message = match rate.status {
+        RateStatus::Rejected => "claude-cli usage limit reached",
+        RateStatus::Unknown => "claude-cli rate_limit_event was not understood; pausing",
+        RateStatus::Allowed | RateStatus::Warning => return None,
+    };
+    Some(LimitReached {
+        message: message.into(),
+        resets_at: rate.resets_at,
+    })
+}
+
+impl RateObservation {
+    fn unknown() -> Self {
+        Self {
+            status: RateStatus::Unknown,
+            resets_at: None,
+            utilization_pct: None,
+        }
     }
-    let info = obj.get("rate_limit_info")?.as_object()?;
-    let status = match info.get("status").and_then(|item| item.as_str())? {
-        "allowed" => RateStatus::Allowed,
-        "allowed_warning" | "warning" => RateStatus::Warning,
-        "rejected" => RateStatus::Rejected,
-        _ => return None,
+}
+
+const RATE_INFO_KEYS: &[&str] = &[
+    "rate_limit_info",
+    "rateLimitInfo",
+    "rate_limit",
+    "rateLimit",
+];
+const RESETS_AT_KEYS: &[&str] = &["resetsAt", "resets_at", "resetAt", "reset_at"];
+const UTILIZATION_KEYS: &[&str] = &["utilization", "utilization_fraction"];
+
+/// A top-level `{"type":"rate_limit_event"}`, or a `system` event whose subtype names a
+/// rate limit. Only the CLI emits these as separate stream lines.
+fn is_rate_event(value: &Value) -> bool {
+    let kind = value.get("type").and_then(Value::as_str);
+    let subtype = value.get("subtype").and_then(Value::as_str);
+    kind == Some("rate_limit_event")
+        || (kind == Some("system") && matches!(subtype, Some("rate_limit_event" | "rate_limit")))
+}
+
+/// Tolerant read of a rate event. Never fails and never drops the event:
+/// - The info object may be `rate_limit_info`, `rateLimitInfo`, `rate_limit` or `rateLimit`,
+///   or the fields may sit on the event itself. Unknown and extra keys are ignored.
+/// - `status` is matched case-insensitively. A missing, non-string or unrecognized status is
+///   [`RateStatus::Unknown`], which pauses.
+/// - `resetsAt` (or `resets_at`, `resetAt`, `reset_at`) may be an integer, a float or a
+///   numeric string. Anything else, or a value that is not positive, is dropped; the status is
+///   kept.
+/// - `utilization` outside 0..=1, or not a finite number, drops only the percentage.
+///
+/// Re-validate the field set against a stream captured from Claude Code 2.1.285.
+fn parse_rate_event(value: &Value) -> RateObservation {
+    let Some(event) = value.as_object() else {
+        return RateObservation::unknown();
     };
-    let resets_at = match info.get("resetsAt") {
-        None => None,
-        Some(item) => Some(item.as_i64()?),
+    let info = RATE_INFO_KEYS
+        .iter()
+        .find_map(|key| event.get(*key))
+        .and_then(Value::as_object)
+        .unwrap_or(event);
+    let status = match info.get("status").and_then(Value::as_str) {
+        Some(text) => rate_status(text),
+        None => RateStatus::Unknown,
     };
-    let utilization_pct = match info.get("utilization") {
-        None => None,
-        Some(item) => match item.as_f64() {
-            Some(fraction) if fraction.is_finite() && (0.0..=1.0).contains(&fraction) => {
-                Some(fraction * 100.0)
-            }
-            Some(_) | None => None,
-        },
-    };
-    Some(RateObservation {
+    let resets_at = RESETS_AT_KEYS
+        .iter()
+        .find_map(|key| info.get(*key))
+        .and_then(number_i64)
+        .filter(|value| *value > 0);
+    let utilization_pct = UTILIZATION_KEYS
+        .iter()
+        .find_map(|key| info.get(*key))
+        .and_then(number_f64)
+        .filter(|fraction| fraction.is_finite() && (0.0..=1.0).contains(fraction))
+        .map(|fraction| fraction * 100.0);
+    RateObservation {
         status,
         resets_at,
         utilization_pct,
-    })
+    }
+}
+
+fn rate_status(text: &str) -> RateStatus {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "allowed" | "ok" => RateStatus::Allowed,
+        "allowed_warning" | "warning" | "warn" => RateStatus::Warning,
+        "rejected" | "limited" | "blocked" | "exceeded" | "denied" => RateStatus::Rejected,
+        _ => RateStatus::Unknown,
+    }
+}
+
+fn number_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|float| float.is_finite() && float.abs() < 9.0e15)
+                .map(|float| float as i64)
+        }),
+        Value::String(text) => {
+            let text = text.trim();
+            text.parse::<i64>().ok().or_else(|| {
+                text.parse::<f64>()
+                    .ok()
+                    .filter(|float| float.is_finite() && float.abs() < 9.0e15)
+                    .map(|float| float as i64)
+            })
+        }
+        _ => None,
+    }
+}
+
+fn number_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
 }
 
 /// Hex SHA-256 of the native Claude ELF. One digest is accepted. A second digest
@@ -1192,6 +1397,8 @@ mod tests {
                 "1".to_string(),
                 "--disable-slash-commands".to_string(),
                 "--no-session-persistence".to_string(),
+                "--safe-mode".to_string(),
+                "--restricted".to_string(),
                 "--setting-sources".to_string(),
                 "project,local".to_string(),
                 "--settings".to_string(),
@@ -1236,6 +1443,13 @@ mod tests {
             Some("/var/lib/dasdevbot")
         );
         assert_eq!(env.iter().filter(|(key, _)| key == "HOME").count(), 1);
+        assert_eq!(
+            env.iter()
+                .filter(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                .map(|(_, value)| value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/var/lib/dasdevbot/claude-config"]
+        );
         assert!(env
             .iter()
             .any(|(key, value)| key == "DISABLE_AUTOUPDATER" && value == "1"));
@@ -1249,9 +1463,63 @@ mod tests {
                     | "CLAUDE_CODE_OAUTH_TOKEN"
                     | "ANTHROPIC_API_KEY"
                     | "DASDEVBOT_TOKEN"
-                    | "CLAUDE_CONFIG_DIR"
             )
         }));
+        assert!(env.iter().all(|(_, value)| value != "/home/dev/.claude"));
+    }
+
+    #[test]
+    fn an_argv_missing_any_isolation_flag_is_refused() {
+        let full = claude_command_args(None, Path::new("system-prompt.txt"));
+        assert!(require_isolation_args(&full).is_ok());
+        for drop in REQUIRED_ISOLATION_ARGS {
+            let args: Vec<String> = full.iter().filter(|arg| arg != drop).cloned().collect();
+            assert!(require_isolation_args(&args).is_err(), "missing {drop}");
+        }
+        for (flag, value) in [
+            ("--setting-sources", SETTING_SOURCES),
+            ("--settings", DISABLE_HOOKS_SETTINGS),
+            ("--mcp-config", EMPTY_MCP_CONFIG),
+            ("--disallowedTools", DISALLOWED_TOOLS),
+        ] {
+            let mut args = full.clone();
+            let at = args.iter().position(|arg| arg == flag).unwrap();
+            args[at + 1] = format!("{value}x");
+            assert!(require_isolation_args(&args).is_err(), "changed {flag}");
+            let mut args = full.clone();
+            args.remove(at + 1);
+            args.remove(at);
+            assert!(require_isolation_args(&args).is_err(), "missing {flag}");
+        }
+        let mut sources = full.clone();
+        let at = sources
+            .iter()
+            .position(|arg| arg == "--setting-sources")
+            .unwrap();
+        sources[at + 1] = "user,project,local".into();
+        assert!(require_isolation_args(&sources).is_err());
+    }
+
+    #[test]
+    fn the_config_dir_is_created_private_and_a_symlink_is_refused() {
+        let dir =
+            std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
+        let home = dir.join("claude-home");
+        private_home(&home);
+        let made = require_config_dir(&home).unwrap();
+        assert_eq!(made, home.join(CLAUDE_CONFIG_DIR_NAME));
+        assert_eq!(fs::metadata(&made).unwrap().mode() & 0o777, 0o700);
+        let mut perms = fs::metadata(&made).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&made, perms).unwrap();
+        assert!(require_config_dir(&home).is_err());
+        fs::remove_dir(&made).unwrap();
+        let elsewhere = dir.join("operator-dot-claude");
+        private_home(&elsewhere);
+        std::os::unix::fs::symlink(&elsewhere, &made).unwrap();
+        let err = require_config_dir(&home).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1394,9 +1662,8 @@ mod tests {
     }
 
     #[test]
-    fn lax_rate_events_and_result_text_do_not_invent_a_limit() {
+    fn result_text_alone_does_not_invent_a_limit() {
         let stream = r#"
-{"type":"rate_limit_event","rate_limit_info":{"status":"nope","mystery":1}}
 {"type":"result","result":"usage limit reached and not logged in","usage":{"input_tokens":1,"output_tokens":1}}
 "#;
         start_log();
@@ -1406,6 +1673,129 @@ mod tests {
         assert!(completion.note.contains("no rate_limit_event"));
         assert!(logs.iter().all(|line| !line.contains("usage limit")));
         assert!(logs.iter().all(|line| !line.contains("not logged in")));
+    }
+
+    fn expect_pause(stream: &str) -> LimitReached {
+        match interpret_stream(stream, None) {
+            Err(ProviderError::LimitReached(limit)) => limit,
+            Ok(completion) => panic!("rate event passed silently: {}", completion.text),
+            Err(other) => panic!("expected a pause, got {other}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_rate_event_pauses_instead_of_passing() {
+        let result = r#"{"type":"result","result":"PROMPT_ECHO","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let events = [
+            // Unknown status, extra fields.
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"nope","mystery":1}}"#,
+            // Status missing.
+            r#"{"type":"rate_limit_event","rate_limit_info":{"resetsAt":1700000000}}"#,
+            // Status is not a string.
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":3}}"#,
+            // No info object and no status on the event.
+            r#"{"type":"rate_limit_event"}"#,
+            // Info is not an object.
+            r#"{"type":"rate_limit_event","rate_limit_info":"rejected"}"#,
+            // A truncated line from the CLI.
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allo"#,
+        ];
+        for event in events {
+            start_log();
+            let limit = expect_pause(&format!("{event}\n{result}\n"));
+            let logs = take_log();
+            assert!(limit.message.contains("not understood"), "{event}");
+            assert!(!limit.to_string().contains("PROMPT_ECHO"));
+            assert!(logs.iter().all(|line| !line.contains("PROMPT_ECHO")));
+            assert!(
+                logs.iter().any(|line| line.contains("status=unknown")),
+                "{event}: {logs:?}"
+            );
+            // Without a result line it still pauses, not "no result".
+            let limit = expect_pause(&format!("{event}\n"));
+            assert!(limit.message.contains("not understood"), "{event}");
+        }
+    }
+
+    #[test]
+    fn a_later_allowed_event_does_not_clear_an_unknown_or_rejected_one() {
+        let result =
+            r#"{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let unknown = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"?"}}"#;
+        let rejected = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1700000000}}"#;
+        let allowed = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
+        let limit = expect_pause(&format!("{unknown}\n{allowed}\n{result}\n"));
+        assert!(limit.message.contains("not understood"));
+        let limit = expect_pause(&format!("{rejected}\n{unknown}\n{allowed}\n{result}\n"));
+        assert_eq!(limit.message, "claude-cli usage limit reached");
+        assert_eq!(limit.resets_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn alternate_rate_event_shapes_are_read() {
+        let result =
+            r#"{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let rejected = [
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"REJECTED","resets_at":"1700000000"}}"#,
+            r#"{"type":"rate_limit_event","rateLimitInfo":{"status":"rejected","resetAt":1700000000.0}}"#,
+            r#"{"type":"rate_limit_event","rate_limit":{"status":" Rejected ","reset_at":1700000000}}"#,
+            r#"{"type":"rate_limit_event","status":"rejected","resetsAt":1700000000,"rateLimitType":"five_hour"}"#,
+            r#"{"type":"system","subtype":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1700000000}}"#,
+        ];
+        for event in rejected {
+            let limit = expect_pause(&format!("{event}\n{result}\n"));
+            assert_eq!(limit.message, "claude-cli usage limit reached", "{event}");
+            assert_eq!(limit.resets_at, Some(1_700_000_000), "{event}");
+        }
+        let warning = r#"{"type":"rate_limit_event","rateLimitInfo":{"status":"allowed_warning","utilization":"0.25","isUsingOverage":false,"overageStatus":"rejected"}}"#;
+        start_log();
+        let completion = interpret_stream(&format!("{warning}\n{result}\n"), None).unwrap();
+        let logs = take_log();
+        assert_eq!(completion.text, "ok");
+        assert!(logs
+            .iter()
+            .any(|line| line.contains("status=warning") && line.contains("utilization_pct=25")));
+    }
+
+    #[test]
+    fn bad_reset_and_utilization_values_drop_only_that_field() {
+        let result =
+            r#"{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        for reset in [r#""soon""#, "-5", "0", "null", "{}", "[1]", "1e300", "true"] {
+            let event = format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":{reset},"utilization":"high"}}}}"#
+            );
+            let limit = expect_pause(&format!("{event}\n{result}\n"));
+            assert_eq!(limit.message, "claude-cli usage limit reached", "{reset}");
+            assert_eq!(limit.resets_at, None, "{reset}");
+        }
+        let allowed = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":"x","utilization":-0.1}}"#;
+        let completion = interpret_stream(&format!("{allowed}\n{result}\n"), None).unwrap();
+        assert_eq!(completion.text, "ok");
+    }
+
+    #[test]
+    fn an_error_result_is_not_a_draft() {
+        let stream = r#"
+{"type":"system","subtype":"init","apiKeySource":"none"}
+{"type":"result","subtype":"success","is_error":true,"result":"Not logged in SENTINEL_ERROR_TEXT","usage":{"input_tokens":0,"output_tokens":0}}
+"#;
+        start_log();
+        let err = interpret_stream(stream, None).unwrap_err();
+        let logs = take_log();
+        assert!(
+            matches!(err, ProviderError::Failed(ref message) if message == "claude-cli result reported an error"),
+            "{err}"
+        );
+        assert!(logs
+            .iter()
+            .all(|line| !line.contains("SENTINEL_ERROR_TEXT")));
+        let ok_after_error = format!(
+            "{}\n{}\n",
+            r#"{"type":"result","is_error":true,"result":"x"}"#,
+            r#"{"type":"result","is_error":false,"result":"ok"}"#
+        );
+        assert!(interpret_stream(&ok_after_error, None).is_err());
     }
 
     #[test]
@@ -1888,43 +2278,111 @@ mod tests {
         assert!(!shell_is_nologin_or_false("/bin/sh"));
     }
 
+    fn plant_settings(dir: &Path, markers: &Path, tag: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let helper = markers.join(format!("{tag}-api-key-helper"));
+        let hook = markers.join(format!("{tag}-hook"));
+        fs::write(
+            dir.join("settings.json"),
+            format!(
+                r#"{{"apiKeyHelper":"touch {}","hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"touch {}"}}]}}]}}}}"#,
+                helper.display(),
+                hook.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn fired(markers: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(markers)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Plants a hook and an `apiKeyHelper` command in every settings file the fixture
+    /// models: the operator's `~/.claude`, `claude_home/.claude` (the CLI's default for
+    /// `HOME`), the dedicated `claude_home/claude-config`, and a project root above the
+    /// per-call cwd. The fixture runs them with no isolation, and none run through
+    /// `ClaudeCli`.
     #[test]
     fn a_hostile_home_hook_does_not_write_a_marker() {
         let dir =
             std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
-        let marker = dir.join("hook-fired");
-        let hostile = dir.join("hostile-home");
-        fs::create_dir_all(hostile.join(".claude")).unwrap();
-        fs::write(
-            hostile.join(".claude/settings.json"),
-            format!(
-                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"touch {}"}}]}}]}}}}"#,
-                marker.display()
-            ),
-        )
-        .unwrap();
+        let markers = dir.join("markers");
+        fs::create_dir(&markers).unwrap();
+        let operator = dir.join("operator-home");
+        plant_settings(&operator.join(".claude"), &markers, "operator");
+        let home = dir.join("claude-home");
+        private_home(&home);
+        plant_settings(&home.join(".claude"), &markers, "home-dot-claude");
+        let config = home.join(CLAUDE_CONFIG_DIR_NAME);
+        private_home(&config);
+        plant_settings(&config, &markers, "config-dir");
+        let project = home.join("claude-cwd");
+        private_home(&project);
+        fs::create_dir(project.join(".git")).unwrap();
+        plant_settings(&project.join(".claude"), &markers, "project");
+
         let home_record = dir.join("child-home");
         let bin = write_cli(
             &dir,
             &format!("mode=hostile\nhome_record={}\n", home_record.display()),
         );
-        let fired = Command::new(&bin)
+        // Control 1: the operator's own environment, no flags.
+        let status = Command::new(&bin)
+            .current_dir(&project)
             .env_clear()
-            .env("HOME", &hostile)
+            .env("HOME", &operator)
             .env("PATH", "/usr/bin:/bin")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .unwrap();
-        assert!(fired.success());
-        assert!(
-            marker.exists(),
-            "the fixture did not honor the hostile hook"
+        assert!(status.success());
+        assert_eq!(
+            fired(&markers),
+            vec![
+                "operator-api-key-helper",
+                "operator-hook",
+                "project-api-key-helper",
+                "project-hook"
+            ]
         );
-        fs::remove_file(&marker).unwrap();
-        let cli = open_at(&dir, bin);
+        for name in fired(&markers) {
+            fs::remove_file(markers.join(name)).unwrap();
+        }
+        // Control 2: the child env without the isolation flags still reads the dedicated
+        // config dir and the project, so the flags are what stop them.
+        let mut control = Command::new(&bin);
+        control
+            .current_dir(&project)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for (key, value) in child_env_from(&home, &[]) {
+            control.env(key, value);
+        }
+        assert!(control.status().unwrap().success());
+        assert_eq!(
+            fired(&markers),
+            vec![
+                "config-dir-api-key-helper",
+                "config-dir-hook",
+                "project-api-key-helper",
+                "project-hook"
+            ]
+        );
+        for name in fired(&markers) {
+            fs::remove_file(markers.join(name)).unwrap();
+        }
+
+        let cli = ClaudeCli::open(bin, None, home.clone(), &[]).unwrap();
         let completion = cli
             .complete(
                 &CompletionRequest {
@@ -1937,16 +2395,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(completion.text, "ok");
-        assert!(!marker.exists(), "hostile hook wrote {}", marker.display());
+        assert_eq!(fired(&markers), Vec::<String>::new());
         let recorded = fs::read_to_string(&home_record).unwrap();
+        let canonical = fs::canonicalize(&home).unwrap();
+        let mut lines = recorded.lines();
+        assert_eq!(lines.next(), Some(canonical.display().to_string().as_str()));
         assert_eq!(
-            recorded.trim(),
-            fs::canonicalize(dir.join("claude-home"))
-                .unwrap()
-                .display()
-                .to_string()
+            lines.next(),
+            Some(
+                canonical
+                    .join(CLAUDE_CONFIG_DIR_NAME)
+                    .display()
+                    .to_string()
+                    .as_str()
+            )
         );
-        assert_ne!(recorded.trim(), hostile.display().to_string());
+        assert!(!recorded.contains(&operator.display().to_string()));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1965,28 +2429,29 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Local only. Runs the real CLI against a planted hostile home and a separate
-    /// `claude_home`. CI must not hold a Claude login. A missing login can fail the
-    /// completion; the marker must still be absent.
+    /// Local only. Runs the real CLI with a hook and an `apiKeyHelper` planted in
+    /// `claude_home/.claude`, the dedicated `claude_home/claude-config`, and a project root
+    /// above the per-call cwd. CI must not hold a Claude login. A missing login fails the
+    /// completion; no marker may appear either way. Run it without network access, for
+    /// example under `unshare -rn`, so it cannot make a real call.
     #[test]
     #[ignore = "local-only: requires the pinned Claude Code CLI and must not use the operator home"]
     fn local_claude_does_not_run_a_hostile_home_hook() {
         let dir =
             std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
-        let marker = dir.join("hook-fired");
-        let hostile = dir.join("hostile-home");
-        fs::create_dir_all(hostile.join(".claude")).unwrap();
-        fs::write(
-            hostile.join(".claude/settings.json"),
-            format!(
-                r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"touch {}"}}]}}]}}}}"#,
-                marker.display()
-            ),
-        )
-        .unwrap();
+        let markers = dir.join("markers");
+        fs::create_dir(&markers).unwrap();
         let home = dir.join("claude-home");
         private_home(&home);
+        plant_settings(&home.join(".claude"), &markers, "home-dot-claude");
+        let config = home.join(CLAUDE_CONFIG_DIR_NAME);
+        private_home(&config);
+        plant_settings(&config, &markers, "config-dir");
+        let project = home.join("claude-cwd");
+        private_home(&project);
+        fs::create_dir(project.join(".git")).unwrap();
+        plant_settings(&project.join(".claude"), &markers, "project");
         let cli = ClaudeCli::open(PathBuf::from("claude"), None, home, &[]).unwrap();
         let _ = cli.complete(
             &CompletionRequest {
@@ -1997,7 +2462,7 @@ mod tests {
             },
             &mut no_charge,
         );
-        assert!(!marker.exists(), "hostile hook wrote {}", marker.display());
+        assert_eq!(fired(&markers), Vec::<String>::new());
         let _ = fs::remove_dir_all(&dir);
     }
 }

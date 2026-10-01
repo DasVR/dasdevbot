@@ -37,10 +37,11 @@ sha256sum /usr/local/bin/claude
 
 ## One-time Claude login
 
-Log in once as the service user. This writes the login under `/var/lib/dasdevbot`, which is the only home the CLI is given.
+Log in once as the service user, with the same `CLAUDE_CONFIG_DIR` the daemon gives the CLI. This writes the login under `/var/lib/dasdevbot/claude-config`, which is the only config dir the CLI is given.
 
 ```sh
-sudo -u dasdevbot -H claude
+sudo -u dasdevbot -H install -d -m 0700 /var/lib/dasdevbot/claude-config
+sudo -u dasdevbot -H env CLAUDE_CONFIG_DIR=/var/lib/dasdevbot/claude-config claude
 ```
 
 Do not copy `~/.claude` from a personal account into that home.
@@ -48,6 +49,16 @@ Do not copy `~/.claude` from a personal account into that home.
 ## Daemon
 
 `dasdevbotd.service` runs as `dasdevbot` and passes `--claude-home /var/lib/dasdevbot`. The process sets the CLI's `HOME` to that path. It does not pass the operator's `HOME`. Each call uses a mode-0700 directory under `/var/lib/dasdevbot/claude-cwd` and writes the system prompt outside that directory.
+
+The child also gets `CLAUDE_CONFIG_DIR=/var/lib/dasdevbot/claude-config`. An inherited `CLAUDE_CONFIG_DIR` is never passed through. The daemon creates that directory mode 0700 if it is missing, and refuses it if it is a symlink, is not owned by the daemon uid, or is not mode 0700.
+
+Every call passes `--restricted`, `--safe-mode`, `--setting-sources project,local` and `--settings '{"disableAllHooks":true}'`, and the daemon refuses to run an argv that lacks any of them. With Claude Code 2.1.285, run offline under `unshare -rn` with a hook and an `apiKeyHelper` command planted in the config dir and in the cwd's `.claude/settings.json`:
+
+- `--setting-sources project,local` alone still ran the project hooks.
+- `disableAllHooks` and `--safe-mode` each stopped the hooks but not the project `apiKeyHelper`.
+- `--restricted` stopped both. It ignores user, project and local settings files.
+
+Managed settings (`/etc/claude-code/managed-settings.json`) still apply. They are root-owned.
 
 `--setting-sources` stays `project,local`. The Claude Code CLI documents that flag as a comma-separated list of `user`, `project`, and `local` only. There is no empty or `none` value, and an empty string was reported broken from CLI 2.1.59 onward. The pin is 2.1.285, so `user` is omitted and `project,local` remains. The private cwd keeps project and local files from being read out of `/tmp`.
 
