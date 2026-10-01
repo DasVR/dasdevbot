@@ -24,6 +24,8 @@ struct cfg {
     char home_record[4096];
     char found[4096];
     char leak[4096];
+    char init[64];
+    char linger[8];
 };
 
 static void set_key(struct cfg *cfg, const char *key, const char *value) {
@@ -65,6 +67,12 @@ static void set_key(struct cfg *cfg, const char *key, const char *value) {
     } else if (strcmp(key, "leak") == 0) {
         dest = cfg->leak;
         cap = sizeof cfg->leak;
+    } else if (strcmp(key, "init") == 0) {
+        dest = cfg->init;
+        cap = sizeof cfg->init;
+    } else if (strcmp(key, "linger") == 0) {
+        dest = cfg->linger;
+        cap = sizeof cfg->linger;
     }
     if (dest == NULL || cap == 0) {
         return;
@@ -469,6 +477,57 @@ static void grandchild(const struct cfg *cfg) {
     }
 }
 
+/*
+ * Prints the system/init line the way 2.1.285 did offline: permissionMode is the
+ * --permission-mode value, or "auto" without one, and "default" instead of "auto" when
+ * --settings sets disableAutoMode. The init= key overrides it: none, auto, wrong, tools,
+ * mcp, or late (a result line before init). linger=1 then sleeps so a test can check
+ * that the daemon killed the process; pidfile= records this pid.
+ */
+static void print_init(const struct cfg *cfg, int argc, char **argv) {
+    const char *mode = flag_value(argc, argv, "--permission-mode");
+    const char *settings = flag_value(argc, argv, "--settings");
+    if (mode == NULL || mode[0] == 0) {
+        mode = "auto";
+    }
+    if (strcmp(mode, "auto") == 0 && settings != NULL && strstr(settings, "disableAutoMode") != NULL) {
+        mode = "default";
+    }
+    const char *tools = "[]";
+    const char *mcp = "[]";
+    if (strcmp(cfg->init, "auto") == 0) {
+        mode = "auto";
+    } else if (strcmp(cfg->init, "wrong") == 0) {
+        mode = "acceptEdits";
+    } else if (strcmp(cfg->init, "tools") == 0) {
+        tools = "[\"Bash\"]";
+    } else if (strcmp(cfg->init, "mcp") == 0) {
+        mcp = "[{\"name\":\"planted\",\"status\":\"connected\"}]";
+    }
+    if (cfg->pidfile[0] != 0 && strcmp(cfg->mode, "grandchild") != 0) {
+        FILE *file = fopen(cfg->pidfile, "w");
+        if (file != NULL) {
+            fprintf(file, "%d\n", (int)getpid());
+            fclose(file);
+        }
+    }
+    puts("{\"type\":\"system\",\"subtype\":\"hook_started\",\"hook_event\":\"SessionStart\"}");
+    if (strcmp(cfg->init, "late") == 0) {
+        puts("{\"type\":\"result\",\"result\":\"early\",\"usage\":{\"input_tokens\":1,"
+             "\"output_tokens\":1}}");
+    }
+    if (strcmp(cfg->init, "none") != 0) {
+        printf("{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/x\",\"tools\":%s,"
+               "\"mcp_servers\":%s,\"permissionMode\":\"%s\",\"apiKeySource\":\"none\","
+               "\"claude_code_version\":\"2.1.285\"}\n",
+               tools, mcp, mode);
+    }
+    fflush(stdout);
+    if (strcmp(cfg->linger, "1") == 0) {
+        sleep(30);
+    }
+}
+
 static void print_ok(void) {
     puts("{\"type\":\"result\",\"result\":\"ok\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}");
 }
@@ -493,6 +552,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     drain_stdin();
+    print_init(&cfg, argc, argv);
     if (strcmp(cfg.mode, "argv") == 0) {
         if (!env_is("DISABLE_AUTOUPDATER", "1") || !env_is("DISABLE_UPDATES", "1") ||
             !env_is("PATH", "/usr/bin:/bin") || getenv("CLAUDE_CONFIG_DIR") == NULL ||
@@ -534,6 +594,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(cfg.mode, "ok") == 0) {
         print_ok();
+        return 0;
+    }
+    if (strcmp(cfg.mode, "silent") == 0) {
         return 0;
     }
     fprintf(stderr, "fake claude unknown mode\n");

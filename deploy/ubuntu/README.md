@@ -52,7 +52,7 @@ Do not copy `~/.claude` from a personal account into that home.
 
 The child also gets `CLAUDE_CONFIG_DIR=/var/lib/dasdevbot/claude-config`. An inherited `CLAUDE_CONFIG_DIR` is never passed through. The daemon creates that directory mode 0700 if it is missing, and refuses it if it is a symlink, is not owned by the daemon uid, or is not mode 0700.
 
-Every call passes `--restricted`, `--safe-mode`, `--setting-sources project,local` and `--settings '{"disableAllHooks":true}'`, and the daemon refuses to run an argv that lacks any of them. With Claude Code 2.1.285, run offline under `unshare -rn` with a hook and an `apiKeyHelper` command planted in the config dir and in the cwd's `.claude/settings.json`:
+Every call passes `--restricted`, `--safe-mode`, `--permission-mode dontAsk`, `--setting-sources project,local` and `--settings '{"disableAllHooks":true,"permissions":{"disableAutoMode":"disable"}}'`, and the daemon refuses to run an argv that lacks any of them or that sets another permission mode. The daemon also reads the stream's `system/init` line and kills the CLI unless it reports `permissionMode` `dontAsk` with empty `tools` and `mcp_servers`. A stream with no init line before its first non-system event is refused too. Offline, 2.1.285 reported `auto` with no `--permission-mode`, `default` once `disableAutoMode` was set, and `dontAsk` with the pinned flag. With Claude Code 2.1.285, run offline under `unshare -rn` with a hook and an `apiKeyHelper` command planted in the config dir and in the cwd's `.claude/settings.json`:
 
 - `--setting-sources project,local` alone still ran the project hooks.
 - `disableAllHooks` and `--safe-mode` each stopped the hooks but not the project `apiKeyHelper`.
