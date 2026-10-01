@@ -44,8 +44,17 @@ pub const SYSTEM_PROMPT_NAME: &str = "system-prompt.txt";
 /// files are not loaded from `/tmp` or from the operator's home.
 pub const SETTING_SOURCES: &str = "project,local";
 /// CLI reference: `--settings` accepts inline JSON and overrides file settings for the session.
-/// The hooks guide uses this to set `disableAllHooks`.
-pub const DISABLE_HOOKS_SETTINGS: &str = r#"{"disableAllHooks":true}"#;
+/// The hooks guide uses this to set `disableAllHooks`. `permissions.disableAutoMode` turns
+/// off the `auto` permission mode: offline under `unshare -rn`, 2.1.285 reported
+/// `permissionMode: "auto"` in `system/init` with no `--permission-mode`, and `default`
+/// once this setting was present, even with `--permission-mode auto`.
+pub const DISABLE_HOOKS_SETTINGS: &str =
+    r#"{"disableAllHooks":true,"permissions":{"disableAutoMode":"disable"}}"#;
+/// Permission mode pinned on every call and required in the stream's `system/init` line.
+/// 2.1.285 lists `dontAsk` among the `--permission-mode` choices (`claude --help`), and an
+/// offline run reported `permissionMode: "dontAsk"` in `system/init`. `dontAsk` denies any
+/// tool that is not pre-approved instead of prompting; nothing is pre-approved here.
+pub const PERMISSION_MODE: &str = "dontAsk";
 /// Dedicated `CLAUDE_CONFIG_DIR` under `claude_home`. The child never reads `~/.claude`,
 /// the operator's config dir, or an inherited `CLAUDE_CONFIG_DIR`. Log in once with the
 /// same value so the credentials land here (deploy/ubuntu/README.md).
@@ -248,6 +257,8 @@ pub fn claude_command_args(model: Option<&str>, system_prompt_file: &Path) -> Ve
         "--no-session-persistence".to_string(),
         "--safe-mode".to_string(),
         "--restricted".to_string(),
+        "--permission-mode".to_string(),
+        PERMISSION_MODE.to_string(),
         "--setting-sources".to_string(),
         SETTING_SOURCES.to_string(),
         "--settings".to_string(),
@@ -357,7 +368,8 @@ fn require_isolation_args(args: &[String]) -> Result<(), ProviderError> {
         && has_pair("--settings", DISABLE_HOOKS_SETTINGS)
         && has_pair("--mcp-config", EMPTY_MCP_CONFIG)
         && has_pair("--disallowedTools", DISALLOWED_TOOLS)
-        && has_pair("--tools", "");
+        && has_pair("--tools", "")
+        && permission_mode_is_pinned(args);
     if ok {
         Ok(())
     } else {
@@ -365,6 +377,47 @@ fn require_isolation_args(args: &[String]) -> Result<(), ProviderError> {
             "refusing a claude argv without the isolation flags".into(),
         ))
     }
+}
+
+/// Exactly one `--permission-mode`, followed by [`PERMISSION_MODE`]. The `=` form and any
+/// other value are refused.
+fn permission_mode_is_pinned(args: &[String]) -> bool {
+    if args.iter().any(|arg| arg.starts_with("--permission-mode=")) {
+        return false;
+    }
+    let at: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, arg)| *arg == "--permission-mode")
+        .map(|(index, _)| index)
+        .collect();
+    at.len() == 1 && args.get(at[0] + 1).map(String::as_str) == Some(PERMISSION_MODE)
+}
+
+/// Checks the stream's `{"type":"system","subtype":"init"}` line: the reported
+/// `permissionMode` must be [`PERMISSION_MODE`], and `tools` and `mcp_servers` must be
+/// present and empty arrays. Returns the name of the first field that fails.
+fn init_refusal(init: &Value) -> Option<&'static str> {
+    if init.get("permissionMode").and_then(Value::as_str) != Some(PERMISSION_MODE) {
+        return Some("permissionMode");
+    }
+    let empty = |key: &str| {
+        init.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.is_empty())
+    };
+    if !empty("tools") {
+        return Some("tools");
+    }
+    if !empty("mcp_servers") {
+        return Some("mcp_servers");
+    }
+    None
+}
+
+fn is_init_line(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("system")
+        && value.get("subtype").and_then(Value::as_str) == Some("init")
 }
 
 fn refuse_forbidden_args(args: &[String]) -> Result<(), ProviderError> {
@@ -888,6 +941,7 @@ fn read_stdout_lines(
     let started = Instant::now();
     let limit = Duration::from_secs(120);
     let mut collected = String::new();
+    let mut init_seen = false;
     loop {
         match rx.recv_timeout(Duration::from_millis(20)) {
             Ok(Ok(line)) => {
@@ -898,6 +952,28 @@ fn read_stdout_lines(
                         cli_version: CLAUDE_CLI_VERSION.into(),
                         event: event.into(),
                     });
+                }
+                if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                    if is_init_line(&value) {
+                        if let Some(field) = init_refusal(&value) {
+                            log_provider(&format!("claude-cli init refused field={field}"));
+                            kill_group(child);
+                            return Err(ProviderError::Failed(format!(
+                                "claude-cli init refused: {field} does not match the pinned session"
+                            )));
+                        }
+                        init_seen = true;
+                    } else if !init_seen
+                        && value.get("type").and_then(Value::as_str) != Some("system")
+                    {
+                        // Hook and other system events may precede init. Anything else
+                        // before init means the session was not checked.
+                        log_provider("claude-cli init refused field=missing");
+                        kill_group(child);
+                        return Err(ProviderError::Failed(
+                            "claude-cli stream had no system/init line before its events".into(),
+                        ));
+                    }
                 }
                 collected.push_str(&line);
                 collected.push('\n');
@@ -916,6 +992,12 @@ fn read_stdout_lines(
                 }
             }
             Err(RecvTimeoutError::Disconnected) => match wait_for_exit(child) {
+                Ok(Some(_)) if !init_seen => {
+                    log_provider("claude-cli init refused field=missing");
+                    return Err(ProviderError::Failed(
+                        "claude-cli stream had no system/init line".into(),
+                    ));
+                }
                 Ok(Some(_)) => return Ok(collected),
                 Ok(None) => {
                     kill_group(child);
@@ -1415,10 +1497,13 @@ mod tests {
                 "--no-session-persistence".to_string(),
                 "--safe-mode".to_string(),
                 "--restricted".to_string(),
+                "--permission-mode".to_string(),
+                "dontAsk".to_string(),
                 "--setting-sources".to_string(),
                 "project,local".to_string(),
                 "--settings".to_string(),
-                r#"{"disableAllHooks":true}"#.to_string(),
+                r#"{"disableAllHooks":true,"permissions":{"disableAutoMode":"disable"}}"#
+                    .to_string(),
                 "--system-prompt-file".to_string(),
                 prompt.display().to_string(),
                 "--model".to_string(),
@@ -1514,6 +1599,164 @@ mod tests {
             .unwrap();
         sources[at + 1] = "user,project,local".into();
         assert!(require_isolation_args(&sources).is_err());
+    }
+
+    #[test]
+    fn the_permission_mode_is_pinned_to_dont_ask() {
+        let full = claude_command_args(None, Path::new("system-prompt.txt"));
+        let at = full
+            .iter()
+            .position(|arg| arg == "--permission-mode")
+            .unwrap();
+        assert_eq!(full[at + 1], PERMISSION_MODE);
+        assert_eq!(PERMISSION_MODE, "dontAsk");
+        for other in [
+            "default",
+            "auto",
+            "acceptEdits",
+            "plan",
+            "manual",
+            "bypassPermissions",
+            "",
+        ] {
+            let mut args = full.clone();
+            args[at + 1] = other.into();
+            assert!(require_isolation_args(&args).is_err(), "accepted {other:?}");
+        }
+        let mut missing = full.clone();
+        missing.drain(at..at + 2);
+        assert!(require_isolation_args(&missing).is_err());
+        let mut twice = full.clone();
+        twice.extend(["--permission-mode".to_string(), "auto".to_string()]);
+        assert!(require_isolation_args(&twice).is_err());
+        let mut repeated = full.clone();
+        repeated.extend(["--permission-mode".to_string(), PERMISSION_MODE.to_string()]);
+        assert!(require_isolation_args(&repeated).is_err());
+        let mut equals = full.clone();
+        equals.push("--permission-mode=dontAsk".into());
+        assert!(require_isolation_args(&equals).is_err());
+        assert!(DISABLE_HOOKS_SETTINGS.contains(r#""disableAutoMode":"disable""#));
+        let settings: Value = serde_json::from_str(DISABLE_HOOKS_SETTINGS).unwrap();
+        assert_eq!(settings["disableAllHooks"], true);
+        assert_eq!(settings["permissions"]["disableAutoMode"], "disable");
+    }
+
+    fn init_case(
+        init: &str,
+        mode: &str,
+        linger: bool,
+    ) -> (ProviderError, Vec<String>, Duration, Option<i32>) {
+        let dir =
+            std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let pidfile = dir.join("pid");
+        let linger = if linger { "1" } else { "0" };
+        let bin = write_cli(
+            &dir,
+            &format!(
+                "mode={mode}\ninit={init}\nlinger={linger}\npidfile={}\n",
+                pidfile.display()
+            ),
+        );
+        let cli = open_at(&dir, bin);
+        start_log();
+        let started = Instant::now();
+        let err = cli
+            .complete(
+                &sample_request("Reply with the single word ok."),
+                &mut no_charge,
+            )
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        let logs = take_log();
+        let pid = fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok());
+        let _ = fs::remove_dir_all(&dir);
+        (err, logs, elapsed, pid)
+    }
+
+    #[test]
+    fn a_bad_init_line_kills_the_cli_and_refuses_the_call() {
+        for (init, field) in [
+            ("auto", "permissionMode"),
+            ("wrong", "permissionMode"),
+            ("tools", "tools"),
+            ("mcp", "mcp_servers"),
+        ] {
+            let (err, logs, elapsed, pid) = init_case(init, "ok", true);
+            assert!(
+                matches!(err, ProviderError::Failed(ref message)
+                    if message.contains("init refused") && message.contains(field)),
+                "{init}: {err}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(10),
+                "{init}: the lingering CLI was not killed ({elapsed:?})"
+            );
+            let pid = pid.expect("fake claude pid");
+            assert!(!process_alive(pid), "{init}: pid {pid} survived");
+            assert!(
+                logs.iter()
+                    .any(|line| line == &format!("claude-cli init refused field={field}")),
+                "{init}: {logs:?}"
+            );
+            assert!(logs
+                .iter()
+                .all(|line| !line.contains("planted") && !line.contains("Bash")));
+        }
+    }
+
+    #[test]
+    fn a_missing_init_line_refuses_the_call() {
+        // A result arrives with no init before it.
+        let (err, logs, _, _) = init_case("none", "ok", false);
+        assert!(
+            matches!(err, ProviderError::Failed(ref message) if message.contains("no system/init")),
+            "{err}"
+        );
+        assert!(logs
+            .iter()
+            .any(|line| line == "claude-cli init refused field=missing"));
+        // A result before a valid init line.
+        let (err, _, _, _) = init_case("late", "ok", false);
+        assert!(
+            matches!(err, ProviderError::Failed(ref message) if message.contains("no system/init")),
+            "{err}"
+        );
+        // The stream ends with no init at all.
+        let (err, logs, _, _) = init_case("none", "silent", false);
+        assert!(
+            matches!(err, ProviderError::Failed(ref message) if message == "claude-cli stream had no system/init line"),
+            "{err}"
+        );
+        assert!(logs
+            .iter()
+            .any(|line| line == "claude-cli init refused field=missing"));
+    }
+
+    #[test]
+    fn the_pinned_init_line_passes() {
+        let dir =
+            std::env::temp_dir().join(format!("dasdevbot-claude-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let bin = write_cli(&dir, "mode=ok\n");
+        // Without the pin the fixture reports auto, the way 2.1.285 does.
+        let out = Command::new(&bin)
+            .args(["-p"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains(r#""permissionMode":"auto""#));
+        let cli = open_at(&dir, bin);
+        let completion = cli
+            .complete(
+                &sample_request("Reply with the single word ok."),
+                &mut no_charge,
+            )
+            .unwrap();
+        assert_eq!(completion.text, "ok");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
