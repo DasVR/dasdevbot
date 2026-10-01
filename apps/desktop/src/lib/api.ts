@@ -270,10 +270,6 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return target.closest(".composer") !== null;
 }
 
-type TauriInternals = {
-  invoke?: (cmd: string) => Promise<unknown>;
-};
-
 function shellToken(): string {
   const shell = globalThis as typeof globalThis & { __DASDEVBOT_TOKEN?: unknown };
   const value = shell.__DASDEVBOT_TOKEN;
@@ -324,7 +320,25 @@ async function jsonHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
+/** The Tauri window this page runs in, or null in a plain browser. */
+export function tauriWindowLabel(): string | null {
+  const host = globalThis as typeof globalThis & {
+    __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
+  };
+  return host.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? null;
+}
+
+/** Show the card window. Only the card window can sign or undo a decision. */
+export async function openCardWindow(): Promise<void> {
+  await tauriInvoke()("open_card_window");
+}
+
 export async function getSnapshot(): Promise<Snapshot> {
+  // A bundled webview is on the Tauri origin and the daemon sends no CORS
+  // headers, so the shell reads the snapshot over loopback for it.
+  if (tauriInternals()) {
+    return (await tauriInvoke()("daemon_snapshot")) as Snapshot;
+  }
   const response = await fetch("/v1/snapshot");
   if (!response.ok) {
     throw new Error(await readError(response));
@@ -334,12 +348,16 @@ export async function getSnapshot(): Promise<Snapshot> {
 
 /** Demo `repo.push`. `forced` asks for a destructive force-push instead of a PR comment. */
 export async function emitPush(forced = false): Promise<void> {
+  if (tauriInternals()) {
+    await tauriInvoke()("daemon_emit_demo", { forced });
+    return;
+  }
   const response = await fetch("/v1/events", {
     method: "POST",
     headers: await jsonHeaders(),
     body: JSON.stringify({
       source: "demo",
-      kind: "repo.push",
+      kind: forced ? "repo.force_push" : "repo.push",
       payload: {
         repo: "DasVR/NIL",
         ref: "phase0",
@@ -356,10 +374,10 @@ export async function emitPush(forced = false): Promise<void> {
 }
 
 type TauriInternals = {
-  invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+  invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 };
 
-function tauriInvoke(): TauriInternals["invoke"] {
+function tauriInvoke(): NonNullable<TauriInternals["invoke"]> {
   const internals = (globalThis as { __TAURI_INTERNALS__?: TauriInternals }).__TAURI_INTERNALS__;
   if (!internals?.invoke) {
     throw new Error("approval decisions are Tauri IPC only");

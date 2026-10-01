@@ -5,7 +5,9 @@
   "identifier": "net.dasdev.dasdevbot",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://127.0.0.1:5173"
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "security": {
@@ -16,15 +18,25 @@
       {
         "label": "main",
         "title": "dasdevbot",
-        "width": 1120,
-        "height": 760
+        "width": 1360,
+        "height": 828,
+        "minWidth": 400,
+        "minHeight": 52,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": true,
+        "center": true,
+        "dragDropEnabled": false
       },
       {
         "label": "card",
         "title": "dasdevbot card",
-        "width": 480,
-        "height": 640,
-        "visible": false
+        "width": 560,
+        "height": 760,
+        "visible": false,
+        "resizable": false,
+        "center": true
       },
       {
         "label": "settings",
@@ -43,10 +55,36 @@
     ]
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": false,
+    "publisher": "DasVR",
+    "shortDescription": "dasdevbot desktop demo (unsigned)",
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "signCommand": null,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "languages": [
+          "English"
+        ],
+        "customLanguageFiles": {
+          "English": "nsis/English.nsh"
+        },
+        "installerHooks": "nsis/hooks.nsh",
+        "compression": "lzma"
+      }
+    }
   }
 }

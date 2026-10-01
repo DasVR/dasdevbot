@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-daemon-snapshot"
+description = "Read the daemon snapshot over loopback from the shell."
+commands.allow = ["daemon_snapshot"]

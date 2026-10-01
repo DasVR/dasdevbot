@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-daemon-emit-demo"
+description = "Send the demo repo.push or repo.force_push event from the shell."
+commands.allow = ["daemon_emit_demo"]

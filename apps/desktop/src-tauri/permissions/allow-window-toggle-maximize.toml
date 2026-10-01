@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-window-toggle-maximize"
+description = "Maximize or restore the calling window."
+commands.allow = ["window_toggle_maximize"]
