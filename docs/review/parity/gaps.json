@@ -1,0 +1,317 @@
+{
+  "generated": "2026-09-30",
+  "heads": {
+    "main": { "sha": "d68f331", "branch": "main" },
+    "21": { "sha": "ed88596", "branch": "cursor/ink-press-fill-783d" },
+    "22": { "sha": "e3171e4", "branch": "cursor/thread-prototype-port-2b74" },
+    "24": { "sha": "931ee96", "branch": "cursor/desktop-shell-morph-0ea2" },
+    "26": { "sha": "41254ae", "branch": "cursor/approval-queue-d2b4" },
+    "27": { "sha": "f201368", "branch": "cursor/first-run-flow-611c" }
+  },
+  "method": "Mocks served from the uploaded look pack. Each open UI head served by Vite. Chrome, deviceScaleFactor 2, America/New_York, Figtree and JetBrains Mono loaded (document.fonts.check). Viewports 1280×800 and 1440×900. Mock clock is window.__cap.step. Shell clock is window.__shellCap.step. App card rise used Playwright's clock at 16.667ms; that clock repeated CSS animation samples, so durations for the rise are taken from source and from the mock frames, not from the stalled app curve.",
+  "counts": { "P0": 2, "P1": 13, "P2": 10 },
+  "countsByPr": {
+    "main": { "P0": 2, "P1": 6, "P2": 3 },
+    "21": { "P0": 2, "P1": 3, "P2": 2 },
+    "22": { "P0": 1, "P1": 5, "P2": 3 },
+    "24": { "P0": 2, "P1": 3, "P2": 3 },
+    "26": { "P0": 0, "P1": 5, "P2": 3 },
+    "27": { "P0": 2, "P1": 2, "P2": 1 }
+  },
+  "scores": [
+    { "surface": "approval card chrome, main vs 2a", "viewport": "1280x800", "matched": 123, "total": 133, "note": "Page x/y and content height excluded. Pen stroke 2.33 vs 1.75 is a waived CD ruling, still counted as a raw miss." },
+    { "surface": "approval card chrome, #21 vs 2a", "viewport": "1280x800", "matched": 123, "total": 133, "note": "Same chrome misses as main. #21 adds --ink-press, which this resting sample does not include." },
+    { "surface": "approval card chrome, #26 vs 2a", "viewport": "1280x800", "matched": 123, "total": 133, "note": "Same resting chrome as main." },
+    { "surface": "thread composer, #22 shot=composer vs thread.html", "viewport": "1280x800", "matched": 92, "total": 108, "note": "Glass matches on the lit shot. The approval shot's composer is paper until hover." },
+    { "surface": "shell full window, #24 vs 4a", "viewport": "1440x900", "matched": 100, "total": 108, "note": "Window box matched 30/30. Composer element is transparent; the visible mat is paper." },
+    { "surface": "shell full window, #24 vs 4a", "viewport": "1280x800", "matched": 42, "total": 54, "note": "App scales the 1440 stage. Mock keeps 1440-stage pixels." },
+    { "surface": "first-run GitHub step, #27 vs 7c", "viewport": "1280x800", "matched": 101, "total": 108, "note": "Title, count, and 48px slot match on type. Primary button shadow does not." }
+  ],
+  "unimplemented": [
+    { "mock": "mocks/1a-voice-talk.html", "surface": "Push-to-talk mic lane", "note": "No voice surface in any head. Phase 1 brief also lists voice as out of scope. 1b is waived separately." },
+    { "mock": "mocks/5a-notify-review.html", "surface": "OS notification whose only action is Review", "note": "#26 has an in-app toast with a Review button. No OS notification." },
+    { "mock": "mocks/3a-modes.html", "surface": "Welcome-back review sheet when returning from Away", "note": "#24 draws Here / Focus / Away. It does not run the return sheet." },
+    { "mock": "mocks/6a-live.html", "surface": "Dynamic Island and macOS menu flyout", "note": "Waived for Windows-only Phase 1. The tray numeral on #26 is the remaining live surface and was not frame-matched." },
+    { "mock": "interactions.html", "surface": "Roster drag, the only spring", "note": "No teammate drag. Shell morph uses ease-out, not --spring-soft." }
+  ],
+  "waived": [
+    { "rule": "C6 voice never approves. 1b is not a build target. The reply is \"Approve on screen.\"", "cite": "DASDEVBOT-LOOK.md:325" },
+    { "rule": "C1 destructive is denied. 1c still plays a 1200ms voice hold. That is the mock's bug. #22 and #26 show the flat ink row.", "cite": "DASDEVBOT-LOOK.md:326" },
+    { "rule": "Reduced motion has no transforms. 2a under ?rm still translates on hover and scales the button to 0.97, 0.955. The app rise is a 160ms fade and the press transform is none.", "cite": "DASDEVBOT-LOOK.md:320" },
+    { "rule": "The receipt is 60px. The mock row is min-height 58px. The filed article on main measured 60px.", "cite": "mocks/2a-approval-hold.html:193" },
+    { "rule": "The stamp is HH:MM:SS EDT. The filed mock stamp was \"4:31:08 PM\". The app stamp was \"11:14:07 EDT\".", "cite": "DASDEVBOT-LOOK.md:127" },
+    { "rule": "Pens are 1.75. The mock approve stroke computed at 2.33px. The app pen is 1.75px. Line icons on the app are 1.5.", "cite": "DASDEVBOT-LOOK.md:58" },
+    { "rule": "The mascot is Curl. 7a is a character study that includes Curl. The other characters are not a build target.", "cite": "SCREENS.md:197" },
+    { "rule": "Windows only. The island and the menu bar in 6a are out. The tray stays.", "cite": "SCREENS.md:172" },
+    { "rule": "During the 6s undo the card stays glass. A glass card in that window is the ruling, not a miss against a paper mock frame.", "cite": "DASDEVBOT-LOOK.md:321" },
+    { "rule": "The queue is oldest-first and does not auto-advance. #26 rendered Reviewer 11:14, then the expiring row in place (\"expires 1:30\"), then Builder 11:52. The header count was 3.", "cite": "SCREENS.md:160" }
+  ],
+  "needsCdRuling": [
+    {
+      "id": "CD1",
+      "topic": "Approve resting fill",
+      "mock": "mocks/2a-approval-hold.html:283 clips the ink overlay with inset(0px 100% 0px 0px), so the resting button is paper and the ink is the 600ms hold.",
+      "spec": "DASDEVBOT-LOOK.md:116 says Approve draft is filled ink.",
+      "standing": "The founder rule says the mock wins, so G03 is filed as a gap. The written spec disagrees."
+    },
+    {
+      "id": "CD2",
+      "topic": "Token streaming",
+      "mock": "thread.html streams the reply token by token.",
+      "spec": "INTERACTIONS.md:143 says teammate messages arrive whole, with no typewriter.",
+      "standing": "#22 follows the prototype and streams. Not scored as a gap until CD picks one."
+    }
+  ],
+  "gaps": [
+    {
+      "id": "G01",
+      "severity": "P0",
+      "surface": "destructive approval",
+      "owning": "main (also #21, #24, #27)",
+      "mock": { "file": "DASDEVBOT-LOOK.md", "line": 326, "value": "Flat ink row, dash, no dot: \"Destructive actions are off in this build.\"" },
+      "app": { "file": "apps/desktop/src/lib/api.ts", "line": 133, "value": "effectWhy(destructive) returns \"overwrites history. Can't be undone once it runs\" and the card renders it. holdDurationMs uses 1200ms at api.ts:194." },
+      "delta": "main shows a clay Destructive card. #22 (model.ts:35) and #26 (App.svelte:787) show the flat row and no glass card.",
+      "fix": "On every head, render the flat dash row and never mount a destructive card or a 1200ms hold."
+    },
+    {
+      "id": "G02",
+      "severity": "P0",
+      "surface": "external approve",
+      "owning": "main (also #21, #22, #24, #27)",
+      "mock": { "file": "DASDEVBOT-LOOK.md", "line": 327, "value": "Seen lock, then the 600ms hold, then Windows Hello, then the 6s undo." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 796, "value": "The card commits from the hold. There is no Hello step." },
+      "delta": "An external approve can finish without Hello. #26 opens a confirm step (G14) but the other heads do not.",
+      "fix": "After the 600ms hold, call Windows Hello before the undo window. Cancelling returns the glass card with no error."
+    },
+    {
+      "id": "G03",
+      "severity": "P1",
+      "surface": "Approve button",
+      "owning": "main (also #21, #22, #26)",
+      "mock": { "file": "mocks/2a-approval-hold.html", "line": 283, "value": "clip-path: inset(0px 100% 0px 0px) on .btn.approve > .ink. Resting background measured rgb(251, 249, 245)." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 1225, "value": "background: var(--ink-1). Resting background measured rgb(43, 39, 35), text rgb(251, 249, 245)." },
+      "delta": "The mock's ink arrives across the hold. The app is solid ink before the hold starts.",
+      "fix": "Start the approve control as the paper line button and reveal the ink clip over --dur-hold."
+    },
+    {
+      "id": "G04",
+      "severity": "P1",
+      "surface": "Approve button label",
+      "owning": "main (also #22, #24, #26, #27)",
+      "mock": { "file": "DASDEVBOT-LOOK.md", "line": 125, "value": "The .face-done label is deleted. The check is the confirmation." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 783, "value": "span.face-done reads \"Approved\"." },
+      "delta": "The label is still in the button. #21 removed it.",
+      "fix": "Delete .face-done on every head that still has it."
+    },
+    {
+      "id": "G05",
+      "severity": "P1",
+      "surface": "ink press",
+      "owning": "main (also #22, #24, #26, #27)",
+      "mock": { "file": "tokens.css", "line": 19, "value": "--ink-press: #1E1B18" },
+      "app": { "file": "apps/desktop/src/lib/styles/tokens.css", "line": 18, "value": "The token is absent. Computed --ink-press is empty. Reduced-motion press stays rgb(43, 39, 35)." },
+      "delta": "Reduced-motion press does not darken. #21 defines the token and the reduced-motion press measured rgb(30, 27, 24).",
+      "fix": "Land --ink-press from #21 and use it for every ink-button press, instant under reduced motion."
+    },
+    {
+      "id": "G06",
+      "severity": "P1",
+      "surface": "card quiet line",
+      "owning": "main (also #21, #22, #26)",
+      "mock": { "file": "DASDEVBOT-LOOK.md", "line": 338, "value": "\"Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.\"" },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 796, "value": "\"Records your decision. Nothing is posted in this demo.\"" },
+      "delta": "The armed mock quiet line is the hold hint (\"hold approve · hold deny\"). The app keeps the demo sentence.",
+      "fix": "Replace the demo sentence with the Phase 1 small print, and show the key hint once the seen lock arms."
+    },
+    {
+      "id": "G07",
+      "severity": "P1",
+      "surface": "shell composer",
+      "owning": "#24",
+      "mock": { "file": "mocks/4a-shell-morph.html", "line": 1, "value": "Full and companion composer measured rgba(248, 243, 234, 0.78) with blur(24px) saturate(1.5)." },
+      "app": { "file": "apps/desktop/src/lib/shell/motion.ts", "line": 318, "value": "matPaper opacity is 1 unless the form is pill. matGlass opacity is 0. Companion mat.glass measured opacity 0." },
+      "delta": "Glass is only the pill. Full and companion composers are paper.",
+      "fix": "Keep the composer glass in full and companion. Paper is the settled receipt material, not the composer."
+    },
+    {
+      "id": "G08",
+      "severity": "P1",
+      "surface": "thread composer",
+      "owning": "#22",
+      "mock": { "file": "thread.html", "line": 1, "value": "Resting composer is 720×60, radius 32px, glass fill and blur(24px). Measured on ?capture before play." },
+      "app": { "file": "apps/desktop/src/lib/thread/ComposerBar.svelte", "line": 18, "value": "glass is lit || hovered || focused. Resting background is var(--paper-raised) at line 92." },
+      "delta": "The approval shot's composer measured paper and blur none. The lit shot matches the mock.",
+      "fix": "Make the composer glass at rest. Hover only moves the sheen."
+    },
+    {
+      "id": "G09",
+      "severity": "P1",
+      "surface": "composer field",
+      "owning": "#22",
+      "mock": { "file": "thread.html", "line": 1, "value": "textarea font-family Figtree, 14px / 21px." },
+      "app": { "file": "apps/desktop/src/app.css", "line": 88, "value": "button, input { font-family: inherit }. textarea is not reset, and ComposerBar.svelte:268 does not set a family. Computed family was monospace." },
+      "delta": "The message field is the UA monospace face.",
+      "fix": "Set the textarea to var(--font-ui), 14px / 21px."
+    },
+    {
+      "id": "G10",
+      "severity": "P1",
+      "surface": "filed receipt",
+      "owning": "main",
+      "mock": { "file": "mocks/2a-approval-hold.html", "line": 193, "value": "width 520px, radius 14px, paper. Measured 520×58." },
+      "app": { "file": "apps/desktop/src/App.svelte", "line": 780, "value": "width: min(520px, 100%) applies only to .slot.over. The filed article measured 674×60, radius 14px, paper." },
+      "delta": "The filed row stretches to the stream column. Height 60 matches the CD ruling. #22's receipt measured 520×60.",
+      "fix": "Keep the filed receipt at 520px in the thread slot."
+    },
+    {
+      "id": "G11",
+      "severity": "P1",
+      "surface": "waiting card placement",
+      "owning": "main",
+      "mock": { "file": "mocks/2a-approval-hold.html", "line": 117, "value": "The card is a 520px glass layer in the thread. Measured at x=308, y=156." },
+      "app": { "file": "apps/desktop/src/App.svelte", "line": 766, "value": ".slot.over is position: fixed; bottom: 16px." },
+      "delta": "The waiting card floats on the bottom edge instead of sitting in the thread under its tool row.",
+      "fix": "Use the #22 thread slot. Drop the fixed overlay."
+    },
+    {
+      "id": "G12",
+      "severity": "P1",
+      "surface": "shell at 1280×800",
+      "owning": "#24",
+      "mock": { "file": "mocks/4a-shell-morph.html", "line": 1, "value": "Window stays 1360×828, radius 14px, at x=40, y=52." },
+      "app": { "file": "apps/desktop/src/lib/shell/geometry.ts", "line": 110, "value": "stageScale is min(width/1440, height/900). At 1280×800 the window measured 1208.88×736, radius 12.44px." },
+      "delta": "At 1440×900 the window matched 30/30 properties. At 1280 the app scales and the mock does not.",
+      "fix": "At 1440 the stage is already right. Decide the 1280 behavior with CD; until then the mock pixels are the bar."
+    },
+    {
+      "id": "G13",
+      "severity": "P1",
+      "surface": "first-run primary",
+      "owning": "#27",
+      "mock": { "file": "mocks/7c-first-run.html", "line": 1, "value": "Connect GitHub measured with a 1px ink border and the ink contact shadow." },
+      "app": { "file": "apps/desktop/src/lib/FirstRun.svelte", "line": 522, "value": "button.primary measured border 0 and box-shadow none. Width 136.56 vs 138.56." },
+      "delta": "The ink button is a flat fill. Title, \"2 of 4\", and the 48px slot matched.",
+      "fix": "Use the same ink button shadow and 1.5px edge as Approve."
+    },
+    {
+      "id": "G14",
+      "severity": "P1",
+      "surface": "Windows Hello",
+      "owning": "#26",
+      "mock": { "file": "DASDEVBOT-LOOK.md", "line": 327, "value": "Hello is OS chrome and is never restyled." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 862, "value": "In-app Cancel and Confirm buttons. devWindowsHello.confirm resolves true." },
+      "delta": "The line \"Confirm with Windows Hello\" is right. The auth control is a styled pair of text buttons.",
+      "fix": "Call the OS prompt from the seam. Do not draw Confirm."
+    },
+    {
+      "id": "G15",
+      "severity": "P1",
+      "surface": "card padding",
+      "owning": "main (also #21, #22, #26)",
+      "mock": { "file": "mocks/2a-approval-hold.html", "line": 117, "value": "padding: var(--s-2) var(--s-2) 16px. Quiet margin-top 10px at line 176." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 875, "value": "padding: var(--s-2) var(--s-2) var(--s-5), so 8px 8px 20px. Quiet margin measured 12px." },
+      "delta": "Bottom padding is 4px heavy. The quiet line sits 2px lower.",
+      "fix": "Use 16px bottom padding and 10px quiet margin."
+    },
+    {
+      "id": "G16",
+      "severity": "P2",
+      "surface": "card shadow",
+      "owning": "main",
+      "mock": { "file": "mocks/2a-approval-hold.html", "line": 117, "value": "Element shadow is glass-edge. The float shadow is a separate .lift layer." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 874, "value": "box-shadow: var(--glass-edge), var(--shadow-float) on the card." },
+      "delta": "The float shadow is painted on the glass box, so the edge reads heavier.",
+      "fix": "Keep glass-edge on the card and put --shadow-float on the lift layer."
+    },
+    {
+      "id": "G17",
+      "severity": "P2",
+      "surface": "button contact shadow",
+      "owning": "main",
+      "mock": { "file": "mocks/2a-approval-hold.html", "line": 140, "value": "Deny shadow uses rgb(var(--shade) / .10) and / .18." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 1244, "value": "Measured shadow alphas 0.06 and 0.16 (--shadow-puff) instead of 0.10 and 0.18." },
+      "delta": "The paper button's contact shadow is lighter than the mock.",
+      "fix": "Match the mock's two-layer button shadow."
+    },
+    {
+      "id": "G18",
+      "severity": "P2",
+      "surface": "send disc",
+      "owning": "#22",
+      "mock": { "file": "thread.html", "line": 1, "value": "Send measured radius 50%, font-size 14px, stroke 1.7px." },
+      "app": { "file": "apps/desktop/src/lib/thread/ComposerBar.svelte", "line": 76, "value": "Measured radius 999px, font-size 13.333px, stroke 1.6px." },
+      "delta": "The disc is a pixel smaller in type and stroke. 999px and 50% are the same pill.",
+      "fix": "Set the icon to 16px and the stroke to the mock's 1.5 line-icon weight (the 1.7 computed value is the mock's raster)."
+    },
+    {
+      "id": "G19",
+      "severity": "P2",
+      "surface": "composer chip",
+      "owning": "#22",
+      "mock": { "file": "thread.html", "line": 1, "value": "Chip line-height 12.5px, background rgba(237, 231, 221, 0.94)." },
+      "app": { "file": "apps/desktop/src/lib/thread/ComposerBar.svelte", "line": 256, "value": "Measured line-height 21px and background rgb(237, 231, 221)." },
+      "delta": "The chip is a solid paper pill with body line-height.",
+      "fix": "Use the mock's 12.5px line and the 0.94 paper tint."
+    },
+    {
+      "id": "G20",
+      "severity": "P2",
+      "surface": "queue meta",
+      "owning": "#26",
+      "mock": { "file": "mocks/3a-modes.html", "line": 1, "value": "Sheet row measured \"DasVR/NIL #212 · external · 11:14\"." },
+      "app": { "file": "apps/desktop/src/lib/queue.ts", "line": 87, "value": "queueMeta joins repo, ref, risk, and time. Rendered \"DasVR/NIL · 212 · external · 11:14 AM\"." },
+      "delta": "The hash before the PR number is missing. Order and the static expires label are right.",
+      "fix": "Prefix a numeric ref with #."
+    },
+    {
+      "id": "G21",
+      "severity": "P2",
+      "surface": "daily greeting",
+      "owning": "#27",
+      "mock": { "file": "mocks/7b-greeting.html", "line": 1, "value": "Greeting block measured 302.34×57." },
+      "app": { "file": "apps/desktop/src/App.svelte", "line": 239, "value": "[data-greeting] measured 806×59. Copy was \"Evening, Arriq.\" / \"Nothing waiting · 0 done today.\"" },
+      "delta": "Type matches (Figtree 14/21, ink-1). The block is the full pane width.",
+      "fix": "Size the greeting to the mock's line width and keep Curl in the 48px slot."
+    },
+    {
+      "id": "G22",
+      "severity": "P2",
+      "surface": "shell roster",
+      "owning": "#24",
+      "mock": { "file": "mocks/4a-shell-morph.html", "line": 1, "value": "Roster background rgba(237, 231, 221, 0.55), padding-bottom 0." },
+      "app": { "file": "apps/desktop/src/lib/shell/Shell.svelte", "line": 363, "value": "Measured padding-bottom 16px and an oklab tint at the same alpha." },
+      "delta": "The wash is the same color in a different serialization, plus 16px of extra bottom padding.",
+      "fix": "Drop the extra padding. Keep the 0.55 sunken wash."
+    },
+    {
+      "id": "G23",
+      "severity": "P2",
+      "surface": "risk strip",
+      "owning": "main",
+      "mock": { "file": "mocks/2a-approval-hold.html", "line": 130, "value": ".card > .risk { z-index: 1 }. Strip measured 504×36, radius 20px, 12.5px / 620." },
+      "app": { "file": "apps/desktop/src/lib/ApprovalCard.svelte", "line": 667, "value": "z-index computed auto. Size, radius, type, and color matched." },
+      "delta": "The strip can slide under the glass rim.",
+      "fix": "Set z-index 1 on .risk."
+    },
+    {
+      "id": "G24",
+      "severity": "P2",
+      "surface": "first-run slot",
+      "owning": "#27",
+      "mock": { "file": "mocks/7c-first-run.html", "line": 1, "value": ".fr .slot margin-left 28px. The slot is 48×48." },
+      "app": { "file": "apps/desktop/src/lib/FirstRun.svelte", "line": 399, "value": "Slot measured 48×48, margin-left 0. On the helper step at 1440 the slot was x=400, y=120." },
+      "delta": "The box is the right size. It is not inset 28px from the mock's column.",
+      "fix": "Inset the 48px slot to the mock's x within the column, and keep that x on every step."
+    },
+    {
+      "id": "G25",
+      "severity": "P2",
+      "surface": "shell composer padding",
+      "owning": "#24",
+      "mock": { "file": "mocks/4a-shell-morph.html", "line": 1, "value": "Composer padding-left and padding-right 10px." },
+      "app": { "file": "apps/desktop/src/lib/shell/Shell.svelte", "line": 423, "value": "The composer box padding measured 0. The mat fills the box edge to edge." },
+      "delta": "The chip and field are not inset 10px inside the glass.",
+      "fix": "Pad the composer row 0 10px, matching the thread composer."
+    }
+  ]
+}
