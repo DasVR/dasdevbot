@@ -1,0 +1,20 @@
+[package]
+name = "dasdevbot-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "dasdevbot desktop shell. Reads the session bearer from disk and hands it to the webview."
+license = "UNLICENSED"
+publish = false
+
+[workspace]
+
+[lib]
+name = "dasdevbot_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+tauri = { version = "2", features = [] }

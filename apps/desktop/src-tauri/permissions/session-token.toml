@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-session-token"
+description = "Allows the webview to read the session bearer from the shell."
+commands.allow = ["session_token"]

@@ -93,10 +93,14 @@ def rss_scenario() -> dict[str, dict[str, str]]:
             b'{"source":"bench","kind":"repo.push","payload":'
             b'{"repo":"DasVR/NIL","ref":"bench"},"idempotency_key":"bench-push-1"}'
         )
+        token = Path(f"{data}.token").read_text().strip()
         request = urllib.request.Request(
             f"http://127.0.0.1:{port}/v1/events",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {token}",
+            },
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=5) as response:

@@ -10,6 +10,7 @@ data/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.sqlite.token
 .env
 *.log
 .env*

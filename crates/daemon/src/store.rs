@@ -139,11 +139,7 @@ pub struct NewApproval {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
+        crate::ensure_data_gitignore(path)?;
         let conn = Connection::open(path)?;
         Self::from_conn(conn)
     }
@@ -680,6 +676,7 @@ impl Store {
         if decision != "approve" && decision != "deny" {
             return Err(Error::BadRequest("decision must be approve or deny".into()));
         }
+        self.expire_due(wall_ms)?;
         let reason = clean_reason(reason);
         let status = if decision == "approve" {
             "approved"
@@ -1648,5 +1645,24 @@ mod tests {
             .decide_approval(&id, "approve", None, now + APPROVAL_TTL_MS + 1)
             .unwrap_err();
         assert!(err.to_string().contains("expired"));
+    }
+
+    #[test]
+    fn decision_after_expiry_is_rejected_before_a_sweep() {
+        let mut store = memory();
+        let now = 4_000_000;
+        let id = pending_approval(&mut store, now);
+        let err = store
+            .decide_approval(&id, "approve", None, now + APPROVAL_TTL_MS)
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"));
+        assert_eq!(row(&store, &id).status, "expired");
+        assert_eq!(
+            store
+                .job_status(&row(&store, &id).job_id)
+                .unwrap()
+                .as_deref(),
+            Some("done")
+        );
     }
 }
