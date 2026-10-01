@@ -515,7 +515,7 @@
     if (holdKind || helloOpen) {
       return;
     }
-    cardEl?.focus();
+    cardEl?.focus({ preventScroll: true });
     holdSource = "pointer";
     startHold("approve");
     if (holdKind !== "approve") {
