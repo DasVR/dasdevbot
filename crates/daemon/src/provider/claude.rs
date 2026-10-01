@@ -915,7 +915,7 @@ fn read_stdout_lines(
                     return Err(ProviderError::Failed("claude CLI timed out".into()));
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => match child.try_wait() {
+            Err(RecvTimeoutError::Disconnected) => match wait_for_exit(child) {
                 Ok(Some(_)) => return Ok(collected),
                 Ok(None) => {
                     kill_group(child);
@@ -931,6 +931,22 @@ fn read_stdout_lines(
                 }
             },
         }
+    }
+}
+
+/// stdout reaches EOF a moment before the kernel marks the child exited, so a
+/// single `try_wait` right after EOF can race. Give it a short grace period.
+fn wait_for_exit(child: &mut Child) -> std::io::Result<Option<std::process::ExitStatus>> {
+    const GRACE: Duration = Duration::from_secs(2);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if started.elapsed() >= GRACE {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
