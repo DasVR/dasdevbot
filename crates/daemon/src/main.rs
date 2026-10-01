@@ -361,10 +361,11 @@ The default provider is Ollama Cloud at https://ollama.com. Store the key with
 `secret set ollama` (no-echo TTY, or `--stdin` from a pipe). `--dev-env-secrets`
 reads OLLAMA_API_KEY and is refused on the server role. `--model` is optional.
 ollama-local talks only to 127.0.0.1:11434. claude-cli requires --claude-home.
-That directory is the CLI's HOME. `--claude-sha256` is the hex digest of the
-native ELF. `serve` on the server role refuses to start without it. On Ubuntu,
-log in once as the service user with `sudo -u dasdevbot -H claude`. See
-deploy/ubuntu. The mock provider is for tests.
+That directory is the CLI's HOME, and <claude-home>/claude-config is its
+CLAUDE_CONFIG_DIR. `--claude-sha256` is the hex digest of the native ELF.
+`serve` on the server role refuses to start without it. On Ubuntu, log in once
+as the service user with CLAUDE_CONFIG_DIR set to that dir. See deploy/ubuntu.
+The mock provider is for tests.
 
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.
