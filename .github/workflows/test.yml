@@ -4,19 +4,125 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   cargo:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - name: refuse provider credentials
+        run: |
+          for name in OLLAMA_API_KEY ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN; do
+            value="${!name-}"
+            if [ -n "$value" ]; then
+              echo "$name is set; CI must not hold provider credentials" >&2
+              exit 1
+            fi
+          done
       - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  tauri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - name: refuse provider credentials
+        run: |
+          for name in OLLAMA_API_KEY ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN; do
+            value="${!name-}"
+            if [ -n "$value" ]; then
+              echo "$name is set; CI must not hold provider credentials" >&2
+              exit 1
+            fi
+          done
+      - name: install webkit
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: placeholder frontend
+        run: mkdir -p apps/desktop/dist && printf '%s\n' '<!doctype html><title>dasdevbot</title>' > apps/desktop/dist/index.html
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  tauri-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - name: refuse provider credentials
+        shell: pwsh
+        run: |
+          foreach ($name in @('OLLAMA_API_KEY','ANTHROPIC_API_KEY','CLAUDE_API_KEY','CLAUDE_CODE_OAUTH_TOKEN')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if (-not [string]::IsNullOrEmpty($value)) {
+              Write-Error "$name is set; CI must not hold provider credentials"
+              exit 1
+            }
+          }
+      - name: placeholder frontend
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path apps/desktop/dist | Out-Null
+          Set-Content -Path apps/desktop/dist/index.html -Value '<!doctype html><title>dasdevbot</title>'
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  daemon-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          toolchain: 1.98.1
+          components: clippy
+      - name: refuse provider credentials
+        shell: pwsh
+        run: |
+          foreach ($name in @('OLLAMA_API_KEY','ANTHROPIC_API_KEY','CLAUDE_API_KEY','CLAUDE_CODE_OAUTH_TOKEN')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if (-not [string]::IsNullOrEmpty($value)) {
+              Write-Error "$name is set; CI must not hold provider credentials"
+              exit 1
+            }
+          }
+      - run: cargo test -p dasdevbotd
+      - run: cargo clippy -p dasdevbotd --all-targets -- -D warnings
 
   look:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: refuse provider credentials
+        run: |
+          for name in OLLAMA_API_KEY ANTHROPIC_API_KEY CLAUDE_API_KEY CLAUDE_CODE_OAUTH_TOKEN; do
+            value="${!name-}"
+            if [ -n "$value" ]; then
+              echo "$name is set; CI must not hold provider credentials" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - run: bash scripts/check-tokens.sh
