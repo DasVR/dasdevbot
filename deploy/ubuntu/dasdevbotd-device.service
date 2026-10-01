@@ -1,0 +1,32 @@
+# Device daemon. This is a user unit, not a template, so it has no User=
+# line and does not use %i. Install it with:
+#   systemctl --user enable --now dasdevbotd-device.service
+# WantedBy=default.target is the user manager's default target.
+# ProtectHome is omitted. On the user manager it hides the home directory,
+# and ReadWritePaths=%h does not pierce that. StateDirectory=dasdevbot is
+# created under the user state directory. The database path is
+# %S/dasdevbot/device.sqlite, which is that directory.
+
+[Unit]
+Description=dasdevbot device
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dasdevbotd serve --role device --bind 127.0.0.1:8790 --data %S/dasdevbot/device.sqlite
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+UMask=0077
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+StateDirectory=dasdevbot
+
+[Install]
+WantedBy=default.target

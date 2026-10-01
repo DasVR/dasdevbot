@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-undo-decision"
+description = "Undo an approval from the card window."
+commands.allow = ["undo_decision"]

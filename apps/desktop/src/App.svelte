@@ -4,6 +4,7 @@
   import { linear } from "svelte/easing";
   import type { TransitionConfig } from "svelte/transition";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
+  import SecretEntry from "./lib/SecretEntry.svelte";
   import { tokenEase, tokenMs } from "./lib/cssTokens";
   import { QUIET_LINE_PATH } from "./lib/pen";
   import {
@@ -27,6 +28,7 @@
   const REDUCED_FADE_EASE = linear;
 
   let snapshot = $state<Snapshot | null>(null);
+  let settingsOpen = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
   let deciding = $state(false);
@@ -332,7 +334,14 @@
     };
   }
 
+  function syncSettings() {
+    settingsOpen = globalThis.location.hash === "#settings";
+  }
+
   onMount(() => {
+    syncSettings();
+    const onHash = () => syncSettings();
+    globalThis.addEventListener("hashchange", onHash);
     void refresh();
     const clock = setInterval(() => {
       now = Date.now();
@@ -341,6 +350,7 @@
       void refresh();
     }, 1000);
     return () => {
+      globalThis.removeEventListener("hashchange", onHash);
       clearInterval(clock);
       clearInterval(timer);
     };
@@ -473,6 +483,9 @@
       </main>
     </div>
   </div>
+  {#if settingsOpen}
+    <SecretEntry />
+  {/if}
 </div>
 
 <style>

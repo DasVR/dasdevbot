@@ -32,6 +32,8 @@ fn daemon_logs_do_not_contain_the_session_token() {
             web.to_str().expect("utf8 path"),
             "--token",
             TOKEN,
+            "--role",
+            "device",
             "--provider",
             "ollama-local",
         ])

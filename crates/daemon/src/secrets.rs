@@ -10,6 +10,7 @@ use keyring::Entry;
 
 pub const SERVICE: &str = "dasdevbotd";
 pub const OLLAMA_SECRET_NAME: &str = "ollama";
+pub const APPROVAL_KEY_NAME: &str = "approval-key";
 pub const DEV_ENV_WARNING: &str =
     "warning: --dev-env-secrets is on; OLLAMA_API_KEY may be read from the environment";
 pub const DEV_ENV_SERVER_REFUSAL: &str = "refusing --dev-env-secrets on the server role";
@@ -54,6 +55,15 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+}
+
+pub fn last4(secret: &Secret) -> String {
+    let raw = secret.expose();
+    let count = raw.chars().count();
+    if count <= 4 {
+        return "*".repeat(count);
+    }
+    raw.chars().skip(count - 4).collect()
 }
 
 impl fmt::Debug for Secret {
@@ -113,6 +123,7 @@ fn is_missing(err: &keyring::Error) -> bool {
 }
 
 #[cfg(test)]
+#[derive(Default)]
 pub struct MemorySecrets {
     values: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }

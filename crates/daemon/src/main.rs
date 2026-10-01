@@ -1,12 +1,15 @@
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use dasdevbot_core::{authorize_secret_name, kind, parse_role, SecretRoleError};
 use dasdevbotd::{
-    audit_dev_env, open_provider, parse_sha256_list, plan_secret_set, prompt_secret_from_tty,
-    read_piped_secret, serve, session_token_path, url_exposes_bearer, CommandKind, Config, Error,
-    KeyringHandle, ProviderError, ProviderKind, ProviderSettings, SecretHandle, SecretSource,
+    audit_dev_env, audit_key_path, load_role_file, open_provider, parse_sha256_list,
+    plan_secret_set, prompt_secret_from_tty, read_piped_secret, serve, session_token_path,
+    url_exposes_bearer, CommandKind, CompletionRequest, Config, Error, ProviderError, ProviderKind,
+    ProviderSettings, SecretHandle, SecretSource, Store,
 };
 
 fn main() -> ExitCode {
@@ -50,11 +53,13 @@ fn run() -> Result<(), Error> {
     }
 }
 
+#[derive(Debug)]
 struct Flags {
     bind: String,
     data: PathBuf,
     web: Option<PathBuf>,
     role: String,
+    role_set: bool,
     url: String,
     repo: String,
     reference: String,
@@ -72,6 +77,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     let mut web: Option<PathBuf> = None;
     let mut web_set = false;
     let mut role = "server".to_string();
+    let mut role_set = false;
     let mut url = "http://127.0.0.1:8787".to_string();
     let mut repo = "DasVR/NIL".to_string();
     let mut reference = "phase0".to_string();
@@ -94,7 +100,10 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
                 web = Some(PathBuf::from(value()?));
                 web_set = true;
             }
-            "--role" => role = value()?,
+            "--role" => {
+                role = value()?;
+                role_set = true;
+            }
             "--url" => url = value()?,
             "--repo" => repo = value()?,
             "--ref" => reference = value()?,
@@ -121,11 +130,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
             other => return Err(Error::BadRequest(format!("unknown argument {other}"))),
         }
     }
-    if !matches!(role.as_str(), "device" | "server" | "display") {
-        return Err(Error::BadRequest(
-            "role must be device, server, or display".into(),
-        ));
-    }
+    check_role(&role)?;
     if !web_set {
         let default = PathBuf::from("apps/desktop/dist");
         if default.join("index.html").is_file() {
@@ -137,6 +142,7 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
         data,
         web,
         role,
+        role_set,
         url,
         repo,
         reference,
@@ -149,8 +155,31 @@ fn flags(args: Vec<String>) -> Result<Flags, Error> {
     })
 }
 
+fn check_role(role: &str) -> Result<(), Error> {
+    if !matches!(
+        role,
+        "device" | "server" | "display" | "leader" | "worker" | "executor"
+    ) {
+        return Err(Error::BadRequest(
+            "role must be device, server, display, leader, worker, or executor".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// serve takes its role only from --role or the fixed role file. No default.
+fn serve_role(flags: &Flags) -> Result<String, Error> {
+    if flags.role_set {
+        return Ok(flags.role.clone());
+    }
+    let role = load_role_file()?;
+    check_role(&role)?;
+    Ok(role)
+}
+
 fn serve_from(args: Vec<String>) -> Result<(), Error> {
-    let flags = flags(args)?;
+    let mut flags = flags(args)?;
+    flags.role = serve_role(&flags)?;
     ensure_loopback(&flags.bind)?;
     let explicit = explicit_token(flags.token);
     eprintln!(
@@ -198,7 +227,13 @@ fn explicit_token(flag: Option<String>) -> Option<String> {
 fn smoke_model(args: Vec<String>) -> Result<(), Error> {
     let flags = flags(args)?;
     if flags.dev_env_secrets {
-        eprintln!("audit secret.dev_env role={}", flags.role);
+        // Audit before the provider can read OLLAMA_API_KEY.
+        let payload = serde_json::json!({
+            "flag": "--dev-env-secrets",
+            "role": flags.role,
+        })
+        .to_string();
+        append_cli_audit(&flags.data, kind::DEV_ENV, &payload)?;
     }
     let provider = match open_provider(&ProviderSettings {
         kind: flags.provider,
@@ -218,7 +253,7 @@ fn smoke_model(args: Vec<String>) -> Result<(), Error> {
     };
     let started = Instant::now();
     match provider.complete(
-        &dasdevbotd::CompletionRequest {
+        &CompletionRequest {
             model: String::new(),
             system: String::new(),
             user: "Reply with the single word ok.".into(),
@@ -261,8 +296,38 @@ fn secret_command(args: Vec<String>) -> Result<(), Error> {
     }
 }
 
+#[cfg(unix)]
 fn secret_set(args: Vec<String>) -> Result<(), Error> {
-    let plan = plan_secret_set(&args).map_err(|err| Error::BadRequest(err.to_string()))?;
+    secret_set_at(
+        dasdevbotd::configured_data_path(),
+        args,
+        &dasdevbotd::KeyringHandle,
+    )
+}
+
+#[cfg(not(unix))]
+fn secret_set(_args: Vec<String>) -> Result<(), Error> {
+    Err(Error::Forbidden(
+        "on Windows, secrets go in only through the Tauri settings window".into(),
+    ))
+}
+
+/// `fixed` is the daemon database. Only tests pass anything else.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn secret_set_at(fixed: &Path, args: Vec<String>, keys: &dyn SecretHandle) -> Result<(), Error> {
+    let (data, rest) = split_data_flag(args)?;
+    if let Some(data) = data {
+        if data != fixed {
+            return Err(Error::Forbidden(format!(
+                "secret set audits only into the daemon database {}; refusing --data {}",
+                fixed.display(),
+                data.display()
+            )));
+        }
+    }
+    let plan = plan_secret_set(&rest).map_err(|err| Error::BadRequest(err.to_string()))?;
+    require_daemon_database(fixed)?;
+    authorize_cli_secret(fixed, &plan.name)?;
     let secret = match plan.source {
         SecretSource::Tty => {
             prompt_secret_from_tty("secret: ").map_err(|err| Error::BadRequest(err.to_string()))?
@@ -271,15 +336,88 @@ fn secret_set(args: Vec<String>) -> Result<(), Error> {
             read_piped_secret().map_err(|err| Error::BadRequest(err.to_string()))?
         }
     };
-    KeyringHandle
-        .set(&plan.name, &secret)
+    let tail = dasdevbotd::secrets::last4(&secret);
+    // Audit first. A failed audit leaves the keyring untouched.
+    record_secret_audit(fixed, &plan.name, tail)?;
+    keys.set(&plan.name, &secret)
         .map_err(|err| Error::BadRequest(err.to_string()))?;
     eprintln!("stored secret {}", plan.name);
     Ok(())
 }
 
+/// The database and its audit key must already exist. Never creates either.
+fn require_daemon_database(data: &Path) -> Result<(), Error> {
+    if !data.is_file() || !audit_key_path(data).is_file() {
+        return Err(Error::Forbidden(format!(
+            "no daemon database or audit key at {}; start the daemon first",
+            data.display()
+        )));
+    }
+    Ok(())
+}
+
+fn split_data_flag(args: Vec<String>) -> Result<(Option<PathBuf>, Vec<String>), Error> {
+    let mut data = None;
+    let mut rest = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--data" {
+            let value = iter
+                .next()
+                .ok_or_else(|| Error::BadRequest("--data needs a value".into()))?;
+            data = Some(PathBuf::from(value));
+        } else {
+            rest.push(arg);
+        }
+    }
+    Ok((data, rest))
+}
+
+fn authorize_cli_secret(data: &Path, name: &str) -> Result<(), Error> {
+    let _ = data;
+    let role_text = load_role_file()?;
+    let Some(role) = parse_role(role_text.trim()) else {
+        return Err(Error::Forbidden("daemon role is not configured".into()));
+    };
+    authorize_secret_name(role, name).map_err(|err| match err {
+        SecretRoleError::NotAllowed => {
+            Error::Forbidden("secret name is not on this role's allowlist".into())
+        }
+        SecretRoleError::ExecutorOnly => {
+            Error::Forbidden("only the executor may store a GitHub credential".into())
+        }
+    })
+}
+
+fn record_secret_audit(data: &Path, name: &str, last4: String) -> Result<(), Error> {
+    // Checked again right before Store::open, which would create a database.
+    require_daemon_database(data)?;
+    let payload = serde_json::json!({"name": name, "last4": last4}).to_string();
+    append_cli_audit(data, "secret.set", &payload)
+}
+
+/// Appends one row to the hash-chained audit log. Refuses without the audit key.
+fn append_cli_audit(data: &Path, kind: &str, payload: &str) -> Result<(), Error> {
+    let key = audit_key_path(data);
+    if !key.exists() {
+        return Err(Error::Forbidden(
+            "audit key is missing; start the daemon first".into(),
+        ));
+    }
+    let seed = dasdevbotd::signature_seed(fs::read_to_string(key)?.trim())?;
+    let mut store = Store::open(data)?;
+    dasdevbotd::append_audit(&mut store, kind, payload, &seed)?;
+    Ok(())
+}
+
 fn emit(args: Vec<String>) -> Result<(), Error> {
     let flags = flags(args)?;
+    let token = emit_token(&flags)?;
+    if url_exposes_bearer(&flags.url, &token) {
+        return Err(Error::BadRequest(
+            "bearer token must be sent only in the Authorization header".into(),
+        ));
+    }
     let endpoint = format!("{}/v1/events", flags.url.trim_end_matches('/'));
     let body = serde_json::json!({
         "source": "cli",
@@ -336,16 +474,17 @@ fn ensure_loopback(bind: &str) -> Result<(), Error> {
 fn print_help() {
     eprintln!(
         "\
-dasdevbotd — phase 0 spike
+dasdevbotd — phase 1
 
 Usage:
   dasdevbotd serve [--bind 127.0.0.1:8787] [--data data/dasdevbot.sqlite]
-                  [--web apps/desktop/dist] [--role server|device|display]
-                  [--token TOKEN]
+                  [--web apps/desktop/dist] [--token TOKEN]
+                  [--role server|leader|worker|executor|device|display]
                   [--provider ollama|ollama-local|claude-cli] [--model NAME]
                   [--claude-home PATH] [--claude-sha256 HEX] [--dev-env-secrets]
   dasdevbotd smoke-model --provider ollama|ollama-local|claude-cli [--model NAME]
                          [--claude-home PATH] [--claude-sha256 HEX]
+                         [--data data/dasdevbot.sqlite] [--dev-env-secrets]
   dasdevbotd secret set <name> [--stdin]
   dasdevbotd emit [--url http://127.0.0.1:8787] [--token TOKEN]
                   [--repo DasVR/NIL] [--ref phase0]
@@ -358,7 +497,10 @@ be at least 32 bytes. --allow-remote is refused until Phase 1 or TLS, including
 together with --web. The bind stays on loopback.
 
 The default provider is Ollama Cloud at https://ollama.com. Store the key with
-`secret set ollama` (no-echo TTY, or `--stdin` from a pipe). `--dev-env-secrets`
+`secret set ollama` (no-echo TTY, or `--stdin` from a pipe). secret set audits
+only into /var/lib/dasdevbot/dasdevbot.sqlite, which the daemon must already
+have created; another --data is refused. On Windows, secrets go in only
+through the Tauri settings window. `--dev-env-secrets`
 reads OLLAMA_API_KEY and is refused on the server role. `--model` is optional.
 ollama-local talks only to 127.0.0.1:11434. claude-cli requires --claude-home.
 That directory is the CLI's HOME, and <claude-home>/claude-config is its
@@ -367,8 +509,182 @@ CLAUDE_CONFIG_DIR. `--claude-sha256` is the hex digest of the native ELF.
 as the service user with CLAUDE_CONFIG_DIR set to that dir. See deploy/ubuntu.
 The mock provider is for tests.
 
+serve takes its role only from `serve --role` or the fixed file
+/etc/dasdevbot/role (C:\\ProgramData\\dasdevbot\\role on Windows) and refuses
+to start without one. A file next to --data is ignored. That file must be
+root-owned, not owned by the caller (so a root caller always refuses it), and
+not group- or world-writable; otherwise the daemon refuses it.
+`smoke-model --dev-env-secrets` first appends secret.dev_env to the audit log
+and refuses when the audit key next to --data is missing. serve mints the
+bearer when --token and DASDEVBOT_TOKEN are absent. HTTP cannot approve a
+card. Decisions are Tauri IPC only. External cards need a Windows Hello
+signature. Internal cards keep the Phase 1 approval-key path. See
+docs/shell-ipc.md.
+
 serve binds an iroh endpoint when the binary is built with the p2p feature
 (on by default). Build with --no-default-features to leave iroh out.
 "
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dasdevbotd::role_path;
+
+    #[test]
+    fn allow_remote_is_refused() {
+        let err = flags(vec!["--allow-remote".into()]).unwrap_err();
+        assert!(err.to_string().contains("allow-remote"), "{err}");
+        let err = ensure_loopback("0.0.0.0:8787").unwrap_err();
+        assert!(err.to_string().contains("non-loopback"), "{err}");
+    }
+
+    #[test]
+    fn a_role_file_next_to_data_cannot_authorize_github() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-spoof-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("x.sqlite");
+        let spoof = role_path(&data);
+        fs::write(&spoof, "executor").unwrap();
+        assert!(spoof.ends_with("x.sqlite.role"), "{}", spoof.display());
+        assert_ne!(spoof, dasdevbotd::configured_role_path());
+        let result = authorize_cli_secret(&data, "github");
+        match dasdevbotd::load_role_file() {
+            Err(expected) => {
+                let err = result.unwrap_err();
+                assert_eq!(err.to_string(), expected.to_string(), "{err}");
+                assert!(
+                    err.to_string().contains("not configured")
+                        || err.to_string().contains("root-owned"),
+                    "{err}"
+                );
+            }
+            Ok(role) => {
+                let parsed = parse_role(role.trim()).expect("fixed role parses");
+                let allowed = authorize_secret_name(parsed, "github");
+                assert_eq!(result.is_ok(), allowed.is_ok());
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Records every keyring write so a test can prove none happened.
+    #[derive(Default)]
+    struct RecordingKeys {
+        writes: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SecretHandle for RecordingKeys {
+        fn get(
+            &self,
+            _name: &str,
+        ) -> Result<Option<dasdevbotd::secrets::Secret>, dasdevbotd::secrets::SecretError> {
+            Ok(None)
+        }
+
+        fn set(
+            &self,
+            name: &str,
+            _secret: &dasdevbotd::secrets::Secret,
+        ) -> Result<(), dasdevbotd::secrets::SecretError> {
+            self.writes.lock().unwrap().push(name.to_string());
+            Ok(())
+        }
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-{label}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn secret_set_refuses_a_throwaway_data_path() {
+        let dir = temp_dir("secret-throwaway");
+        let fixed = dir.join("daemon.sqlite");
+        let throwaway = dir.join("throwaway.sqlite");
+        let keys = RecordingKeys::default();
+        let err = secret_set_at(
+            &fixed,
+            vec![
+                "ollama".into(),
+                "--stdin".into(),
+                "--data".into(),
+                throwaway.display().to_string(),
+            ],
+            &keys,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("only into the daemon database"),
+            "{err}"
+        );
+        assert!(keys.writes.lock().unwrap().is_empty());
+        assert!(!throwaway.exists());
+        assert!(!audit_key_path(&throwaway).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_set_needs_the_daemon_database_and_its_audit_key() {
+        let dir = temp_dir("secret-fixed");
+        let fixed = dir.join("daemon.sqlite");
+        let keys = RecordingKeys::default();
+        let args = || vec!["ollama".to_string(), "--stdin".to_string()];
+        let err = secret_set_at(&fixed, args(), &keys).unwrap_err();
+        assert!(err.to_string().contains("start the daemon first"), "{err}");
+        assert!(!fixed.exists(), "secret set created a database");
+        drop(Store::open(&fixed).unwrap());
+        let mut explicit = args();
+        explicit.extend(["--data".to_string(), fixed.display().to_string()]);
+        let err = secret_set_at(&fixed, explicit, &keys).unwrap_err();
+        assert!(err.to_string().contains("start the daemon first"), "{err}");
+        assert!(!audit_key_path(&fixed).exists());
+        assert!(keys.writes.lock().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_fixed_data_path_is_the_deploy_path() {
+        assert_eq!(
+            dasdevbotd::configured_data_path(),
+            Path::new("/var/lib/dasdevbot/dasdevbot.sqlite")
+        );
+    }
+
+    #[test]
+    fn serve_without_role_uses_only_the_fixed_file() {
+        let parsed = flags(Vec::new()).unwrap();
+        assert!(!parsed.role_set);
+        let result = serve_role(&parsed);
+        match dasdevbotd::load_role_file() {
+            Err(expected) => {
+                let err = result.unwrap_err();
+                assert_eq!(err.to_string(), expected.to_string(), "{err}");
+            }
+            Ok(role) => assert_eq!(result.unwrap(), role),
+        }
+        let explicit = flags(vec!["--role".into(), "worker".into()]).unwrap();
+        assert_eq!(serve_role(&explicit).unwrap(), "worker");
+    }
+
+    #[test]
+    fn smoke_model_dev_env_without_audit_key_is_refused() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-smoke-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("db.sqlite");
+        let err = smoke_model(vec![
+            "--dev-env-secrets".into(),
+            "--role".into(),
+            "worker".into(),
+            "--data".into(),
+            data.display().to_string(),
+        ])
+        .unwrap_err();
+        // The refusal comes before open_provider can read OLLAMA_API_KEY.
+        assert!(err.to_string().contains("audit key is missing"), "{err}");
+        assert!(!data.exists());
+    }
 }

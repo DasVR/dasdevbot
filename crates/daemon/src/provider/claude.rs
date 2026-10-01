@@ -1357,31 +1357,6 @@ fn number_f64(value: &Value) -> Option<f64> {
     }
 }
 
-/// Hex SHA-256 of the native Claude ELF. One digest is accepted. A second digest
-/// fails because a script interpreter is not part of the pin.
-pub fn parse_sha256_list(text: &str) -> Result<Vec<[u8; 32]>, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err("claude_sha256 is empty".into());
-    }
-    let mut out = Vec::new();
-    for part in text.split(',') {
-        let part = part.trim();
-        if part.len() != 64 || !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("claude_sha256 must be 64 hex characters".into());
-        }
-        let mut bytes = [0u8; 32];
-        for (byte, chunk) in bytes.iter_mut().zip(part.as_bytes().chunks(2)) {
-            let hex = std::str::from_utf8(chunk)
-                .map_err(|_| "claude_sha256 must be 64 hex characters".to_string())?;
-            *byte = u8::from_str_radix(hex, 16)
-                .map_err(|_| "claude_sha256 must be 64 hex characters".to_string())?;
-        }
-        out.push(bytes);
-    }
-    Ok(out)
-}
-
 fn rate_log_line(rate: &RateObservation) -> String {
     let resets = rate
         .resets_at
@@ -2343,8 +2318,8 @@ mod tests {
                 .contains("more digests than the resolved binary"),
             "{err}"
         );
-        assert!(parse_sha256_list("abcd").is_err());
-        assert!(parse_sha256_list(&hex_digest(&digest)).is_ok());
+        assert!(super::super::parse_sha256_list("abcd").is_err());
+        assert!(super::super::parse_sha256_list(&hex_digest(&digest)).is_ok());
         let _ = fs::remove_dir_all(&dir);
     }
 

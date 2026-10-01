@@ -7,3 +7,4 @@ publish.workspace = true
 description = "Event, gate, budget, and lease types. No I/O."
 
 [dependencies]
+zeroize = "1"

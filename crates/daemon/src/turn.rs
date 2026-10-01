@@ -1,18 +1,31 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use dasdevbot_core::{decide, kind, EffectClass, GateInput, Policy};
+use dasdevbot_core::{
+    claim_mode, decide, kind, Admission, ClaimMode, EffectClass, GateInput, Policy, RunEnd,
+    SignalRead, RETRY_CAP,
+};
 use dasdevbot_proto::EmitRequest;
 use serde_json::{json, Value};
 
+use crate::audit_log;
+use crate::caps::{
+    self, admit_job, commit_attempt, park_job, release_reservation, reserve_attempt,
+    settle_failed_attempt,
+};
+use crate::harness::{self, HarnessRun};
 use crate::provider::{
-    CompletionRequest, ProviderError, RetryCost, OLLAMA_BUSY_MAX_MS, RESERVE_TOKENS,
+    Completion, CompletionRequest, ProviderError, RetryCost, OLLAMA_BUSY_MAX_MS,
 };
 use crate::store::{AppendOutcome, Job, NewApproval, Store};
+use crate::topology;
 use crate::{wall_ms, App, Error, Result};
 
 const LEASE_MS: u64 = 120_000;
+const CALL_MAX_TOKENS: u32 = 512;
 
 pub struct Ingested {
     pub created: bool,
@@ -32,10 +45,32 @@ fn worker_loop(app: std::sync::Arc<App>, rx: mpsc::Receiver<()>) {
     // so a notification cannot be lost.
     loop {
         sweep_approvals(&app);
+        {
+            let mut store = app.store.lock().expect("store");
+            let now = wall_ms();
+            if let Err(err) = topology::tick(&mut store, &app.role, &app.worker_id, now) {
+                eprintln!("dasdevbotd topology: {err}");
+            }
+            if let Err(err) = caps::release_quota_waits(&store, now) {
+                eprintln!("dasdevbotd quota: {err}");
+            }
+            if let Err(err) = caps::release_slot_waits(&store) {
+                eprintln!("dasdevbotd slot: {err}");
+            }
+        }
         loop {
             let job = {
                 let store = app.store.lock().expect("store");
-                match store.claim_at(&app.worker_id, wall_ms(), LEASE_MS) {
+                let claimed = match claim_mode(&app.role) {
+                    ClaimMode::None => Ok(None),
+                    ClaimMode::AssignedOnly => {
+                        store.claim_assigned(&app.worker_id, wall_ms(), LEASE_MS)
+                    }
+                    ClaimMode::IncludeUnassigned => {
+                        store.claim_at(&app.worker_id, wall_ms(), LEASE_MS)
+                    }
+                };
+                match claimed {
                     Ok(job) => job,
                     Err(err) => {
                         eprintln!("dasdevbotd claim: {err}");
@@ -48,7 +83,13 @@ fn worker_loop(app: std::sync::Arc<App>, rx: mpsc::Receiver<()>) {
             };
             eprintln!("dasdevbotd turn agent={} job={}", job.agent_id, job.id);
             if let Err(err) = run_turn(&app, &job) {
-                record_turn_failure(&app, &job, &err);
+                eprintln!("dasdevbotd turn failed: {err}");
+                let mut store = app.store.lock().expect("store");
+                let payload = json!({"job_id": job.id, "error": err.to_string()}).to_string();
+                let key = format!("job-failed:{}:{}", job.id, job.attempt);
+                let _ =
+                    store.append_at(wall_ms(), "runtime", kind::JOB_FAILED, &payload, &key, None);
+                let _ = store.fail_leased(&job.id, &app.worker_id);
             }
         }
         match rx.recv_timeout(Duration::from_millis(500)) {
@@ -57,15 +98,6 @@ fn worker_loop(app: std::sync::Arc<App>, rx: mpsc::Receiver<()>) {
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-}
-
-fn record_turn_failure(app: &App, job: &Job, err: &Error) {
-    eprintln!("dasdevbotd turn failed: {err}");
-    let mut store = app.store.lock().expect("store");
-    let payload = json!({"job_id": job.id, "error": err.to_string()}).to_string();
-    let key = format!("job-failed:{}:{}", job.id, job.attempt);
-    let _ = store.append_at(wall_ms(), "runtime", kind::JOB_FAILED, &payload, &key, None);
-    let _ = store.fail_leased(&job.id, &app.worker_id);
 }
 
 fn sweep_approvals(app: &App) {
@@ -120,77 +152,56 @@ pub fn ingest(store: &mut Store, request: &EmitRequest, now_ms: u64) -> Result<I
 }
 
 fn run_turn(app: &App, job: &Job) -> Result<()> {
-    let prepared = {
+    let (prepared, request, estimate) = {
         let mut store = app.store.lock().expect("store");
-        prepare(&mut store, app, job)?
-    };
-    let Some(prepared) = prepared else {
-        return Ok(());
-    };
-    let charge_agent = prepared.agent_id.clone();
-    let charge_attempt = job.attempt;
-    let charge_job = job.id.clone();
-    let completion = match app.provider.complete(
-        &CompletionRequest {
-            model: String::new(),
-            system: prepared.persona,
-            user: prepared.user_message,
-            max_tokens: 512,
-        },
-        &mut |cost| {
-            let mut store = app.store.lock().expect("store");
-            let budget = store.budget_of(&charge_agent).map_err(provider_failure)?;
-            if !budget.can_reserve(cost.budget_tokens) {
-                return Err(ProviderError::Failed(
-                    "busy retry exceeds the agent budget".into(),
-                ));
-            }
-            charge_retry_costs(
-                &mut store,
-                &charge_agent,
-                &charge_job,
-                charge_attempt,
-                std::slice::from_ref(cost),
-                wall_ms(),
-            )
-            .map_err(provider_failure)
-        },
-    ) {
-        Ok(completion) => completion,
-        Err(err) => {
-            let mut store = app.store.lock().expect("store");
-            return match settle_turn_error(&mut store, job, &app.worker_id, &err, wall_ms())? {
-                TurnErrorAction::Pause { .. } => Ok(()),
-                TurnErrorAction::Fail => Err(Error::Provider(err)),
-            };
+        let Some(prepared) = prepare(&mut store, &app.worker_id, job, &app.audit_seed)? else {
+            return Ok(());
+        };
+        if prepared.class == EffectClass::Destructive {
+            deny_destructive(&mut store, app, job, &prepared)?;
+            return Ok(());
         }
+        if prepared.class == EffectClass::External && external_tier_is_denied() {
+            deny_external(&mut store, app, job, &prepared)?;
+            return Ok(());
+        }
+        let request = CompletionRequest {
+            model: String::new(),
+            system: prepared.persona.clone(),
+            user: prepared.user_message.clone(),
+            max_tokens: CALL_MAX_TOKENS,
+        };
+        let estimate = app.provider.attempt_worst_case(&request);
+        if !admit_turn(&mut store, app, job, &prepared.agent_id, estimate)? {
+            return Ok(());
+        }
+        if !store.heartbeat_at(&job.id, &app.worker_id, wall_ms(), LEASE_MS)? {
+            release_reservation(&mut store, &job.id, &app.worker_id, wall_ms())?;
+            return Ok(());
+        }
+        (prepared, request, estimate)
+    };
+    let Some(completion) = run_attempts(app, job, &request, estimate)? else {
+        return Ok(());
     };
     let mut store = app.store.lock().expect("store");
     if !store.heartbeat_at(&job.id, &app.worker_id, wall_ms(), LEASE_MS)? {
+        let actual = completion
+            .input_tokens
+            .saturating_add(completion.output_tokens);
+        commit_attempt(&mut store, &job.id, &app.worker_id, actual, wall_ms())?;
+        release_reservation(&mut store, &job.id, &app.worker_id, wall_ms())?;
         return Ok(());
     }
-    if completion.usage.headroom.remaining_credit() == Some(0.0) {
-        store.add_spend(
-            &prepared.agent_id,
-            tokens_i64(completion.input_tokens, completion.output_tokens),
-        )?;
-        let until_ms = wall_ms().saturating_add(OLLAMA_BUSY_MAX_MS);
-        pause_job(
-            &mut store,
-            job,
-            &app.worker_id,
-            until_ms,
-            "credits_exhausted",
-            wall_ms(),
-        )?;
-        return Ok(());
+    let actual = completion
+        .input_tokens
+        .saturating_add(completion.output_tokens);
+    if let Err(err) = commit_attempt(&mut store, &job.id, &app.worker_id, actual, wall_ms()) {
+        release_reservation(&mut store, &job.id, &app.worker_id, wall_ms())?;
+        return Err(err);
     }
-    let class = if prepared.forced {
-        EffectClass::Destructive
-    } else {
-        EffectClass::External
-    };
-    let grant = store.has_grant(&prepared.agent_id, class.as_str())?;
+    let class = prepared.class;
+    let grant = store.has_grant(&prepared.agent_id, class.as_str(), wall_ms())?;
     let outcome = decide(
         GateInput {
             grant,
@@ -198,7 +209,7 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
             budget_remaining: true,
             tainted: prepared.tainted,
         },
-        Policy::phase0(),
+        phase1_policy(),
     );
     if outcome != dasdevbot_core::GateOutcome::Ask {
         let payload = json!({
@@ -208,6 +219,13 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
             "tainted": prepared.tainted,
         })
         .to_string();
+        audit_log::append(
+            &mut store,
+            kind::GATE_DENIED,
+            &payload,
+            wall_ms(),
+            &app.audit_seed,
+        )?;
         store.append_at(
             wall_ms(),
             "runtime",
@@ -220,27 +238,13 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
             &prepared.agent_id,
             tokens_i64(completion.input_tokens, completion.output_tokens),
         )?;
+        release_reservation(&mut store, &job.id, &app.worker_id, wall_ms())?;
         store.fail_leased(&job.id, &app.worker_id)?;
         return Ok(());
     }
-    let action = if prepared.forced {
-        "force_push"
-    } else {
-        "post_pr_comment"
-    };
-    let purpose = if prepared.forced {
-        format!(
-            "Force-push {}. This rewrites the remote branch.",
-            prepared.evidence_ref
-        )
-    } else {
-        prepared.purpose.clone()
-    };
-    let draft = if prepared.forced {
-        format!("git push --force origin {}", prepared.evidence_ref)
-    } else {
-        completion.text.clone()
-    };
+    let action = prepared.action.as_str();
+    let purpose = prepared.purpose.clone();
+    let draft = completion.text.clone();
     let request_payload = json!({
         "job_id": job.id,
         "action": action,
@@ -257,8 +261,6 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
         "output_tokens": completion.output_tokens,
         "micro_usd": completion.micro_usd,
         "note": completion.note,
-        "quota": completion.usage.quota_detail(),
-        "headroom_remaining": completion.usage.headroom.remaining_credit(),
     })
     .to_string();
     let approval = NewApproval {
@@ -290,7 +292,457 @@ fn run_turn(app: &App, job: &Job) -> Result<()> {
         &request_payload,
         &ledger_payload,
     )?;
+    release_reservation(&mut store, &job.id, &app.worker_id, wall_ms())?;
     eprintln!("dasdevbotd approval requested id={approval_id}");
+    Ok(())
+}
+
+fn run_attempts(
+    app: &App,
+    job: &Job,
+    request: &CompletionRequest,
+    estimate: u64,
+) -> Result<Option<Completion>> {
+    let parked = AtomicBool::new(false);
+    let completion = Mutex::new(None);
+    let last_error: Mutex<Option<ProviderError>> = Mutex::new(None);
+    let cli_version = Mutex::new(String::new());
+    let end = harness::execute(
+        &app.store,
+        HarnessRun {
+            job_id: &job.id,
+            lease_owner: Some(&app.worker_id),
+            retry_cap: RETRY_CAP,
+            now_ms: wall_ms(),
+            audit_seed: &app.audit_seed,
+            cli_version: &cli_version,
+        },
+        || true,
+        || {
+            let mut charge = |_cost: &RetryCost| {
+                let mut store = app.store.lock().expect("store");
+                settle_failed_attempt(&mut store, &job.id, &app.worker_id, wall_ms())
+                    .map_err(|err| ProviderError::Failed(err.to_string()))?;
+                let held =
+                    reserve_attempt(&mut store, &job.id, &app.worker_id, estimate, wall_ms())
+                        .map_err(|err| ProviderError::Failed(err.to_string()))?;
+                if held {
+                    Ok(())
+                } else {
+                    release_reservation(&mut store, &job.id, &app.worker_id, wall_ms())
+                        .map_err(|err| ProviderError::Failed(err.to_string()))?;
+                    pause_for(&mut store, app, job, "reservation failed", None)
+                        .map_err(|err| ProviderError::Failed(err.to_string()))?;
+                    parked.store(true, Ordering::SeqCst);
+                    Err(ProviderError::Failed("reservation failed".into()))
+                }
+            };
+            match app.provider.complete(request, &mut charge) {
+                Ok(done) => {
+                    let text = done.text.clone();
+                    *completion.lock().expect("completion") = Some(done);
+                    Ok(text)
+                }
+                Err(err) => {
+                    if parked.load(Ordering::SeqCst) {
+                        return Err(dasdevbot_core::ProviderStop::Limit);
+                    }
+                    match stop_after_provider_error(app, job, &err, &cli_version) {
+                        Ok(stop) => {
+                            *last_error.lock().expect("provider error") = Some(err);
+                            Err(stop)
+                        }
+                        Err(failure) => {
+                            *last_error.lock().expect("provider error") =
+                                Some(ProviderError::Failed(failure.to_string()));
+                            Err(dasdevbot_core::ProviderStop::Fault)
+                        }
+                    }
+                }
+            }
+        },
+    )?;
+    match end {
+        RunEnd::Done { .. } => completion
+            .into_inner()
+            .expect("completion")
+            .ok_or_else(|| Error::BadRequest("provider returned no completion".into()))
+            .map(Some),
+        RunEnd::Paused { .. } => Ok(None),
+        RunEnd::FailedClosed { .. } => Err(last_error
+            .into_inner()
+            .expect("provider error")
+            .unwrap_or_else(|| ProviderError::Failed("harness failed closed".into()))
+            .into()),
+    }
+}
+
+fn stop_after_provider_error(
+    app: &App,
+    job: &Job,
+    err: &ProviderError,
+    cli_version: &Mutex<String>,
+) -> Result<dasdevbot_core::ProviderStop> {
+    let mut store = app.store.lock().expect("store");
+    if let ProviderError::ToolUseAttempted {
+        cli_version: version,
+        event,
+    } = err
+    {
+        *cli_version.lock().expect("cli version") = version.clone();
+        let payload = json!({
+            "job_id": job.id,
+            "cli_version": version,
+            "event": event,
+        })
+        .to_string();
+        store.append_at(
+            wall_ms(),
+            "runtime",
+            kind::TOOL_USE_BLOCKED,
+            &payload,
+            &format!("tool-use:{}:{}", job.id, job.attempt),
+            None,
+        )?;
+    }
+    settle_failed_attempt(&mut store, &job.id, &app.worker_id, wall_ms())?;
+    let stop = provider_stop(err);
+    release_reservation(&mut store, &job.id, &app.worker_id, wall_ms())?;
+    let mapped = match &stop {
+        ProviderStop::Pause { reason, until_ms } => {
+            pause_for(&mut store, app, job, reason, *until_ms)?;
+            match err {
+                ProviderError::Busy(_) => dasdevbot_core::ProviderStop::Busy,
+                ProviderError::LimitReached(_) => dasdevbot_core::ProviderStop::Limit,
+                ProviderError::Failed(_) => dasdevbot_core::ProviderStop::Limit,
+                ProviderError::Unavailable(_) | ProviderError::ToolUseAttempted { .. } => {
+                    dasdevbot_core::ProviderStop::Fault
+                }
+            }
+        }
+        ProviderStop::Fail => match err {
+            ProviderError::ToolUseAttempted { .. } => {
+                dasdevbot_core::ProviderStop::ToolUseAttempted
+            }
+            ProviderError::Unavailable(_)
+            | ProviderError::Failed(_)
+            | ProviderError::Busy(_)
+            | ProviderError::LimitReached(_) => dasdevbot_core::ProviderStop::Fault,
+        },
+    };
+    Ok(mapped)
+}
+
+fn phase1_policy() -> Policy {
+    // External is denied by the policy itself, not by a failing verifier.
+    Policy::phase1()
+}
+
+fn external_tier_is_denied() -> bool {
+    phase1_policy().deny_external
+}
+
+enum ProviderStop {
+    Pause {
+        reason: String,
+        until_ms: Option<u64>,
+    },
+    Fail,
+}
+
+fn provider_stop(err: &ProviderError) -> ProviderStop {
+    match err {
+        ProviderError::LimitReached(limit) => ProviderStop::Pause {
+            reason: "limit_reached".into(),
+            until_ms: Some(limit_pause_until(limit.resets_at, wall_ms())),
+        },
+        ProviderError::Busy(busy) if busy.terminal => ProviderStop::Pause {
+            reason: "busy".into(),
+            until_ms: Some(wall_ms().saturating_add(OLLAMA_BUSY_MAX_MS)),
+        },
+        ProviderError::Failed(message) if message == "reservation failed" => ProviderStop::Pause {
+            reason: "reservation failed".into(),
+            until_ms: None,
+        },
+        ProviderError::Unavailable(_)
+        | ProviderError::Failed(_)
+        | ProviderError::Busy(_)
+        | ProviderError::ToolUseAttempted { .. } => ProviderStop::Fail,
+    }
+}
+
+fn limit_pause_until(resets_at: Option<i64>, now_ms: u64) -> u64 {
+    const POLICY_MS: u64 = 60_000;
+    let Some(resets_at) = resets_at.filter(|value| *value > 0) else {
+        return now_ms.saturating_add(POLICY_MS);
+    };
+    let resets = resets_at as u64;
+    let until_ms = if resets > 1_000_000_000_000 {
+        resets
+    } else {
+        resets.saturating_mul(1_000)
+    };
+    if until_ms > now_ms {
+        until_ms
+    } else {
+        now_ms.saturating_add(POLICY_MS)
+    }
+}
+
+fn pause_for(
+    store: &mut Store,
+    app: &App,
+    job: &Job,
+    reason: &str,
+    until_ms: Option<u64>,
+) -> Result<()> {
+    let payload = json!({
+        "job_id": job.id,
+        "reason": reason,
+        "until_ms": until_ms,
+    })
+    .to_string();
+    store.append_at(
+        wall_ms(),
+        "runtime",
+        kind::JOB_PAUSED,
+        &payload,
+        &format!("job-paused:{}:{}", job.id, job.attempt),
+        None,
+    )?;
+    park_job(
+        store,
+        &job.id,
+        &app.worker_id,
+        "paused",
+        app.provider.id(),
+        until_ms,
+    )?;
+    Ok(())
+}
+
+pub fn audit_dev_env(app: &App, role: &str) -> Result<()> {
+    let payload = json!({
+        "flag": "--dev-env-secrets",
+        "role": role,
+    })
+    .to_string();
+    let mut store = app.store.lock().expect("store");
+    store.append_at(
+        wall_ms(),
+        "runtime",
+        kind::DEV_ENV,
+        &payload,
+        &format!("secret-dev-env:{}", uuid::Uuid::new_v4()),
+        None,
+    )?;
+    audit_log::append(
+        &mut store,
+        kind::DEV_ENV,
+        &payload,
+        wall_ms(),
+        &app.audit_seed,
+    )?;
+    Ok(())
+}
+
+fn deny_destructive(store: &mut Store, app: &App, job: &Job, prepared: &Prepared) -> Result<()> {
+    let approval = NewApproval {
+        job_id: job.id.clone(),
+        agent_id: prepared.agent_id.clone(),
+        thread_id: prepared.thread_id.clone(),
+        effect_class: prepared.class.as_str().into(),
+        action: prepared.action.clone(),
+        purpose: format!(
+            "Force-push {}. This rewrites the remote branch.",
+            prepared.evidence_ref
+        ),
+        draft: format!("git push --force origin {}", prepared.evidence_ref),
+        evidence: prepared.evidence.clone(),
+        evidence_repo: prepared.evidence_repo.clone(),
+        evidence_ref: prepared.evidence_ref.clone(),
+        evidence_event_id: prepared.evidence_event_id.clone(),
+        evidence_kind: prepared.evidence_kind.clone(),
+        provider: "none".into(),
+        model: String::new(),
+        usage_kind: "none".into(),
+        input_tokens: 0,
+        output_tokens: 0,
+        micro_usd: 0,
+        ledger_note: "phase 1 denies destructive work".into(),
+        project: prepared.project.clone(),
+    };
+    store.record_gate_denial(
+        wall_ms(),
+        &app.worker_id,
+        &approval,
+        "destructive is denied in phase 1",
+        &app.audit_seed,
+    )?;
+    Ok(())
+}
+
+fn deny_external(store: &mut Store, app: &App, job: &Job, prepared: &Prepared) -> Result<()> {
+    let approval = NewApproval {
+        job_id: job.id.clone(),
+        agent_id: prepared.agent_id.clone(),
+        thread_id: prepared.thread_id.clone(),
+        effect_class: prepared.class.as_str().into(),
+        action: prepared.action.clone(),
+        purpose: format!(
+            "External effect on {} is denied until Windows Hello verifies the signer.",
+            prepared.evidence_repo
+        ),
+        draft: format!(
+            "post_pr_comment on {} at {} is denied",
+            prepared.evidence_repo, prepared.evidence_ref
+        ),
+        evidence: prepared.evidence.clone(),
+        evidence_repo: prepared.evidence_repo.clone(),
+        evidence_ref: prepared.evidence_ref.clone(),
+        evidence_event_id: prepared.evidence_event_id.clone(),
+        evidence_kind: prepared.evidence_kind.clone(),
+        provider: "none".into(),
+        model: String::new(),
+        usage_kind: "none".into(),
+        input_tokens: 0,
+        output_tokens: 0,
+        micro_usd: 0,
+        ledger_note: "phase 1 denies external work until user verification is real".into(),
+        project: prepared.project.clone(),
+    };
+    store.record_gate_denial(
+        wall_ms(),
+        &app.worker_id,
+        &approval,
+        "external is denied until Windows Hello is the production verifier",
+        &app.audit_seed,
+    )?;
+    Ok(())
+}
+
+fn admit_turn(
+    store: &mut Store,
+    app: &App,
+    job: &Job,
+    agent_id: &str,
+    estimate: u64,
+) -> Result<bool> {
+    let decision = admit_job(
+        store,
+        caps::AdmitRequest {
+            role: &app.role,
+            writer_id: &app.worker_id,
+            teammate_id: agent_id,
+            providers: &[(app.provider.id(), SignalRead::Absent)],
+            estimate: Some(estimate),
+            now_ms: wall_ms(),
+            job_id: &job.id,
+        },
+    );
+    match decision {
+        Admission::Admit { .. } => Ok(true),
+        Admission::WaitingOnQuota { provider, until_ms } => {
+            park_wait(
+                store,
+                app,
+                job,
+                kind::WAITING_ON_QUOTA,
+                "waiting_on_quota",
+                &provider,
+                until_ms,
+            )?;
+            Ok(false)
+        }
+        Admission::AskOwner { provider } => {
+            park_wait(
+                store,
+                app,
+                job,
+                kind::WAITING_ON_QUOTA,
+                "waiting_on_quota",
+                &provider,
+                None,
+            )?;
+            Ok(false)
+        }
+        Admission::WaitingOnSlot { provider } => {
+            park_wait(
+                store,
+                app,
+                job,
+                kind::WAITING_ON_SLOT,
+                "waiting_on_slot",
+                &provider,
+                None,
+            )?;
+            Ok(false)
+        }
+        Admission::Deny { reason } => {
+            let payload = json!({
+                "agent_id": agent_id,
+                "job_id": job.id,
+                "reason": format!("{reason:?}"),
+                "reserve": estimate,
+            })
+            .to_string();
+            if reason == dasdevbot_core::DenyReason::TeammateBudget {
+                store.append_at(
+                    wall_ms(),
+                    "runtime",
+                    kind::JOB_PAUSED,
+                    &payload,
+                    &format!("job-paused:{}", job.id),
+                    None,
+                )?;
+                park_job(
+                    store,
+                    &job.id,
+                    &app.worker_id,
+                    "paused",
+                    app.provider.id(),
+                    None,
+                )?;
+                return Ok(false);
+            }
+            store.append_at(
+                wall_ms(),
+                "runtime",
+                kind::BUDGET_DENIED,
+                &payload,
+                &format!("budget-denied:{}", job.id),
+                None,
+            )?;
+            store.fail_leased(&job.id, &app.worker_id)?;
+            Ok(false)
+        }
+    }
+}
+
+fn park_wait(
+    store: &mut Store,
+    app: &App,
+    job: &Job,
+    event_kind: &str,
+    status: &str,
+    provider: &str,
+    until_ms: Option<u64>,
+) -> Result<()> {
+    let payload = json!({
+        "job_id": job.id,
+        "provider": provider,
+        "until_ms": until_ms,
+    })
+    .to_string();
+    store.append_at(
+        wall_ms(),
+        "runtime",
+        event_kind,
+        &payload,
+        &format!("{status}:{}", job.id),
+        None,
+    )?;
+    park_job(store, &job.id, &app.worker_id, status, provider, until_ms)?;
     Ok(())
 }
 
@@ -307,38 +759,24 @@ struct Prepared {
     purpose: String,
     thread_id: String,
     tainted: bool,
-    forced: bool,
+    class: EffectClass,
+    action: String,
 }
 
-fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> {
+fn prepare(
+    store: &mut Store,
+    owner: &str,
+    job: &Job,
+    audit_seed: &[u8; 32],
+) -> Result<Option<Prepared>> {
     let agent = store.agent(&job.agent_id)?;
-    let budget = store.budget_of(&job.agent_id)?;
     let body: Value = serde_json::from_str(&job.payload).unwrap_or_else(|_| json!({}));
     let thread_id = body
         .get("thread_id")
         .and_then(|v| v.as_str())
         .unwrap_or(&job.id)
         .to_string();
-    if !budget.can_reserve(RESERVE_TOKENS) {
-        let payload = json!({
-            "agent_id": agent.id,
-            "token_cap": budget.cap,
-            "tokens_spent": budget.spent,
-            "reserve": RESERVE_TOKENS,
-        })
-        .to_string();
-        store.append_at(
-            wall_ms(),
-            "runtime",
-            kind::BUDGET_DENIED,
-            &payload,
-            &format!("budget-denied:{}", job.id),
-            Some(&thread_id),
-        )?;
-        store.fail_leased(&job.id, &app.worker_id)?;
-        return Ok(None);
-    }
-    if !store.heartbeat_at(&job.id, &app.worker_id, wall_ms(), LEASE_MS)? {
+    if !store.heartbeat_at(&job.id, owner, wall_ms(), LEASE_MS)? {
         return Ok(None);
     }
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
@@ -346,11 +784,11 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
         .get("tainted")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let forced = payload
-        .get("forced")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
     let kind_name = body.get("kind").and_then(|v| v.as_str()).unwrap_or("event");
+    let Some((class, action)) = classify(kind_name) else {
+        deny_unknown(store, owner, job, kind_name, audit_seed)?;
+        return Ok(None);
+    };
     let event_id = body.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
     let repo = payload
         .get("repo")
@@ -378,152 +816,59 @@ fn prepare(store: &mut Store, app: &App, job: &Job) -> Result<Option<Prepared>> 
         ),
         thread_id,
         tainted,
-        forced,
+        class,
+        action: action.to_string(),
     }))
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum TurnErrorAction {
-    Pause { until_ms: u64 },
-    Fail,
-}
-
-/// Pause a leased job on a terminal provider limit, or leave a hard failure for the worker.
-pub fn settle_turn_error(
-    store: &mut Store,
-    job: &Job,
-    owner: &str,
-    err: &ProviderError,
-    now_ms: u64,
-) -> Result<TurnErrorAction> {
-    match err {
-        ProviderError::LimitReached(limit) => {
-            let until_ms = limit_pause_until(limit.resets_at, now_ms);
-            pause_job(store, job, owner, until_ms, "limit_reached", now_ms)?;
-            Ok(TurnErrorAction::Pause { until_ms })
-        }
-        ProviderError::Busy(busy) if busy.terminal => {
-            let until_ms = now_ms.saturating_add(OLLAMA_BUSY_MAX_MS);
-            pause_job(store, job, owner, until_ms, "busy", now_ms)?;
-            Ok(TurnErrorAction::Pause { until_ms })
-        }
-        ProviderError::ToolUseAttempted { cli_version, event } => {
-            let payload = json!({
-                "job_id": job.id,
-                "cli_version": cli_version,
-                "event": event,
-            })
-            .to_string();
-            store.append_at(
-                now_ms,
-                "runtime",
-                kind::TOOL_USE_BLOCKED,
-                &payload,
-                &format!("tool-use:{}:{}", job.id, job.attempt),
-                None,
-            )?;
-            Ok(TurnErrorAction::Fail)
-        }
-        ProviderError::Unavailable(_) | ProviderError::Failed(_) | ProviderError::Busy(_) => {
-            Ok(TurnErrorAction::Fail)
-        }
+/// The daemon classifies the event kind. A field on the payload does not.
+/// Unknown kinds are denied. They are not treated as external.
+fn classify(kind: &str) -> Option<(EffectClass, &'static str)> {
+    match kind {
+        "repo.force_push" => Some((EffectClass::Destructive, "force_push")),
+        "repo.push" => Some((EffectClass::External, "post_pr_comment")),
+        "workspace.write" => Some((EffectClass::WriteLocal, "edit")),
+        _ => None,
     }
 }
 
-fn provider_failure(err: Error) -> ProviderError {
-    ProviderError::Failed(err.to_string())
-}
-
-pub fn audit_dev_env(app: &App, role: &str) -> Result<()> {
-    let payload = json!({
-        "flag": "--dev-env-secrets",
-        "role": role,
-    })
-    .to_string();
-    let mut store = app.store.lock().expect("store");
-    store.append_at(
+fn deny_unknown(
+    store: &mut Store,
+    owner: &str,
+    job: &Job,
+    kind_name: &str,
+    audit_seed: &[u8; 32],
+) -> Result<()> {
+    let approval = NewApproval {
+        job_id: job.id.clone(),
+        agent_id: job.agent_id.clone(),
+        thread_id: job.id.clone(),
+        effect_class: "unknown".into(),
+        action: "deny".into(),
+        purpose: format!("Unknown event kind {kind_name}."),
+        draft: format!("denied unknown event kind {kind_name}"),
+        evidence: String::new(),
+        evidence_repo: String::new(),
+        evidence_ref: String::new(),
+        evidence_event_id: String::new(),
+        evidence_kind: kind_name.to_string(),
+        provider: "none".into(),
+        model: String::new(),
+        usage_kind: "none".into(),
+        input_tokens: 0,
+        output_tokens: 0,
+        micro_usd: 0,
+        ledger_note: "unknown event kind is denied".into(),
+        project: String::new(),
+    };
+    store.record_gate_denial(
         wall_ms(),
-        "runtime",
-        kind::DEV_ENV,
-        &payload,
-        &format!("secret-dev-env:{}", uuid::Uuid::new_v4()),
-        None,
+        owner,
+        &approval,
+        "unknown event kind",
+        audit_seed,
     )?;
     Ok(())
-}
-
-fn pause_job(
-    store: &mut Store,
-    job: &Job,
-    owner: &str,
-    until_ms: u64,
-    reason: &str,
-    now_ms: u64,
-) -> Result<()> {
-    let payload = json!({
-        "job_id": job.id,
-        "reason": reason,
-        "until_ms": until_ms,
-    })
-    .to_string();
-    store.append_at(
-        now_ms,
-        "runtime",
-        kind::JOB_PAUSED,
-        &payload,
-        &format!("job-paused:{}:{}", job.id, job.attempt),
-        None,
-    )?;
-    store.pause_leased(&job.id, owner, until_ms)?;
-    Ok(())
-}
-
-fn charge_retry_costs(
-    store: &mut Store,
-    agent_id: &str,
-    job_id: &str,
-    job_attempt: i64,
-    costs: &[RetryCost],
-    now_ms: u64,
-) -> Result<()> {
-    for cost in costs {
-        let tokens = cost.budget_tokens.min(i64::MAX as u64) as i64;
-        store.add_spend(agent_id, tokens)?;
-        let payload = json!({
-            "job_id": job_id,
-            "attempt": cost.attempt,
-            "backoff_ms": cost.backoff_ms,
-            "budget_tokens": cost.budget_tokens,
-        })
-        .to_string();
-        store.append_at(
-            now_ms,
-            "runtime",
-            kind::PROVIDER_COST,
-            &payload,
-            &format!("provider-cost:{job_id}:{job_attempt}:{}", cost.attempt),
-            None,
-        )?;
-    }
-    Ok(())
-}
-
-fn limit_pause_until(resets_at: Option<i64>, now_ms: u64) -> u64 {
-    const POLICY_MS: u64 = 60_000;
-    let Some(resets_at) = resets_at.filter(|value| *value > 0) else {
-        return now_ms.saturating_add(POLICY_MS);
-    };
-    let resets = resets_at as u64;
-    let until_ms = if resets > 1_000_000_000_000 {
-        resets
-    } else {
-        resets.saturating_mul(1_000)
-    };
-    if until_ms > now_ms {
-        until_ms
-    } else {
-        now_ms.saturating_add(POLICY_MS)
-    }
 }
 
 fn tokens_i64(input: u64, output: u64) -> i64 {
@@ -533,16 +878,13 @@ fn tokens_i64(input: u64, output: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{
-        Busy, Completion, Headroom, LimitReached, LlmProvider, ProviderError, QuotaSignal,
-        RetryCost, UsageReport,
-    };
-    use crate::store::{Job, Store};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::provider::{Completion, LlmProvider, ProviderError, RetryCost};
+    use crate::store::Store;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct Boom {
-        calls: AtomicUsize,
+        calls: Arc<AtomicUsize>,
     }
 
     impl LlmProvider for Boom {
@@ -573,13 +915,19 @@ mod tests {
             .insert_agent("tiny", "Tiny", "small", "proj", 10)
             .unwrap();
         let job_id = store
-            .enqueue_job("tiny", "job-tiny", "{\"tainted\":true}", 0)
+            .enqueue_job(
+                "tiny",
+                "job-tiny",
+                "{\"tainted\":true,\"kind\":\"workspace.write\"}",
+                0,
+            )
             .unwrap()
             .unwrap();
         let job = store.claim_at("owner", 10, 5_000).unwrap().unwrap();
         assert_eq!(job.id, job_id);
+        let calls = Arc::new(AtomicUsize::new(0));
         let provider = Boom {
-            calls: AtomicUsize::new(0),
+            calls: Arc::clone(&calls),
         };
         let (wake, _rx) = mpsc::channel();
         let app = App {
@@ -590,331 +938,246 @@ mod tests {
             worker_id: "owner".into(),
             wake,
             endpoint_id: Mutex::new(None),
-            token: "test-token".into(),
+            token: "0123456789abcdef0123456789abcdef".into(),
+            data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
+            audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
         };
         run_turn(&app, &job).unwrap();
         assert_eq!(app.provider.as_ref().id(), "boom");
         let store = app.store.lock().unwrap();
         assert_eq!(
             store.job_status(&job_id).unwrap().as_deref(),
-            Some("failed")
+            Some("paused")
         );
         assert_eq!(store.agent("tiny").unwrap().tokens_spent, 0);
         let events = store.recent_events(10).unwrap();
-        assert!(events.iter().any(|event| event.kind == kind::BUDGET_DENIED));
+        assert!(events.iter().any(|event| event.kind == kind::JOB_PAUSED));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    fn leased_job(store: &Store) -> Job {
-        store.claim_at("owner", 1_000, 5_000).unwrap().unwrap()
+    struct BusyOnce {
+        calls: Arc<AtomicUsize>,
+        held: Arc<AtomicU64>,
     }
 
-    fn app_with(store: Store, provider: impl LlmProvider + 'static) -> App {
+    impl LlmProvider for BusyOnce {
+        fn complete(
+            &self,
+            req: &CompletionRequest,
+            charge: &mut dyn FnMut(&RetryCost) -> std::result::Result<(), ProviderError>,
+        ) -> std::result::Result<Completion, ProviderError> {
+            self.held
+                .store(self.attempt_worst_case(req), Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            charge(&RetryCost {
+                attempt: 1,
+                backoff_ms: 0,
+                budget_tokens: 1,
+            })?;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Failed("second attempt failed".into()))
+        }
+
+        fn id(&self) -> &'static str {
+            "mock"
+        }
+
+        fn detail(&self) -> String {
+            "busy once".into()
+        }
+    }
+
+    #[test]
+    fn a_retry_reserves_the_worst_case_not_one_token() {
+        let store = Store::open_memory().unwrap();
+        store
+            .insert_agent("wide", "Wide", "persona", "proj", 100_000)
+            .unwrap();
+        let job_id = store
+            .enqueue_job(
+                "wide",
+                "job-busy",
+                "{\"tainted\":true,\"kind\":\"workspace.write\"}",
+                0,
+            )
+            .unwrap()
+            .unwrap();
+        let job = store.claim_at("owner", 10, 5_000).unwrap().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let held = Arc::new(AtomicU64::new(0));
+        let provider = BusyOnce {
+            calls: Arc::clone(&calls),
+            held: Arc::clone(&held),
+        };
         let (wake, _rx) = mpsc::channel();
-        App {
+        let app = App {
             store: Mutex::new(store),
             provider: Arc::new(provider),
             web_root: None,
-            role: "server".into(),
+            role: "executor".into(),
             worker_id: "owner".into(),
             wake,
             endpoint_id: Mutex::new(None),
-            token: "turn-test-token-0123456789abcdef0123".into(),
-        }
-    }
-
-    #[test]
-    fn limit_reached_pauses_until_the_reset_time() {
-        let store = Store::open_memory().unwrap();
-        store
-            .insert_agent("limit-agent", "Limit", "persona", "proj", 10_000)
-            .unwrap();
-        store
-            .enqueue_job("limit-agent", "job-limit", "{}", 0)
-            .unwrap();
-        let job = leased_job(&store);
-        let err = ProviderError::LimitReached(LimitReached {
-            message: "claude-cli usage limit reached".into(),
-            resets_at: Some(2_000_000_000),
-        });
-        let mut store = store;
-        let action = settle_turn_error(&mut store, &job, "owner", &err, 1_000).unwrap();
-        assert_eq!(
-            action,
-            TurnErrorAction::Pause {
-                until_ms: 2_000_000_000_000
-            }
-        );
-        assert_eq!(
-            store.job_status(&job.id).unwrap().as_deref(),
-            Some("leased")
-        );
-        assert_eq!(store.lease_until(&job.id).unwrap(), Some(2_000_000_000_000));
-        let events = store.recent_events(10).unwrap();
-        assert!(events.iter().any(|event| event.kind == kind::JOB_PAUSED));
-        assert!(events.iter().all(|event| event.kind != kind::JOB_FAILED));
-    }
-
-    #[test]
-    fn terminal_busy_pauses_without_charging_again() {
-        let store = Store::open_memory().unwrap();
-        store
-            .insert_agent("busy-agent", "Busy", "persona", "proj", 10_000)
-            .unwrap();
-        store
-            .enqueue_job("busy-agent", "job-busy", "{}", 0)
-            .unwrap();
-        let job = leased_job(&store);
-        let err = ProviderError::Busy(Busy {
-            message: "ollama cloud is busy".into(),
-            retry_costs: vec![
-                RetryCost {
-                    attempt: 1,
-                    backoff_ms: 2_000,
-                    budget_tokens: 1,
-                },
-                RetryCost {
-                    attempt: 2,
-                    backoff_ms: 4_000,
-                    budget_tokens: 1,
-                },
-            ],
-            terminal: true,
-        });
-        let mut store = store;
-        let action = settle_turn_error(&mut store, &job, "owner", &err, 10_000).unwrap();
-        assert_eq!(action, TurnErrorAction::Pause { until_ms: 70_000 });
-        assert_eq!(store.agent("busy-agent").unwrap().tokens_spent, 0);
-        assert_eq!(
-            store.job_status(&job.id).unwrap().as_deref(),
-            Some("leased")
-        );
-        assert_eq!(store.lease_until(&job.id).unwrap(), Some(70_000));
-        let events = store.recent_events(10).unwrap();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.kind == kind::PROVIDER_COST)
-                .count(),
-            0
-        );
-        assert!(events.iter().any(|event| event.kind == kind::JOB_PAUSED));
-        assert!(events.iter().all(|event| event.kind != kind::JOB_FAILED));
-    }
-
-    #[test]
-    fn tool_use_fails_the_job() {
-        struct ToolUse;
-        impl LlmProvider for ToolUse {
-            fn complete(
-                &self,
-                _req: &CompletionRequest,
-                _charge: &mut dyn FnMut(&RetryCost) -> std::result::Result<(), ProviderError>,
-            ) -> std::result::Result<Completion, ProviderError> {
-                Err(ProviderError::ToolUseAttempted {
-                    cli_version: "2.1.285".into(),
-                    event: "tool_use".into(),
-                })
-            }
-            fn id(&self) -> &'static str {
-                "claude-cli"
-            }
-            fn detail(&self) -> String {
-                "claude-cli".into()
-            }
-        }
-        let store = Store::open_memory().unwrap();
-        store
-            .insert_agent("tool-agent", "Tool", "persona", "proj", 10_000)
-            .unwrap();
-        let job_id = store
-            .enqueue_job("tool-agent", "job-tool", "{}", 0)
-            .unwrap()
-            .unwrap();
-        let job = leased_job(&store);
-        let app = app_with(store, ToolUse);
+            token: "0123456789abcdef0123456789abcdef".into(),
+            data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
+            audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
+        };
         let err = run_turn(&app, &job).unwrap_err();
-        record_turn_failure(&app, &job, &err);
+        assert!(err.to_string().contains("second attempt failed"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let worst = held.load(Ordering::SeqCst);
+        assert!(worst > u64::from(CALL_MAX_TOKENS));
+        assert_ne!(worst, 1);
         let store = app.store.lock().unwrap();
-        assert_eq!(
-            store.job_status(&job_id).unwrap().as_deref(),
-            Some("failed")
-        );
-        let events = store.recent_events(10).unwrap();
-        assert!(events.iter().any(|event| event.kind == kind::JOB_FAILED));
-        assert!(events.iter().all(|event| event.kind != kind::JOB_PAUSED));
-        let audit = events
-            .iter()
-            .find(|event| event.kind == kind::TOOL_USE_BLOCKED)
+        let spent: i64 = store
+            .connection()
+            .query_row(
+                "SELECT spent_tokens FROM provider_caps WHERE provider = 'mock'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        let payload: serde_json::Value = serde_json::from_str(&audit.payload).unwrap();
-        assert_eq!(payload["event"], "tool_use");
-        assert_eq!(payload["cli_version"], "2.1.285");
-        assert_eq!(payload["job_id"], job_id);
-        assert!(payload.get("name").is_none());
-        assert!(payload.get("input").is_none());
+        assert_eq!(spent, worst as i64 * 2);
+        let reserved: i64 = store
+            .connection()
+            .query_row(
+                "SELECT reserved_tokens FROM provider_caps WHERE provider = 'mock'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reserved, 0);
+        assert_eq!(job.id, job_id);
+        assert_eq!(store.agent("wide").unwrap().tokens_spent, worst as i64 * 2);
+    }
+
+    struct HoldOnce {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl LlmProvider for HoldOnce {
+        fn complete(
+            &self,
+            _req: &CompletionRequest,
+            charge: &mut dyn FnMut(&RetryCost) -> std::result::Result<(), ProviderError>,
+        ) -> std::result::Result<Completion, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            charge(&RetryCost {
+                attempt: 1,
+                backoff_ms: 0,
+                budget_tokens: 1,
+            })?;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Failed("should have paused".into()))
+        }
+
+        fn attempt_worst_case(&self, _req: &CompletionRequest) -> u64 {
+            1_000
+        }
+
+        fn id(&self) -> &'static str {
+            "mock"
+        }
+
+        fn detail(&self) -> String {
+            "hold once".into()
+        }
     }
 
     #[test]
-    fn successful_retries_are_charged_before_the_turn_spend() {
-        struct Fixed {
-            completion: Completion,
-        }
-        impl LlmProvider for Fixed {
-            fn complete(
-                &self,
-                _req: &CompletionRequest,
-                charge: &mut dyn FnMut(&RetryCost) -> std::result::Result<(), ProviderError>,
-            ) -> std::result::Result<Completion, ProviderError> {
-                for cost in &self.completion.retry_costs {
-                    charge(cost)?;
-                }
-                Ok(self.completion.clone())
-            }
-            fn id(&self) -> &'static str {
-                "ollama"
-            }
-            fn detail(&self) -> String {
-                "ollama".into()
-            }
-        }
-        let completion = Completion {
-            text: "draft".into(),
-            model: "gemma4:31b".into(),
-            provider: "ollama".into(),
-            usage_kind: "absent".into(),
-            input_tokens: 4,
-            output_tokens: 0,
-            micro_usd: 0,
-            note: "note".into(),
-            usage: UsageReport {
-                input_tokens: Some(4),
-                output_tokens: Some(0),
-                cached_input_tokens: None,
-                quota: QuotaSignal::Absent {
-                    detail: "none".into(),
-                },
-                headroom: Headroom::unknown(),
-            },
-            retry_costs: vec![
-                RetryCost {
-                    attempt: 1,
-                    backoff_ms: 2_000,
-                    budget_tokens: 1,
-                },
-                RetryCost {
-                    attempt: 2,
-                    backoff_ms: 4_000,
-                    budget_tokens: 1,
-                },
-            ],
-        };
+    fn a_retry_hold_that_does_not_fit_pauses_the_job() {
         let store = Store::open_memory().unwrap();
         store
-            .insert_agent("cost-agent", "Cost", "persona", "proj", 10_000)
+            .insert_agent("wide", "Wide", "persona", "proj", 100_000)
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "UPDATE provider_caps
+                 SET cap_tokens = 1500, spent_tokens = 0, reserved_tokens = 0,
+                     fencing_epoch = 1, writer_id = 'bootstrap', writer_until_ms = 0
+                 WHERE provider = 'mock'",
+                [],
+            )
             .unwrap();
         let job_id = store
-            .enqueue_job("cost-agent", "job-cost", "{\"tainted\":true}", 0)
+            .enqueue_job(
+                "wide",
+                "job-pause",
+                "{\"tainted\":true,\"kind\":\"workspace.write\"}",
+                0,
+            )
             .unwrap()
             .unwrap();
-        let job = leased_job(&store);
-        let app = app_with(store, Fixed { completion });
+        let job = store.claim_at("owner", 10, 5_000).unwrap().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = HoldOnce {
+            calls: Arc::clone(&calls),
+        };
+        let (wake, _rx) = mpsc::channel();
+        let app = App {
+            store: Mutex::new(store),
+            provider: Arc::new(provider),
+            web_root: None,
+            role: "executor".into(),
+            worker_id: "owner".into(),
+            wake,
+            endpoint_id: Mutex::new(None),
+            token: "0123456789abcdef0123456789abcdef".into(),
+            data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
+            audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
+        };
         run_turn(&app, &job).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         let store = app.store.lock().unwrap();
-        assert_eq!(store.agent("cost-agent").unwrap().tokens_spent, 6);
         assert_eq!(
             store.job_status(&job_id).unwrap().as_deref(),
-            Some("failed")
+            Some("paused")
         );
+        assert_eq!(store.agent("wide").unwrap().tokens_spent, 1_000);
         let events = store.recent_events(20).unwrap();
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.kind == kind::PROVIDER_COST)
-                .count(),
-            2
-        );
+        assert!(events.iter().any(|event| event.kind == kind::JOB_PAUSED));
+        assert!(!events.iter().any(|event| event.kind == kind::JOB_FAILED));
     }
 
     #[test]
-    fn exhausted_headroom_pauses_admission() {
-        struct Fixed {
-            completion: Completion,
-        }
-        impl LlmProvider for Fixed {
-            fn complete(
-                &self,
-                _req: &CompletionRequest,
-                _charge: &mut dyn FnMut(&RetryCost) -> std::result::Result<(), ProviderError>,
-            ) -> std::result::Result<Completion, ProviderError> {
-                Ok(self.completion.clone())
-            }
-            fn id(&self) -> &'static str {
-                "ollama"
-            }
-            fn detail(&self) -> String {
-                "ollama".into()
-            }
-        }
-        let mut headroom = Headroom::unknown();
-        headroom.lower(Some(0.0));
-        let completion = Completion {
-            text: "ok".into(),
-            model: "gemma4:31b".into(),
-            provider: "ollama".into(),
-            usage_kind: "provider".into(),
-            input_tokens: 3,
-            output_tokens: 1,
-            micro_usd: 0,
-            note: "note".into(),
-            usage: UsageReport {
-                input_tokens: Some(3),
-                output_tokens: Some(1),
-                cached_input_tokens: None,
-                quota: QuotaSignal::Absent {
-                    detail: "none".into(),
-                },
-                headroom,
-            },
-            retry_costs: Vec::new(),
-        };
+    fn an_unknown_event_kind_is_denied() {
         let store = Store::open_memory().unwrap();
-        store
-            .insert_agent("credit-agent", "Credit", "persona", "proj", 10_000)
-            .unwrap();
         let job_id = store
-            .enqueue_job("credit-agent", "job-credit", "{}", 0)
+            .enqueue_job("reviewer", "job-unknown", "{\"kind\":\"nope\"}", 0)
             .unwrap()
             .unwrap();
-        let job = leased_job(&store);
-        let app = app_with(store, Fixed { completion });
+        let job = store.claim_at("owner", 10, 5_000).unwrap().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Boom {
+            calls: Arc::clone(&calls),
+        };
+        let (wake, _rx) = mpsc::channel();
+        let app = App {
+            store: Mutex::new(store),
+            provider: Arc::new(provider),
+            web_root: None,
+            role: "executor".into(),
+            worker_id: "owner".into(),
+            wake,
+            endpoint_id: Mutex::new(None),
+            token: "0123456789abcdef0123456789abcdef".into(),
+            data: std::path::PathBuf::from("data/dasdevbot.sqlite"),
+            audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
+        };
         run_turn(&app, &job).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
         let store = app.store.lock().unwrap();
-        assert_eq!(store.agent("credit-agent").unwrap().tokens_spent, 4);
         assert_eq!(
             store.job_status(&job_id).unwrap().as_deref(),
-            Some("leased")
+            Some("failed")
         );
-        let events = store.recent_events(10).unwrap();
-        assert!(events.iter().any(|event| {
-            event.kind == kind::JOB_PAUSED && event.payload.contains("credits_exhausted")
-        }));
-        assert!(events.iter().all(|event| event.kind != kind::JOB_FAILED));
-    }
-
-    #[test]
-    fn dev_env_audit_records_the_flag_without_a_secret() {
-        let store = Store::open_memory().unwrap();
-        let app = app_with(store, crate::provider::MockProvider::new());
-        audit_dev_env(&app, "device").unwrap();
-        let store = app.store.lock().unwrap();
-        let event = store
-            .recent_events(5)
-            .unwrap()
-            .into_iter()
-            .find(|event| event.kind == kind::DEV_ENV)
-            .unwrap();
-        assert!(event.payload.contains("--dev-env-secrets"));
-        assert!(event.payload.contains("device"));
-        assert!(!event.payload.contains("SENTINEL_KEY"));
+        let approvals = store.approvals().unwrap();
+        assert_eq!(approvals[0].effect_class, "unknown");
+        assert_eq!(approvals[0].status, "denied");
     }
 }

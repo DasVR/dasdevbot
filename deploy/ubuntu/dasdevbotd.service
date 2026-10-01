@@ -1,5 +1,10 @@
+# One executor. This process is the admission-ledger writer.
+# Do not start a second executor against the same SQLite file.
+# A worker or a leader may share the file; they cannot write the ledger
+# and they cannot hold a GitHub credential.
+
 [Unit]
-Description=dasdevbot daemon
+Description=dasdevbot daemon (executor)
 After=network-online.target
 
 [Service]
@@ -8,7 +13,8 @@ User=dasdevbot
 Group=dasdevbot
 Environment=HOME=/var/lib/dasdevbot
 # Replace the digest with the output of: sha256sum /usr/local/bin/claude
-ExecStart=/usr/local/bin/dasdevbotd serve --provider claude-cli --claude-home /var/lib/dasdevbot --claude-sha256 0000000000000000000000000000000000000000000000000000000000000000 --data /var/lib/dasdevbot/dasdevbot.sqlite
+ExecStart=/usr/local/bin/dasdevbotd serve --role executor --provider claude-cli --claude-home /var/lib/dasdevbot --claude-sha256 0000000000000000000000000000000000000000000000000000000000000000 --bind 127.0.0.1:8787 --data /var/lib/dasdevbot/dasdevbot.sqlite
+Restart=on-failure
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -22,7 +28,7 @@ RestrictSUIDSGID=true
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallFilter=@system-service
-Restart=on-failure
+StateDirectory=dasdevbot
 
 [Install]
 WantedBy=multi-user.target

@@ -5,9 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dasdevbot_proto::{
-    AgentView, ApprovalView, DecisionRequest, DecisionResponse, EmitRequest, EmitResponse,
-    ErrorBody, EventView, EvidenceView, Health, LedgerView, Snapshot, UndoResponse,
-    PROTOCOL_VERSION,
+    AgentView, ApprovalView, EmitRequest, EmitResponse, ErrorBody, EventView, EvidenceView, Health,
+    LedgerView, Snapshot, PROTOCOL_VERSION,
 };
 use dasdevbot_sync::TRANSPORT;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -15,7 +14,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::turn;
 use crate::{wall_ms, App, Error, Result};
 
-/// Same policy as the Tauri shell, plus `frame-ancestors 'none'`.
+/// Same policy as the Tauri shell, plus `frame-ancestors 'none'` and loopback snapshot origins.
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8787 http://localhost:8787; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 
 pub fn serve(app: Arc<App>, bind: &str) -> Result<()> {
@@ -119,59 +118,13 @@ fn dispatch(app: &App, request: &mut Request, port: u16) -> Result<Response<Curs
         }
         (&Method::Post, approval_path)
             if approval_path.starts_with("/v1/approvals/")
-                && approval_path.ends_with("/decision") =>
+                && (approval_path.ends_with("/decision") || approval_path.ends_with("/undo")) =>
         {
-            let id = approval_path
-                .trim_start_matches("/v1/approvals/")
-                .trim_end_matches("/decision")
-                .trim_matches('/')
-                .to_string();
-            if id.is_empty() || id.contains('/') {
-                return Err(Error::BadRequest("missing approval id".into()));
-            }
-            let body = read_body(request)?;
-            let req: DecisionRequest = serde_json::from_str(&body)
-                .map_err(|err| Error::BadRequest(format!("invalid JSON: {err}")))?;
-            let recorded = {
-                let mut store = app.store.lock().expect("store");
-                store.decide_approval(&id, &req.decision, req.reason.as_deref(), wall_ms())?
-            };
-            Ok(json_response(
-                200,
-                &DecisionResponse {
-                    protocol: PROTOCOL_VERSION,
-                    approval_id: id,
-                    status: recorded.status,
-                    event_id: recorded.event_id,
-                    executed: recorded.executed,
-                    committed: recorded.committed,
-                    undo_until: recorded.undo_until,
-                },
-            ))
-        }
-        (&Method::Post, approval_path)
-            if approval_path.starts_with("/v1/approvals/") && approval_path.ends_with("/undo") =>
-        {
-            let id = approval_path
-                .trim_start_matches("/v1/approvals/")
-                .trim_end_matches("/undo")
-                .trim_matches('/')
-                .to_string();
-            if id.is_empty() || id.contains('/') {
-                return Err(Error::BadRequest("missing approval id".into()));
-            }
             let _ = read_body(request)?;
-            let recorded = {
-                let mut store = app.store.lock().expect("store");
-                store.undo_approval(&id, wall_ms())?
-            };
             Ok(json_response(
-                200,
-                &UndoResponse {
-                    protocol: PROTOCOL_VERSION,
-                    approval_id: id,
-                    status: recorded.status,
-                    event_id: recorded.event_id,
+                403,
+                &ErrorBody {
+                    error: "approval decisions are Tauri IPC only".into(),
                 },
             ))
         }
@@ -463,15 +416,6 @@ fn mime(path: &Path) -> &'static str {
     }
 }
 
-fn read_body(request: &mut Request) -> Result<String> {
-    let mut body = String::new();
-    request
-        .as_reader()
-        .take(1_048_576)
-        .read_to_string(&mut body)?;
-    Ok(body)
-}
-
 fn bound_port(server: &Server) -> u16 {
     server
         .server_addr()
@@ -619,6 +563,15 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
     diff == 0
 }
 
+fn read_body(request: &mut Request) -> Result<String> {
+    let mut body = String::new();
+    request
+        .as_reader()
+        .take(1_048_576)
+        .read_to_string(&mut body)?;
+    Ok(body)
+}
+
 fn json_response(code: u16, body: &impl serde::Serialize) -> Response<Cursor<Vec<u8>>> {
     let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     with_headers(
@@ -664,8 +617,8 @@ mod tests {
             Config {
                 data: dir.join("db.sqlite"),
                 web_root: None,
-                role: "server".into(),
-                token: None,
+                role: "executor".into(),
+                token: Some("0123456789abcdef0123456789abcdef".into()),
             },
             Box::new(MockProvider::new()),
         )
@@ -686,6 +639,21 @@ mod tests {
         assert_eq!(health["provider"], "mock");
         assert_eq!(health["sync"], dasdevbot_sync::TRANSPORT);
         assert!(health["endpoint_id"].is_null());
+        let probed = agent.get(&health_url).call().unwrap();
+        assert!(probed.header("Access-Control-Allow-Origin").is_none());
+        assert!(probed
+            .header("Content-Security-Policy")
+            .unwrap_or("")
+            .contains("connect-src"));
+
+        let unauth = agent
+            .post(&format!("http://{addr}/v1/events"))
+            .send_json(json!({"source": "demo", "kind": "repo.push"}))
+            .unwrap_err();
+        match unauth {
+            ureq::Error::Status(401, _) => {}
+            other => panic!("expected 401, got {other}"),
+        }
 
         let emitted = agent
             .post(&format!("http://{addr}/v1/events"))
@@ -693,7 +661,12 @@ mod tests {
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
-                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0",
+                    "subject": "simulated push",
+                    "forced": true
+                },
                 "idempotency_key": "ipc-push-1"
             }))
             .unwrap()
@@ -708,7 +681,12 @@ mod tests {
             .send_json(json!({
                 "source": "demo",
                 "kind": "repo.push",
-                "payload": {"repo": "DasVR/NIL", "ref": "phase0", "subject": "simulated push"},
+                "payload": {
+                    "repo": "DasVR/NIL",
+                    "ref": "phase0",
+                    "subject": "simulated push",
+                    "forced": true
+                },
                 "idempotency_key": "ipc-push-1"
             }))
             .unwrap()
@@ -720,7 +698,7 @@ mod tests {
         let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
         assert_eq!(snap["provider"], "mock");
         let approval = &snap["approvals"][0];
-        assert_eq!(approval["status"], "pending");
+        assert_eq!(approval["status"], "denied");
         assert_eq!(approval["effect_class"], "external");
         assert_eq!(approval["action"], "post_pr_comment");
         assert_eq!(approval["evidence"]["repo"], "DasVR/NIL");
@@ -734,38 +712,31 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("DasVR/NIL"));
-        assert_eq!(approval["provider"], "mock");
-        assert!(approval["draft"].as_str().unwrap().contains("refresh()"));
+        assert!(!approval["draft"].as_str().unwrap().contains("refresh()"));
         let evidence_id = approval["evidence"]["event_id"].as_str().unwrap();
         let approval_id = approval["id"].as_str().unwrap();
-        let request_key = format!("approval-requested:{approval_id}");
         let events = snap["events"].as_array().unwrap();
         assert!(events.iter().any(|event| event["id"] == evidence_id));
-        assert!(events
-            .iter()
-            .any(|event| event["idempotency_key"] == request_key));
         let agents = snap["agents"].as_array().unwrap();
         let reviewer = agents.iter().find(|a| a["id"] == "reviewer").unwrap();
-        assert_eq!(reviewer["status"], "blocked");
-        assert!(reviewer["tokens_spent"].as_u64().unwrap() > 0);
-        assert!(!snap["ledger"].as_array().unwrap().is_empty());
-        assert_eq!(snap["ledger"][0]["usage_kind"], "estimated");
-        assert_eq!(snap["ledger"][0]["micro_usd"], 0);
+        assert_eq!(reviewer["tokens_spent"].as_u64().unwrap(), 0);
+        assert!(snap["ledger"].as_array().unwrap().is_empty());
 
-        let decision = agent
+        let decision_err = agent
             .post(&format!(
                 "http://{addr}/v1/approvals/{approval_id}/decision"
             ))
             .set("Authorization", &format!("Bearer {token}"))
-            .send_json(json!({"decision": "approve"}))
-            .unwrap()
-            .into_json::<DecisionResponse>()
-            .unwrap();
-        assert_eq!(decision.status, "approved");
-        assert!(!decision.executed);
-        assert!(!decision.committed);
-        assert!(decision.undo_until.is_some());
-        assert!(!decision.event_id.is_empty());
+            .send_json(json!({"decision": "approve", "reason": "http-must-not-echo"}))
+            .unwrap_err();
+        assert_ipc_only(decision_err);
+
+        let undo_err = agent
+            .post(&format!("http://{addr}/v1/approvals/{approval_id}/undo"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({"reason": "http-must-not-echo"}))
+            .unwrap_err();
+        assert_ipc_only(undo_err);
 
         let after: serde_json::Value = agent
             .get(&format!("http://{addr}/v1/snapshot"))
@@ -773,74 +744,18 @@ mod tests {
             .unwrap()
             .into_json()
             .unwrap();
-        assert_eq!(after["approvals"][0]["status"], "approved");
-        assert_eq!(after["approvals"][0]["committed"], false);
-        assert_eq!(
-            after["agents"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|a| a["id"] == "reviewer")
-                .unwrap()["status"],
-            "blocked"
-        );
-
-        let undone = agent
-            .post(&format!("http://{addr}/v1/approvals/{approval_id}/undo"))
-            .set("Authorization", &format!("Bearer {token}"))
-            .send_json(json!({}))
-            .unwrap()
-            .into_json::<dasdevbot_proto::UndoResponse>()
-            .unwrap();
-        assert_eq!(undone.status, "pending");
-
-        let denied = agent
-            .post(&format!(
-                "http://{addr}/v1/approvals/{approval_id}/decision"
-            ))
-            .set("Authorization", &format!("Bearer {token}"))
-            .send_json(json!({
-                "decision": "deny",
-                "reason": "Not worth a comment on a phase-0 branch"
-            }))
-            .unwrap()
-            .into_json::<DecisionResponse>()
-            .unwrap();
-        assert_eq!(denied.status, "denied");
-        assert!(!denied.executed);
-        assert!(!denied.committed);
-
-        let reasoned: serde_json::Value = agent
-            .get(&format!("http://{addr}/v1/snapshot"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(reasoned["approvals"][0]["status"], "denied");
-        assert_eq!(
-            reasoned["approvals"][0]["reason"],
-            "Not worth a comment on a phase-0 branch"
-        );
-        assert_eq!(
-            reasoned["agents"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|a| a["id"] == "reviewer")
-                .unwrap()["status"],
-            "blocked"
-        );
-        let kinds: Vec<&str> = reasoned["events"]
+        assert_eq!(after["approvals"][0]["status"], "denied");
+        assert_eq!(after["approvals"][0]["effect_class"], "external");
+        let kinds: Vec<&str> = after["events"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|event| event["kind"].as_str())
             .collect();
         assert!(kinds.contains(&"repo.push"));
-        assert!(kinds.contains(&"approval.requested"));
-        assert!(kinds.contains(&"approval.decided"));
-        assert!(kinds.contains(&"approval.undone"));
-        assert!(kinds.contains(&"ledger.posted"));
+        assert!(kinds.contains(&"gate.denied"));
+        assert!(!kinds.contains(&"approval.decided"));
+        assert!(!kinds.contains(&"approval.undone"));
         assert!(!kinds.contains(&"approval.committed"));
     }
 
@@ -853,7 +768,7 @@ mod tests {
                 data: dir.join("db.sqlite"),
                 web_root: None,
                 role: "server".into(),
-                token: None,
+                token: Some("0123456789abcdef0123456789abcdef".into()),
             },
             Box::new(MockProvider::new()),
         )
@@ -875,12 +790,11 @@ mod tests {
             .set("Authorization", &format!("Bearer {token}"))
             .send_json(json!({
                 "source": "demo",
-                "kind": "repo.push",
+                "kind": "repo.force_push",
                 "payload": {
                     "repo": "DasVR/NIL",
                     "ref": "phase0",
-                    "subject": "simulated push",
-                    "forced": true
+                    "subject": "simulated push"
                 },
                 "idempotency_key": "ipc-forced-1"
             }))
@@ -895,7 +809,47 @@ mod tests {
         assert_eq!(approval["effect_class"], "destructive");
         assert_eq!(approval["action"], "force_push");
         assert_eq!(approval["draft"], "git push --force origin phase0");
-        assert_eq!(approval["status"], "pending");
+        assert_eq!(approval["status"], "denied");
+        let approval_id = approval["id"].as_str().unwrap();
+        let decision_err = agent
+            .post(&format!(
+                "http://{addr}/v1/approvals/{approval_id}/decision"
+            ))
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        assert_ipc_only(decision_err);
+        let after: serde_json::Value = agent
+            .get(&format!("http://{addr}/v1/snapshot"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(after["approvals"][0]["status"], "denied");
+        assert_eq!(after["approvals"][0]["effect_class"], "destructive");
+    }
+
+    #[test]
+    fn a_bearer_in_the_query_string_is_rejected_without_echoing_it() {
+        assert!(url_exposes_bearer("/v1/health?token=abc", "not-the-query"));
+        assert!(url_exposes_bearer("/v1/health?access_token=1", "other"));
+        let token = "0123456789abcdef0123456789abcdef";
+        assert!(url_exposes_bearer(&format!("/v1/{token}/health"), token));
+        assert!(!url_exposes_bearer("/v1/health", token));
+        assert!(!CONTENT_SECURITY_POLICY.contains('*'));
+    }
+
+    fn assert_ipc_only(err: ureq::Error) {
+        match err {
+            ureq::Error::Status(403, response) => {
+                let body = response.into_string().unwrap();
+                assert_eq!(
+                    body,
+                    "{\"error\":\"approval decisions are Tauri IPC only\"}"
+                );
+            }
+            other => panic!("expected 403, got {other}"),
+        }
     }
 
     #[test]
@@ -934,6 +888,7 @@ mod tests {
             }))
             .unwrap();
         let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
+        let before = snap["approvals"][0]["status"].clone();
         let approval_id = snap["approvals"][0]["id"].as_str().unwrap();
         let decision_url = format!("http://{addr}/v1/approvals/{approval_id}/decision");
 
@@ -991,8 +946,8 @@ mod tests {
             .unwrap()
             .into_json::<serde_json::Value>()
             .unwrap();
-        assert_eq!(still["approvals"][0]["status"], "pending");
-        assert!(still["approvals"][0]["expires_at"].as_u64().is_some());
+        assert_eq!(still["approvals"][0]["status"], before);
+        assert_ne!(still["approvals"][0]["status"], "approved");
     }
 
     #[test]
@@ -1146,6 +1101,7 @@ mod tests {
             }))
             .unwrap();
         let snap = wait_approval(&agent, &format!("http://{addr}/v1/snapshot"));
+        let before = snap["approvals"][0]["status"].clone();
         let approval_id = snap["approvals"][0]["id"].as_str().unwrap();
 
         let leaked = agent
@@ -1189,7 +1145,8 @@ mod tests {
             .unwrap()
             .into_json::<serde_json::Value>()
             .unwrap();
-        assert_eq!(still["approvals"][0]["status"], "pending");
+        assert_eq!(still["approvals"][0]["status"], before);
+        assert_ne!(still["approvals"][0]["status"], "approved");
     }
 
     #[test]

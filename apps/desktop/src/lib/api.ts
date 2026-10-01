@@ -355,31 +355,41 @@ export async function emitPush(forced = false): Promise<void> {
   }
 }
 
+type TauriInternals = {
+  invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+};
+
+function tauriInvoke(): TauriInternals["invoke"] {
+  const internals = (globalThis as { __TAURI_INTERNALS__?: TauriInternals }).__TAURI_INTERNALS__;
+  if (!internals?.invoke) {
+    throw new Error("approval decisions are Tauri IPC only");
+  }
+  return internals.invoke.bind(internals);
+}
+
 export async function decide(id: string, decision: Decision, reason?: string): Promise<void> {
-  const body: { decision: Decision; reason?: string } = { decision };
   const trimmed = reason?.trim();
-  if (trimmed) {
-    body.reason = trimmed;
-  }
-  const response = await fetch(`/v1/approvals/${id}/decision`, {
-    method: "POST",
-    headers: await jsonHeaders(),
-    body: JSON.stringify(body),
+  await tauriInvoke()("sign_decision", {
+    id,
+    decision,
+    reason: trimmed ? trimmed : null,
   });
-  if (!response.ok) {
-    throw new Error(await readError(response));
-  }
 }
 
 export async function undo(id: string): Promise<void> {
-  const response = await fetch(`/v1/approvals/${id}/undo`, {
-    method: "POST",
-    headers: await jsonHeaders(),
-    body: "{}",
-  });
-  if (!response.ok) {
-    throw new Error(await readError(response));
+  await tauriInvoke()("undo_decision", { id });
+}
+
+export async function setSecret(handle: string, value: string): Promise<{ last4: string }> {
+  const result = await tauriInvoke()("set_secret", { handle, value });
+  if (!result || typeof result !== "object" || !("last4" in result)) {
+    throw new Error("secret entry failed");
   }
+  const last4 = (result as { last4: unknown }).last4;
+  if (typeof last4 !== "string") {
+    throw new Error("secret entry failed");
+  }
+  return { last4 };
 }
 
 async function readError(response: Response): Promise<string> {

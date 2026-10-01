@@ -31,3 +31,27 @@ Security Director sign-off needs every item below to pass.
 15. Inherited env doesn't pass through: start the daemon with `CLAUDE_CONFIG_DIR=/tmp/x`, `ANTHROPIC_API_KEY=sk-test`, `ANTHROPIC_BASE_URL=http://127.0.0.1:9`, and `CLAUDE_CODE_USE_BEDROCK=1` in its environment. The child still uses /var/lib/dasdevbot/claude-config and the Claude Pro login (check `/proc/<child>/environ` holds only USER, LANG, TMPDIR, HOME, CLAUDE_CONFIG_DIR, PATH, DISABLE_AUTOUPDATER, DISABLE_UPDATES).
 16. Refusals at startup: a symlinked or 0755 /var/lib/dasdevbot/claude-config, or one owned by another uid, makes the provider fail closed with no CLI call.
 17. Live-run gate: the shipped unit keeps the all-zero `--claude-sha256` placeholder and no Ollama key is in the keyring until items 1-16 pass, so `serve` fails closed for both providers until then.
+
+## Device user unit
+
+`deploy/ubuntu/dasdevbotd-device.service` is a user unit, not a template.
+
+- There is no `User=` line. `User=%i` is only valid in a template unit (`dasdevbotd-device@.service`). This file is not one.
+- `WantedBy=default.target`. A user unit is pulled in by the user manager's `default.target`, not `multi-user.target`.
+- `ProtectHome` is omitted. On the user manager it hides the home directory, and `ReadWritePaths=%h` does not pierce that, so a database under `%h` cannot be opened. `StateDirectory=dasdevbot` creates the directory under the user state dir, and the unit passes `--data %S/dasdevbot/device.sqlite`.
+- Install with `systemctl --user enable --now dasdevbotd-device.service`.
+
+### Device user-unit sandboxing checks
+
+The user manager runs without privileges. Several hardening directives only apply when it can set up a user namespace, and some are dropped silently. Check each one on the live box with the unit running (`PID=$(systemctl --user show -p MainPID --value dasdevbotd-device.service)`):
+
+18. `systemd-analyze --user security dasdevbotd-device.service` runs, and every directive in the unit shows as applied. Record the exposure score.
+19. `journalctl --user -u dasdevbotd-device.service -b` has no "Failed to set up", "Operation not permitted" or "ignoring" line for any sandboxing directive.
+20. `grep -E 'NoNewPrivs|Seccomp|CapBnd|CapEff' /proc/$PID/status` shows `NoNewPrivs: 1`, `Seccomp: 2`, and `CapBnd` and `CapEff` all zero.
+21. `PrivateDevices`: `ls /proc/$PID/root/dev` lists only the minimal pseudo-devices (null, zero, full, random, urandom, tty, pts, shm). No block devices or `/dev/sd*`.
+22. `PrivateTmp`: a file written to `/tmp` by the daemon isn't visible in the host's `/tmp`.
+23. `ProtectSystem=strict`: the daemon can write only under `%S/dasdevbot` (for example `~/.local/state/dasdevbot`). A write to `/usr`, `/etc` or the home directory outside the state dir fails with EROFS.
+24. `ProtectKernelTunables` and `ProtectKernelModules`: `/proc/sys` is read-only inside the unit, and the unit can't load a module.
+25. `RestrictAddressFamilies`: the daemon can open AF_UNIX and loopback AF_INET sockets and nothing else (an AF_NETLINK or AF_PACKET socket fails).
+26. `UMask=0077`: `device.sqlite`, `.token`, `.audit-key`, `.audit-tip` and the `.window-*` files are mode 0600, and the state dir is 0700.
+27. After `systemctl --user daemon-reload` and a restart, all of the above still hold. Record the systemd version (`systemctl --version`), because user-manager sandboxing support differs between releases.

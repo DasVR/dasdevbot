@@ -56,7 +56,7 @@ def cold_starts() -> list[float]:
         data = Path(tempfile.mkdtemp(prefix="dasdevbot-cold-")) / "db.sqlite"
         start = time.perf_counter()
         proc = subprocess.Popen(
-            [str(BIN), "serve", "--bind", f"127.0.0.1:{port}", "--data", str(data)],
+            [str(BIN), "serve", "--role", "server", "--bind", f"127.0.0.1:{port}", "--data", str(data)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -78,7 +78,7 @@ def rss_scenario() -> dict[str, dict[str, str]]:
     directory = Path(tempfile.mkdtemp(prefix="dasdevbot-rss-"))
     data = directory / "db.sqlite"
     proc = subprocess.Popen(
-        [str(BIN), "serve", "--bind", f"127.0.0.1:{port}", "--data", str(data)],
+        [str(BIN), "serve", "--role", "server", "--bind", f"127.0.0.1:{port}", "--data", str(data)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

@@ -4,6 +4,10 @@ use dasdevbot_core::{HlcTimestamp, HybridClock, TokenBudget, EVENT_VERSION};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
+use crate::secrets::SecretHandle;
+use crate::signature::{
+    self, action_hash, decision_message, payload_hash, undo_message, DECISION_PURPOSE, UNDO_PURPOSE,
+};
 use crate::{Error, Result};
 
 /// How long a recorded decision stays undoable before it is final.
@@ -25,6 +29,10 @@ pub struct Store {
     conn: Connection,
     clock: HybridClock,
     node_id: String,
+    /// Sidecar that survives deletion of this database. Empty for memory stores.
+    audit_tip_path: Option<std::path::PathBuf>,
+    /// Hello pin for memory stores. File stores keep it in the sidecar.
+    memory_hello_pin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +149,10 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         crate::ensure_data_gitignore(path)?;
         let conn = Connection::open(path)?;
-        Self::from_conn(conn)
+        let mut store = Self::from_conn(conn)?;
+        store.audit_tip_path = Some(crate::audit_tip_path(path));
+        crate::audit_log::bind_tip(&store)?;
+        Ok(store)
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
@@ -158,11 +169,33 @@ impl Store {
             conn,
             clock,
             node_id,
+            audit_tip_path: None,
+            memory_hello_pin: None,
         })
+    }
+
+    pub(crate) fn audit_tip_path(&self) -> Option<&std::path::Path> {
+        self.audit_tip_path.as_deref()
+    }
+
+    pub(crate) fn memory_hello_pin(&self) -> Option<&str> {
+        self.memory_hello_pin.as_deref()
+    }
+
+    pub(crate) fn set_memory_hello_pin(&mut self, pin: Option<String>) {
+        self.memory_hello_pin = pin;
     }
 
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
     }
 
     #[cfg(test)]
@@ -330,8 +363,45 @@ impl Store {
                  attempt = attempt + 1
              WHERE id = (
                  SELECT id FROM jobs
-                 WHERE status = 'pending'
-                    OR (status = 'leased' AND lease_until_ms <= ?3)
+                 WHERE (
+                     status = 'pending'
+                     OR (status = 'leased' AND lease_until_ms <= ?3)
+                 )
+                 AND (assigned_worker IS NULL OR assigned_worker = ?1)
+                 ORDER BY created_at ASC, id ASC
+                 LIMIT 1
+             )
+             RETURNING id, agent_id, status, lease_owner, lease_until_ms, idempotency_key, payload, attempt",
+            params![owner, until, now_ms as i64],
+            map_job,
+        ) {
+            Ok(job) => Ok(Some(job)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// Claim only a job the leader assigned to this worker.
+    pub fn claim_assigned(
+        &self,
+        owner: &str,
+        now_ms: u64,
+        lease_for_ms: u64,
+    ) -> Result<Option<Job>> {
+        let until = now_ms.saturating_add(lease_for_ms) as i64;
+        match self.conn.query_row(
+            "UPDATE jobs
+             SET status = 'leased',
+                 lease_owner = ?1,
+                 lease_until_ms = ?2,
+                 attempt = attempt + 1
+             WHERE id = (
+                 SELECT id FROM jobs
+                 WHERE (
+                     status = 'pending'
+                     OR (status = 'leased' AND lease_until_ms <= ?3)
+                 )
+                 AND assigned_worker = ?1
                  ORDER BY created_at ASC, id ASC
                  LIMIT 1
              )
@@ -450,13 +520,147 @@ impl Store {
         }
     }
 
-    pub fn has_grant(&self, agent_id: &str, effect_class: &str) -> Result<bool> {
+    /// A missing expiry fails closed. `now_ms` is the daemon clock.
+    pub fn has_grant(&self, agent_id: &str, effect_class: &str, now_ms: u64) -> Result<bool> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM grants WHERE agent_id = ?1 AND effect_class = ?2",
-            params![agent_id, effect_class],
+            "SELECT COUNT(*) FROM grants
+             WHERE agent_id = ?1 AND effect_class = ?2
+               AND expires_at IS NOT NULL AND expires_at > ?3",
+            params![agent_id, effect_class, now_ms as i64],
             |row| row.get(0),
         )?;
         Ok(n > 0)
+    }
+
+    pub fn leader_fencing(&self) -> Result<u64> {
+        let fencing = self
+            .conn
+            .query_row("SELECT fencing FROM leader_lease WHERE id = 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?;
+        Ok(fencing.unwrap_or(0).max(0) as u64)
+    }
+
+    pub fn approval_material(&self, approval_id: &str) -> Result<(String, String, String)> {
+        self.conn
+            .query_row(
+                "SELECT effect_class, action, draft FROM approvals WHERE id = ?1",
+                [approval_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("approval {approval_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    pub fn approval_target(&self, approval_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT evidence_repo FROM approvals WHERE id = ?1",
+                [approval_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("approval {approval_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    pub fn hello_public_key(&self) -> Result<Option<(i64, String)>> {
+        self.conn
+            .query_row(
+                "SELECT blob_type, public_key FROM hello_public_key WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
+    /// Pins the first key. A key that does not match the pin or the stored
+    /// row is refused. The audit row is written before the key is stored.
+    pub fn enroll_hello_public_key(
+        &mut self,
+        blob_type: i64,
+        public_key_hex: &str,
+        now_ms: u64,
+        audit_seed: &[u8; 32],
+    ) -> Result<()> {
+        let fingerprint = crate::hello_key::hello_fingerprint(blob_type, public_key_hex);
+        let mismatch =
+            || Error::Forbidden("Windows Hello key does not match the pinned fingerprint".into());
+        let pin = crate::audit_log::read_hello_pin(self)?;
+        if let Some(pin) = &pin {
+            if *pin != fingerprint {
+                return Err(mismatch());
+            }
+        }
+        let stored = self.hello_public_key()?;
+        if let Some((stored_type, stored_key)) = &stored {
+            if crate::hello_key::hello_fingerprint(*stored_type, stored_key) != fingerprint {
+                return Err(mismatch());
+            }
+            if pin.is_some() {
+                return Ok(());
+            }
+            // A row from before pinning: audit and pin it, same as a first enrollment.
+        }
+        let payload = serde_json::json!({
+            "fingerprint": fingerprint,
+            "blob_type": blob_type,
+        })
+        .to_string();
+        crate::audit_log::append(self, "hello.enrolled", &payload, now_ms, audit_seed)?;
+        if stored.is_none() {
+            self.conn.execute(
+                "INSERT INTO hello_public_key (id, blob_type, public_key, created_at) VALUES (1, ?1, ?2, ?3)",
+                params![blob_type, public_key_hex, now_ms as i64],
+            )?;
+        }
+        crate::audit_log::write_hello_pin(self, Some(&fingerprint))
+    }
+
+    /// Audits the reset first, then drops the row and the pin. The tip stays.
+    pub fn reset_hello_enrollment(
+        &mut self,
+        reason: &str,
+        now_ms: u64,
+        audit_seed: &[u8; 32],
+    ) -> Result<()> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(Error::Forbidden("a Hello reset needs a reason".into()));
+        }
+        let old = match self.hello_public_key()? {
+            Some((blob_type, key)) => Some(crate::hello_key::hello_fingerprint(blob_type, &key)),
+            None => crate::audit_log::read_hello_pin(self)?,
+        };
+        let payload = serde_json::json!({
+            "fingerprint": old,
+            "reason": reason,
+        })
+        .to_string();
+        crate::audit_log::append(self, "hello.reset", &payload, now_ms, audit_seed)?;
+        self.conn.execute("DELETE FROM hello_public_key", [])?;
+        crate::audit_log::write_hello_pin(self, None)
+    }
+
+    pub fn grants(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT agent_id, effect_class, expires_at FROM grants ORDER BY agent_id, effect_class",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub fn rules_for_kind(&self, kind: &str) -> Result<Vec<String>> {
@@ -497,14 +701,88 @@ impl Store {
         Ok(changed == 1)
     }
 
-    /// Keep the lease and push its deadline out so the worker does not claim the job again until then.
-    pub fn pause_leased(&self, job_id: &str, owner: &str, until_ms: u64) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE jobs SET lease_until_ms = ?1
-             WHERE id = ?2 AND lease_owner = ?3 AND status = 'leased'",
-            params![until_ms as i64, job_id, owner],
+    pub fn approval_effect_class(&self, approval_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT effect_class FROM approvals WHERE id = ?1",
+                [approval_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Error::NotFound(format!("approval {approval_id}"))
+                }
+                other => Error::Sqlite(other),
+            })
+    }
+
+    /// Phase 1 denial. Destructive work is recorded and not left pending.
+    pub fn record_gate_denial(
+        &mut self,
+        wall_ms: u64,
+        owner: &str,
+        approval: &NewApproval,
+        reason: &str,
+        audit_seed: &[u8; 32],
+    ) -> Result<String> {
+        let approval_id = Uuid::new_v4().to_string();
+        let payload = format!(
+            "{{\"effect_class\":\"{}\",\"outcome\":\"deny\"}}",
+            approval.effect_class
+        );
+        self.append_at(
+            wall_ms,
+            "runtime",
+            dasdevbot_core::kind::GATE_DENIED,
+            &payload,
+            &format!("gate-denied:{approval_id}"),
+            Some(&approval.thread_id),
         )?;
-        Ok(changed == 1)
+        crate::audit_log::append(
+            self,
+            dasdevbot_core::kind::GATE_DENIED,
+            &payload,
+            wall_ms,
+            audit_seed,
+        )?;
+        self.conn.execute(
+            "INSERT INTO approvals (
+                id, job_id, agent_id, thread_id, effect_class, action, purpose, draft, evidence,
+                evidence_repo, evidence_ref, evidence_event_id, evidence_kind,
+                status, provider, model, usage_kind, input_tokens, output_tokens, micro_usd,
+                created_at, decided_at, reason, committed
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13,
+                'denied', ?14, ?15, ?16, ?17, ?18, ?19,
+                ?20, ?20, ?21, 1
+             )",
+            params![
+                approval_id,
+                approval.job_id,
+                approval.agent_id,
+                approval.thread_id,
+                approval.effect_class,
+                approval.action,
+                approval.purpose,
+                approval.draft,
+                approval.evidence,
+                approval.evidence_repo,
+                approval.evidence_ref,
+                approval.evidence_event_id,
+                approval.evidence_kind,
+                approval.provider,
+                approval.model,
+                approval.usage_kind,
+                approval.input_tokens,
+                approval.output_tokens,
+                approval.micro_usd,
+                wall_ms as i64,
+                reason,
+            ],
+        )?;
+        self.fail_leased(&approval.job_id, owner)?;
+        Ok(approval_id)
     }
 
     pub fn record_approval_and_wait(
@@ -639,6 +917,30 @@ impl Store {
         Ok(approval_id)
     }
 
+    /// External signatures are checked against the stored Hello public key.
+    /// Internal tiers keep the Phase 1 seed. The seed path never verifies an
+    /// external card.
+    fn signature_ok(
+        &self,
+        class_name: &str,
+        secrets: &dyn SecretHandle,
+        message: &str,
+        signature_hex: &str,
+    ) -> Result<bool> {
+        if class_name == "external" {
+            if !crate::hello_key::signing_path_is_present() {
+                return Ok(false);
+            }
+            crate::hello_key::verify_stored(self, message, signature_hex)
+        } else {
+            Ok(signature::verify_decision_signature(
+                secrets,
+                message,
+                signature_hex,
+            ))
+        }
+    }
+
     pub fn approvals(&self) -> Result<Vec<ApprovalRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT a.id, a.job_id, a.agent_id, agents.name, a.thread_id, a.effect_class, a.action,
@@ -675,19 +977,72 @@ impl Store {
         Ok(out)
     }
 
-    /// Record approve or deny as pending-commit. The external effect waits for [`Self::commit_due`].
-    pub fn decide_approval(
+    pub(crate) fn issue_decision_nonce(
+        &self,
+        approval_id: &str,
+        payload_hash: &str,
+        purpose: &str,
+        now_ms: u64,
+    ) -> Result<String> {
+        let nonce = Uuid::new_v4().to_string();
+        let expires = now_ms.saturating_add(signature::NONCE_TTL_MS) as i64;
+        self.conn.execute(
+            "INSERT INTO decision_nonces (nonce, approval_id, payload_hash, purpose, expires_at, consumed)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![nonce, approval_id, payload_hash, purpose, expires],
+        )?;
+        Ok(nonce)
+    }
+
+    pub(crate) fn approval_status(&self, approval_id: &str) -> Result<String> {
+        Ok(self.approval_decision_row(approval_id)?.status)
+    }
+
+    /// Commit a decision only after the signature and the single-use nonce check out.
+    pub(crate) fn commit_signed_decision(
         &mut self,
         approval_id: &str,
         decision: &str,
         reason: Option<&str>,
         wall_ms: u64,
+        proof: &DecisionProof,
+        secrets: &dyn SecretHandle,
     ) -> Result<DecisionRecord> {
         if decision != "approve" && decision != "deny" {
             return Err(Error::BadRequest("decision must be approve or deny".into()));
         }
         self.expire_due(wall_ms)?;
-        let reason = clean_reason(reason);
+        let (class_name, action, draft) = self.approval_material(approval_id)?;
+        let expected_hash = action_hash(&class_name, &action, &draft);
+        if proof.action_hash != expected_hash {
+            return Err(Error::Forbidden(
+                "decision signature does not match the card".into(),
+            ));
+        }
+        let signed_reason = reason.unwrap_or("");
+        let message = decision_message(
+            approval_id,
+            decision,
+            signed_reason,
+            &proof.window,
+            &proof.nonce,
+            proof.fencing,
+            &proof.action_hash,
+        );
+        if !self.signature_ok(&class_name, secrets, &message, &proof.signature)? {
+            return Err(Error::Forbidden(
+                "decision signature is missing or invalid".into(),
+            ));
+        }
+        let bound = payload_hash(
+            DECISION_PURPOSE,
+            approval_id,
+            decision,
+            signed_reason,
+            &proof.window,
+            &proof.action_hash,
+        );
+        let stored_reason = clean_reason(reason);
         let status = if decision == "approve" {
             "approved"
         } else {
@@ -714,14 +1069,31 @@ impl Store {
         let payload = serde_json::json!({
             "approval_id": approval_id,
             "decision": decision,
-            "reason": reason,
+            "reason": stored_reason,
             "executed": false,
             "pending_commit": true,
             "commit_due_ms": commit_due,
+            "signature": proof.signature,
+            "nonce": proof.nonce,
+            "fencing": proof.fencing,
+            "action_hash": proof.action_hash,
+            "window": proof.window,
         })
         .to_string();
         let decision_key = format!("approval-decided:{approval_id}:{event_id}");
         let tx = self.conn.transaction()?;
+        if !consume_nonce(
+            &tx,
+            &proof.nonce,
+            approval_id,
+            &bound,
+            DECISION_PURPOSE,
+            wall_ms,
+        )? {
+            return Err(Error::Forbidden(
+                "decision nonce is missing, expired, or already used".into(),
+            ));
+        }
         insert_event(
             &tx,
             EventInsert {
@@ -744,7 +1116,7 @@ impl Store {
                 status,
                 wall_ms as i64,
                 event_id,
-                reason,
+                stored_reason,
                 commit_due as i64,
                 approval_id,
             ],
@@ -762,8 +1134,43 @@ impl Store {
         })
     }
 
-    /// Revert a pending-commit decision. Outside the window the decision is committed instead.
-    pub fn undo_approval(&mut self, approval_id: &str, wall_ms: u64) -> Result<DecisionRecord> {
+    /// Revert a pending-commit decision. The undo signature is checked first.
+    pub(crate) fn commit_signed_undo(
+        &mut self,
+        approval_id: &str,
+        wall_ms: u64,
+        proof: &DecisionProof,
+        secrets: &dyn SecretHandle,
+    ) -> Result<DecisionRecord> {
+        let (class_name, action, draft) = self.approval_material(approval_id)?;
+        let expected_hash = action_hash(&class_name, &action, &draft);
+        if proof.action_hash != expected_hash {
+            return Err(Error::Forbidden(
+                "undo signature does not match the card".into(),
+            ));
+        }
+        let current = self.approval_decision_row(approval_id)?;
+        let message = undo_message(
+            approval_id,
+            &current.status,
+            &proof.window,
+            &proof.nonce,
+            proof.fencing,
+            &proof.action_hash,
+        );
+        if !self.signature_ok(&class_name, secrets, &message, &proof.signature)? {
+            return Err(Error::Forbidden(
+                "undo signature is missing or invalid".into(),
+            ));
+        }
+        let bound = payload_hash(
+            UNDO_PURPOSE,
+            approval_id,
+            "undo",
+            &current.status,
+            &proof.window,
+            &proof.action_hash,
+        );
         self.commit_due(wall_ms)?;
         let current = self.approval_decision_row(approval_id)?;
         if current.status != "approved" && current.status != "denied" {
@@ -782,10 +1189,25 @@ impl Store {
             "approval_id": approval_id,
             "reverted_decision": current.status,
             "reverted_event_id": current.decision_event_id,
+            "signature": proof.signature,
+            "nonce": proof.nonce,
+            "window": proof.window,
         })
         .to_string();
         let key = format!("approval-undone:{approval_id}:{event_id}");
         let tx = self.conn.transaction()?;
+        if !consume_nonce(
+            &tx,
+            &proof.nonce,
+            approval_id,
+            &bound,
+            UNDO_PURPOSE,
+            wall_ms,
+        )? {
+            return Err(Error::Forbidden(
+                "undo nonce is missing, expired, or already used".into(),
+            ));
+        }
         insert_event(
             &tx,
             EventInsert {
@@ -980,6 +1402,15 @@ impl Store {
 
 /// Outcome of decide or undo.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionProof {
+    pub signature: String,
+    pub nonce: String,
+    pub fencing: u64,
+    pub action_hash: String,
+    pub window: String,
+}
+
+#[derive(Debug)]
 pub struct DecisionRecord {
     pub status: String,
     pub event_id: String,
@@ -996,6 +1427,24 @@ struct DecisionRow {
     decision_event_id: Option<String>,
     commit_due_ms: Option<i64>,
     committed: i64,
+}
+
+fn consume_nonce(
+    tx: &rusqlite::Transaction<'_>,
+    nonce: &str,
+    approval_id: &str,
+    payload_hash: &str,
+    purpose: &str,
+    now_ms: u64,
+) -> Result<bool> {
+    let changed = tx.execute(
+        "UPDATE decision_nonces
+         SET consumed = 1
+         WHERE nonce = ?1 AND approval_id = ?2 AND payload_hash = ?3 AND purpose = ?4
+           AND consumed = 0 AND expires_at > ?5",
+        params![nonce, approval_id, payload_hash, purpose, now_ms as i64],
+    )?;
+    Ok(changed == 1)
 }
 
 fn undo_until_ms(committed: i64, commit_due_ms: Option<i64>) -> Option<u64> {
@@ -1200,6 +1649,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS grants (
             agent_id TEXT NOT NULL,
             effect_class TEXT NOT NULL,
+            expires_at INTEGER,
             PRIMARY KEY (agent_id, effect_class)
         );
 
@@ -1290,11 +1740,13 @@ fn migrate(conn: &Connection) -> Result<()> {
         "TEXT NOT NULL DEFAULT ''",
     )?;
     ensure_column(conn, "approvals", "expires_at", "INTEGER")?;
+    ensure_column(conn, "grants", "expires_at", "INTEGER")?;
     ensure_column(conn, "approvals", "decided_at", "INTEGER")?;
     ensure_column(conn, "approvals", "decision_event_id", "TEXT")?;
     ensure_column(conn, "approvals", "reason", "TEXT")?;
     ensure_column(conn, "approvals", "commit_due_ms", "INTEGER")?;
     ensure_column(conn, "approvals", "committed", "INTEGER NOT NULL DEFAULT 0")?;
+    crate::schema::migrate(conn)?;
     Ok(())
 }
 
@@ -1340,12 +1792,37 @@ fn seed(conn: &Connection) -> Result<()> {
         "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES ('rule-repo-push-reviewer', 'repo.push', 'reviewer')",
         [],
     )?;
-    for class in ["read", "write_local", "external", "destructive"] {
+    conn.execute(
+        "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES ('rule-force-push-reviewer', 'repo.force_push', 'reviewer')",
+        [],
+    )?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for class in [
+        dasdevbot_core::EffectClass::Read,
+        dasdevbot_core::EffectClass::WriteLocal,
+        dasdevbot_core::EffectClass::External,
+    ] {
+        let expires = dasdevbot_core::issue_expiry(class, now_ms, None)
+            .expect("phase 1 issues this class") as i64;
         conn.execute(
-            "INSERT OR IGNORE INTO grants (agent_id, effect_class) VALUES ('reviewer', ?1)",
-            [class],
+            "INSERT INTO grants (agent_id, effect_class, expires_at) VALUES ('reviewer', ?1, ?2)
+             ON CONFLICT(agent_id, effect_class) DO UPDATE SET
+                expires_at = COALESCE(grants.expires_at, excluded.expires_at)",
+            params![class.as_str(), expires],
         )?;
     }
+    // Bootstrap mock cap. The writer lease is already expired so the executor
+    // can take it. A missing row stays a denial; this row is the demo path.
+    conn.execute(
+        "INSERT OR IGNORE INTO provider_caps (
+            provider, cap_tokens, spent_tokens, reserved_tokens, window_kind, reset_at_ms,
+            concurrency_cap, in_flight, fencing_epoch, writer_id, writer_until_ms
+         ) VALUES ('mock', 1000000000, 0, 0, 'monthly', NULL, 8, 0, 1, 'bootstrap', 0)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1503,7 +1980,7 @@ mod tests {
                     job_id,
                     agent_id: "reviewer".into(),
                     thread_id: format!("thread-{now}"),
-                    effect_class: "external".into(),
+                    effect_class: "write_local".into(),
                     action: "post_pr_comment".into(),
                     purpose: "Post a review comment.".into(),
                     draft: "draft".into(),
@@ -1527,6 +2004,65 @@ mod tests {
             .unwrap()
     }
 
+    const AUDIT_SEED: [u8; 32] = [4u8; 32];
+
+    fn approval_keys() -> crate::secrets::MemorySecrets {
+        let secrets = crate::secrets::MemorySecrets::new();
+        secrets.insert(
+            crate::secrets::APPROVAL_KEY_NAME,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+        secrets
+    }
+
+    fn signed_decide(
+        store: &mut Store,
+        id: &str,
+        decision: &str,
+        reason: Option<&str>,
+        now: u64,
+    ) -> Result<DecisionRecord> {
+        let secrets = approval_keys();
+        let verifier = crate::verify_user::TestVerifier { allow: true };
+        crate::ipc::sign_decision(
+            store,
+            crate::ipc::SignRequest {
+                window: dasdevbot_core::CARD_WINDOW,
+                voice: false,
+                approval_id: id,
+                decision,
+                reason,
+                now_ms: now,
+                fencing: 1,
+                secrets: &secrets,
+                verifier: &verifier,
+                audit_seed: &AUDIT_SEED,
+                client_signature: None,
+                client_nonce: None,
+            },
+        )
+    }
+
+    fn signed_undo(store: &mut Store, id: &str, now: u64) -> Result<DecisionRecord> {
+        let secrets = approval_keys();
+        let verifier = crate::verify_user::TestVerifier { allow: true };
+        crate::ipc::undo_decision(
+            store,
+            crate::ipc::UndoRequest {
+                window: dasdevbot_core::CARD_WINDOW,
+                voice: false,
+                approval_id: id,
+                now_ms: now,
+                fencing: 1,
+                secrets: &secrets,
+                verifier: &verifier,
+                audit_seed: &AUDIT_SEED,
+                client_signature: None,
+                client_nonce: None,
+            },
+        )
+    }
+
     fn row(store: &Store, id: &str) -> ApprovalRow {
         store
             .approvals()
@@ -1541,9 +2077,7 @@ mod tests {
         let mut store = memory();
         let now = 1_000_000;
         let id = pending_approval(&mut store, now);
-        let decided = store
-            .decide_approval(&id, "approve", None, now + 10)
-            .unwrap();
+        let decided = signed_decide(&mut store, &id, "approve", None, now + 10).unwrap();
         assert_eq!(decided.status, "approved");
         assert!(!decided.committed);
         assert_eq!(decided.undo_until, Some(now + 10 + UNDO_WINDOW_MS));
@@ -1555,7 +2089,7 @@ mod tests {
             Some("waiting_approval")
         );
 
-        let undone = store.undo_approval(&id, now + 1_000).unwrap();
+        let undone = signed_undo(&mut store, &id, now + 1_000).unwrap();
         assert_eq!(undone.status, "pending");
         let approval = row(&store, &id);
         assert_eq!(approval.status, "pending");
@@ -1574,11 +2108,9 @@ mod tests {
         let mut store = memory();
         let now = 2_000_000;
         let id = pending_approval(&mut store, now);
-        store
-            .decide_approval(&id, "deny", Some("no"), now + 5)
-            .unwrap();
+        signed_decide(&mut store, &id, "deny", Some("no"), now + 5).unwrap();
         let outside = now + 5 + UNDO_WINDOW_MS;
-        let err = store.undo_approval(&id, outside).unwrap_err();
+        let err = signed_undo(&mut store, &id, outside).unwrap_err();
         assert!(err.to_string().contains("window"));
         let approval = row(&store, &id);
         assert_eq!(approval.status, "denied");
@@ -1596,7 +2128,7 @@ mod tests {
             .unwrap();
         assert!(committed.payload.contains("\"executed\":false"));
         assert!(committed.payload.contains("\"commit\":true"));
-        let again = store.undo_approval(&id, outside + 50).unwrap_err();
+        let again = signed_undo(&mut store, &id, outside + 50).unwrap_err();
         assert!(again.to_string().contains("window"));
     }
 
@@ -1605,23 +2137,21 @@ mod tests {
         let mut store = memory();
         let now = 3_000_000;
         let id = pending_approval(&mut store, now);
-        store
-            .decide_approval(
-                &id,
-                "deny",
-                Some("  Not worth a comment on a phase-0 branch  "),
-                now + 1,
-            )
-            .unwrap();
+        signed_decide(
+            &mut store,
+            &id,
+            "deny",
+            Some("  Not worth a comment on a phase-0 branch  "),
+            now + 1,
+        )
+        .unwrap();
         assert_eq!(
             row(&store, &id).reason.as_deref(),
             Some("Not worth a comment on a phase-0 branch")
         );
-        store.undo_approval(&id, now + 2).unwrap();
+        signed_undo(&mut store, &id, now + 2).unwrap();
         assert!(row(&store, &id).reason.is_none());
-        store
-            .decide_approval(&id, "approve", Some("   "), now + 3)
-            .unwrap();
+        signed_decide(&mut store, &id, "approve", Some("   "), now + 3).unwrap();
         let approval = row(&store, &id);
         assert_eq!(approval.status, "approved");
         assert!(approval.reason.is_none());
@@ -1651,9 +2181,8 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == dasdevbot_core::kind::APPROVAL_EXPIRED));
-        let err = store
-            .decide_approval(&id, "approve", None, now + APPROVAL_TTL_MS + 1)
-            .unwrap_err();
+        let err =
+            signed_decide(&mut store, &id, "approve", None, now + APPROVAL_TTL_MS + 1).unwrap_err();
         assert!(err.to_string().contains("expired"));
     }
 
@@ -1662,9 +2191,8 @@ mod tests {
         let mut store = memory();
         let now = 4_000_000;
         let id = pending_approval(&mut store, now);
-        let err = store
-            .decide_approval(&id, "approve", None, now + APPROVAL_TTL_MS)
-            .unwrap_err();
+        let err =
+            signed_decide(&mut store, &id, "approve", None, now + APPROVAL_TTL_MS).unwrap_err();
         assert!(err.to_string().contains("expired"));
         assert_eq!(row(&store, &id).status, "expired");
         assert_eq!(
