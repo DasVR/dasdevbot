@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  /** One undo clock for the card and the thread's post step, so both count on the same tick. */
+  export const undoClock = $state({ now: Date.now() });
+
+  /** Whole seconds left in an undo window, 6 down to 1. */
+  export function undoSecondsLeft(until: number | null | undefined, now: number): number {
+    return until == null ? 0 : Math.max(1, Math.ceil((until - now) / 1000));
+  }
+</script>
+
 <script lang="ts">
   import { tick } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
@@ -20,14 +30,27 @@
   import { tokenEase, tokenMs } from "./cssTokens";
   import {
     CHECK_PATH,
-    CHEVRON_PATH,
     DELETE_KEY_PATH,
     DENY_MARK_PATH,
     ENTER_KEY_PATH,
     STRIKE_PATH,
-    arrowFromId,
-    type ArrowMark,
   } from "./pen";
+
+  const QUIET_WAITING =
+    "Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.";
+  const QUIET_HELLO = "Confirm with Windows Hello";
+  const QUIET_DENIED = "Nothing posts. The deny files when undo closes.";
+
+  /** Resting ink is fully clipped. The hold opens it from the left. */
+  function inkClip(progress: number): string {
+    if (progress <= 0) {
+      return "inset(0px 100% 0px 0px)";
+    }
+    if (progress >= 1) {
+      return "inset(0px 0px 0px 0px)";
+    }
+    return `inset(0px ${((1 - progress) * 100).toFixed(3)}% 0px 0px)`;
+  }
 
   /** Risk arrow waits after the card rise. No default-motion token is 120ms. */
   const ARROW_DELAY = "120ms";
@@ -51,6 +74,7 @@
     shortcutTarget?: boolean;
     ondecide?: (decision: Decision, reason?: string) => Promise<boolean>;
     onundo?: () => Promise<boolean>;
+    onfile?: () => Promise<boolean>;
   }
 
   let {
@@ -60,6 +84,7 @@
     shortcutTarget = false,
     ondecide,
     onundo,
+    onfile,
   }: Props = $props();
 
   const reducedMotion = new MediaQuery("(prefers-reduced-motion: reduce)");
@@ -75,35 +100,54 @@
   let cardEl = $state<HTMLElement | null>(null);
   let playRise = $state(false);
   let riseNoted = false;
-  let arrow = $state<ArrowMark | null>(null);
   let seenArmed = $state(false);
+  let helloOpen = $state(false);
+  let filing = false;
   let cardFocused = $state(false);
   let denyOpen = $state(false);
   let reason = $state("");
   let strike = $state(0);
   let checkOffset = $state(1);
   let committing = $state<Decision | null>(null);
-  let nowMs = $state(Date.now());
+  /** Set when the undo window files the card, before the backend reports committed. */
+  let undoClosed = $state(false);
+  const nowMs = $derived(undoClock.now);
 
   type HoldKind = "approve" | "deny";
   let holdKind = $state<HoldKind | null>(null);
   let holdFrame = 0;
-  let morphTimer = 0;
   let holdSealed = false;
+  let holdSource: "key" | "pointer" | null = null;
 
   const locked = $derived(busy || committing !== null);
   const duration = $derived(holdDurationMs(effect, holdMs));
-  const showUndo = $derived(
+  /** Hold progress, 0 at rest and 1 when the ink is fully open. */
+  const inkProgress = $derived.by(() => {
+    if (undoOpen) {
+      return 1;
+    }
+    if (reducedMotion.current) {
+      return holdKind === "approve" || helloOpen || checkOffset < 1 ? 1 : 0;
+    }
+    return 1 - checkOffset;
+  });
+  const approveInkClip = $derived(inkClip(inkProgress));
+  /** Decided, not yet posted. The full card stays up until the window files it. */
+  const undoOpen = $derived(
     !pending &&
+      !undoClosed &&
       !approval.committed &&
       (approval.status === "approved" || approval.status === "denied") &&
-      approval.undo_until != null &&
-      approval.undo_until > nowMs,
+      approval.undo_until != null,
   );
-  const floating = $derived(pending || showUndo);
-  const undoSeconds = $derived(
-    approval.undo_until == null ? 0 : Math.max(0, Math.ceil((approval.undo_until - nowMs) / 1000)),
-  );
+  const showUndo = $derived(undoOpen && approval.undo_until != null && approval.undo_until > nowMs);
+  const floating = $derived(pending || undoOpen);
+  const undoSeconds = $derived(undoSecondsLeft(approval.undo_until, nowMs));
+  const postsTo = $derived.by(() => {
+    const pr = /^#?(\d+)/.exec(approval.evidence.pr?.trim() ?? "")?.[1];
+    const target = pr ? `${approval.evidence.repo} #${pr}` : approval.evidence.repo;
+    return `Posts to ${target} when undo closes. Nothing is posted yet.`;
+  });
   const stamp = $derived(approval.decided_at == null ? "" : formatDecisionStamp(approval.decided_at));
   const decisionShort = $derived(shortEventId(approval.decision_event_id ?? ""));
   const eventLine = $derived.by(() => {
@@ -136,6 +180,15 @@
     return pieces;
   });
   const subline = $derived.by(() => {
+    if (approval.action === "push_to_phase0" && approval.committed) {
+      return "Undo closed. Pushed 9c07d1e to DasVR/NIL.";
+    }
+    if (approval.committed && approval.status === "approved") {
+      return "Undo closed. Posting to DasVR/NIL #212 (demo: nothing leaves).";
+    }
+    if (approval.committed && approval.status === "denied") {
+      return "Undo closed. Nothing was posted.";
+    }
     if (approval.status === "expired") {
       return "Reviewer will ask again on the next push.";
     }
@@ -166,7 +219,6 @@
       playRise = pending;
     }
     return () => {
-      window.clearTimeout(morphTimer);
       cancelAnimationFrame(holdFrame);
       if (cardEl === node) {
         cardEl = null;
@@ -192,6 +244,17 @@
         seenArmed = false;
       }
     };
+    const fullyInView = (box: DOMRect) =>
+      box.height > 0 &&
+      box.top >= -1 &&
+      box.left >= -1 &&
+      box.bottom <= window.innerHeight + 1 &&
+      box.right <= window.innerWidth + 1;
+    if (fullyInView(card.getBoundingClientRect()) && fullyInView(evidence.getBoundingClientRect())) {
+      cardFull = true;
+      evidenceVisible = true;
+      sync();
+    }
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -216,36 +279,78 @@
     };
   }
 
-  function watchArrow(strip: HTMLElement): () => void {
-    const card = strip.closest("article");
-    if (!card) {
-      return () => {};
-    }
-    const id = approval.id;
-    let current = "";
-    const measure = () => {
-      const next = arrowFromId(id);
-      const key = `${next.width}x${next.height}:${next.shaft}:${next.head}`;
-      if (key === current) {
+  function tickUndo(): () => void {
+    undoClock.now = Date.now();
+    const timer = window.setInterval(() => {
+      undoClock.now = Date.now();
+      if (filing || !undoOpen || approval.undo_until == null) {
         return;
       }
-      current = key;
-      arrow = next;
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(card);
-    return () => {
-      observer.disconnect();
-    };
+      if (approval.undo_until <= nowMs) {
+        filing = true;
+        void closeUndo();
+      }
+    }, 16.667);
+    return () => window.clearInterval(timer);
   }
 
-  function tickUndo(): () => void {
-    nowMs = Date.now();
-    const timer = window.setInterval(() => {
-      nowMs = Date.now();
-    }, 200);
-    return () => window.clearInterval(timer);
+  async function closeUndo(): Promise<void> {
+    const node = cardEl;
+    if (!node) {
+      undoClosed = true;
+      await onfile?.();
+      return;
+    }
+    node.style.animation = "none";
+    if (reducedMotion.current) {
+      node.style.transition = "opacity 160ms linear";
+      node.style.transform = "none";
+      node.style.opacity = "0";
+      await wait(160);
+      undoClosed = true;
+      await onfile?.();
+      await tick();
+      if (!cardEl) {
+        return;
+      }
+      cardEl.style.transition = "none";
+      cardEl.style.transform = "none";
+      cardEl.style.height = "60px";
+      cardEl.style.opacity = "0";
+      void cardEl.offsetHeight;
+      cardEl.style.transition = "opacity 160ms linear";
+      cardEl.style.opacity = "1";
+      await wait(160);
+      cardEl.style.transition = "";
+      cardEl.style.opacity = "";
+      cardEl.dataset.filed = "1";
+      return;
+    }
+    const paper =
+      getComputedStyle(document.documentElement).getPropertyValue("--paper-raised").trim() || "#FBF9F5";
+    node.style.transition =
+      "background-color 360ms var(--ease-in-out), box-shadow 360ms var(--ease-in-out)";
+    node.style.backgroundColor = paper;
+    node.style.boxShadow = "var(--highlight-top), 0 0 0 1px var(--hairline)";
+    await wait(360);
+    const from = node.getBoundingClientRect().height;
+    undoClosed = true;
+    await onfile?.();
+    await tick();
+    if (!cardEl) {
+      return;
+    }
+    cardEl.style.overflow = "hidden";
+    cardEl.style.height = `${from}px`;
+    const filing = cardEl.animate([{ height: `${from}px` }, { height: "60px" }], {
+      duration: 520,
+      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+      fill: "forwards",
+    });
+    await wait(520);
+    filing.cancel();
+    cardEl.style.height = "60px";
+    cardEl.dataset.filed = "1";
   }
 
   function focusReason(node: HTMLInputElement): () => void {
@@ -291,115 +396,6 @@
     });
   }
 
-  function clearMorph(): void {
-    if (!cardEl) {
-      return;
-    }
-    cardEl.style.height = "";
-    cardEl.style.transition = "";
-    cardEl.style.overflow = "";
-    cardEl.style.opacity = "";
-  }
-
-  function lockHeight(): number {
-    if (!cardEl) {
-      return 0;
-    }
-    const from = cardEl.offsetHeight;
-    cardEl.style.overflow = "hidden";
-    cardEl.style.height = `${from}px`;
-    return from;
-  }
-
-  /**
-   * Final paper/glass height. Measuring the live card catches padding mid-transition
-   * (68px) and the later clear snaps to 60.
-   */
-  function measureSettled(): number {
-    if (!cardEl) {
-      return 0;
-    }
-    const live = cardEl;
-    const clone = live.cloneNode(true);
-    if (!(clone instanceof HTMLElement) || !live.parentElement) {
-      return live.offsetHeight;
-    }
-    clone.style.transition = "none";
-    clone.style.animation = "none";
-    clone.style.height = "auto";
-    clone.style.width = `${live.offsetWidth}px`;
-    clone.style.position = "absolute";
-    clone.style.left = "0";
-    clone.style.top = "0";
-    clone.style.visibility = "hidden";
-    clone.style.pointerEvents = "none";
-    live.parentElement.appendChild(clone);
-    const next = clone.offsetHeight;
-    clone.remove();
-    return next;
-  }
-
-  function finishMorph(to: number, tries = 0): void {
-    if (!cardEl) {
-      return;
-    }
-    const node = cardEl;
-    const locked = node.style.height;
-    node.style.transition = "none";
-    node.style.height = "auto";
-    const settled = node.offsetHeight;
-    if (Math.abs(settled - to) <= 1 || tries >= 8) {
-      node.style.height = "";
-      node.style.overflow = "";
-      node.style.opacity = "";
-      void node.offsetHeight;
-      node.style.transition = "";
-      return;
-    }
-    node.style.height = locked || `${to}px`;
-    void node.offsetHeight;
-    node.style.transition = "";
-    morphTimer = window.setTimeout(() => finishMorph(to, tries + 1), 50);
-  }
-
-  function scheduleMorph(to: number): void {
-    window.clearTimeout(morphTimer);
-    if (!cardEl || to <= 0) {
-      clearMorph();
-      return;
-    }
-    const node = cardEl;
-    if (reducedMotion.current) {
-      // Rise fill owns opacity. Clear it so the receipt can fade in.
-      node.style.animation = "none";
-      node.style.transition = "none";
-      node.style.height = `${to}px`;
-      node.style.overflow = "";
-      node.style.opacity = "0";
-      void node.offsetHeight;
-      node.style.transition = `opacity var(--dur-soft) ${REDUCED_FADE_EASE}`;
-      node.style.opacity = "1";
-      morphTimer = window.setTimeout(() => finishMorph(to), 180);
-      return;
-    }
-    node.style.overflow = "hidden";
-    node.style.transition =
-      "height var(--dur-soft) var(--ease-out), background-color var(--dur-soft) var(--ease-in-out), box-shadow var(--dur-soft) var(--ease-in-out), border-radius var(--dur-soft) var(--ease-in-out), backdrop-filter var(--dur-soft) var(--ease-in-out)";
-    node.style.height = `${to}px`;
-    const done = (event: TransitionEvent) => {
-      if (event.target !== node || event.propertyName !== "height") {
-        return;
-      }
-      node.removeEventListener("transitionend", done);
-      window.clearTimeout(morphTimer);
-      finishMorph(to);
-    };
-    node.addEventListener("transitionend", done);
-    morphTimer = window.setTimeout(() => {
-      node.removeEventListener("transitionend", done);
-      finishMorph(to);
-    }, 480);
-  }
 
   async function runDecide(decision: Decision, note?: string): Promise<boolean> {
     if (!ondecide) {
@@ -408,42 +404,67 @@
     return ondecide(decision, note);
   }
 
+  /** The full card stays up through the undo window. Filing waits for closeUndo. */
   async function settleDecision(decision: Decision, note?: string): Promise<void> {
-    lockHeight();
     const ok = await runDecide(decision, note);
     if (!ok) {
       committing = null;
       checkOffset = 1;
-      clearMorph();
       return;
     }
+    denyOpen = false;
     await tick();
-    if (!cardEl) {
-      return;
+    // Hello and the reason field leave with the decision. Keep focus on the card so Undo stays live.
+    if (cardEl && !cardEl.contains(document.activeElement)) {
+      cardEl.focus({ preventScroll: true });
     }
-    scheduleMorph(measureSettled());
   }
 
-  async function onApproveClick(): Promise<void> {
-    if (locked || denyOpen || !pending) {
+  async function confirmHello(): Promise<void> {
+    if (!helloOpen || locked || !pending) {
       return;
     }
+    helloOpen = false;
     committing = "approve";
-    const drawMs = reducedMotion.current ? 0 : tokenMs("--dur-draw", 300);
-    await animateNumber(
-      1,
-      0,
-      drawMs,
-      (value) => {
-        checkOffset = value;
-      },
-      tokenEase("--ease-draw"),
-    );
-    if (reducedMotion.current) {
-      checkOffset = 0;
-      await wait(tokenMs("--dur-base", 120));
-    }
     await settleDecision("approve");
+  }
+
+  function cancelHello(): void {
+    if (!helloOpen || committing !== null) {
+      return;
+    }
+    helloOpen = false;
+    holdSealed = false;
+    holdSource = null;
+    retract("approve", 1 - checkOffset);
+  }
+
+  function onApprovePointerDown(event: PointerEvent): void {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    if (holdKind || helloOpen) {
+      return;
+    }
+    cardEl?.focus({ preventScroll: true });
+    holdSource = "pointer";
+    startHold("approve");
+    if (holdKind !== "approve") {
+      holdSource = null;
+    }
+  }
+
+  function onApprovePointerEnd(): void {
+    if (holdSource !== "pointer") {
+      return;
+    }
+    holdSource = null;
+    if (holdSealed) {
+      holdSealed = false;
+      return;
+    }
+    cancelHold();
   }
 
   async function confirmDeny(): Promise<void> {
@@ -519,8 +540,7 @@
     holdSealed = true;
     if (kind === "approve") {
       checkOffset = 0;
-      committing = "approve";
-      void settleDecision("approve");
+      helloOpen = true;
       return;
     }
     strike = 1;
@@ -528,7 +548,7 @@
   }
 
   function startHold(kind: HoldKind): void {
-    if (locked || denyOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
+    if (locked || denyOpen || helloOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
       return;
     }
     cancelAnimationFrame(holdFrame);
@@ -556,11 +576,16 @@
   }
 
   function onWindowKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape" && helloOpen && !event.repeat) {
+      event.preventDefault();
+      cancelHello();
+      return;
+    }
     if (event.repeat || isTextEntry(event.target)) {
       return;
     }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && (event.key === "z" || event.key === "Z")) {
-      if (showUndo) {
+      if (undoReady()) {
         event.preventDefault();
         void onUndoClick();
       }
@@ -580,19 +605,28 @@
     }
     if (event.key === "Enter") {
       event.preventDefault();
+      holdSource = "key";
       startHold("approve");
+      if (holdKind !== "approve") {
+        holdSource = null;
+      }
     } else if (event.key === "Backspace") {
       event.preventDefault();
+      holdSource = "key";
       startHold("deny");
+      if (holdKind !== "deny") {
+        holdSource = null;
+      }
     }
   }
 
   function onWindowKeyup(event: KeyboardEvent): void {
     const released =
       event.key === "Enter" || event.key === "Backspace" || event.key === "Meta" || event.key === "Control";
-    if (!released) {
+    if (!released || holdSource === "pointer") {
       return;
     }
+    holdSource = null;
     if (holdSealed) {
       holdSealed = false;
       return;
@@ -604,31 +638,51 @@
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
-    if (!seenArmed || locked) {
+    event.preventDefault();
+  }
+
+  /** Same gate as approve: the evidence lock is armed and the card holds focus. */
+  function undoReady(): boolean {
+    const active = document.activeElement;
+    return showUndo && seenArmed && cardEl !== null && active instanceof Node && cardEl.contains(active);
+  }
+
+  /** Keep focus on the card. A focus move drops the hold hint, reflows the row, and loses the click. */
+  function keepCardFocus(event: MouseEvent): void {
+    if (event.button === 0) {
       event.preventDefault();
     }
   }
 
-  async function onUndoClick(): Promise<void> {
-    if (!onundo || !showUndo) {
+  function onUndoMouseDown(event: MouseEvent): void {
+    if (event.button !== 0) {
       return;
     }
-    lockHeight();
+    // As approve does: the press focuses the card, so the click below passes the gate.
+    event.preventDefault();
+    if (seenArmed) {
+      cardEl?.focus({ preventScroll: true });
+    }
+  }
+
+  async function onUndoClick(): Promise<void> {
+    if (!onundo || !undoReady()) {
+      return;
+    }
     const ok = await onundo();
     if (!ok) {
-      clearMorph();
       return;
     }
     denyOpen = false;
+    helloOpen = false;
+    holdSealed = false;
+    holdSource = null;
     reason = "";
     strike = 0;
     checkOffset = 1;
     committing = null;
     await tick();
-    if (!cardEl) {
-      return;
-    }
-    scheduleMorph(measureSettled());
+    cardEl?.focus({ preventScroll: true });
   }
 </script>
 
@@ -637,7 +691,8 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <article
   {@attach bindCard}
-  class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
+  {@attach tickUndo}
+  class={["card", floating ? "glass" : "paper", !floating && "receipt", playRise && "rise"]}
   style:--arrow-delay={ARROW_DELAY}
   style:--arrow-head-draw={ARROW_HEAD_DRAW}
   style:--reduced-fade={REDUCED_FADE_EASE}
@@ -646,41 +701,33 @@
   style:--icon-stroke={ICON_STROKE}
   style:--pen-stroke={PEN_STROKE}
   data-risk={risk}
-  tabindex={pending ? 0 : undefined}
-  aria-labelledby={pending ? titleId : undefined}
-  aria-label={pending ? undefined : word}
-  aria-keyshortcuts={pending ? "Control+Enter Control+Backspace" : undefined}
+  tabindex={floating ? 0 : undefined}
+  aria-labelledby={floating ? titleId : undefined}
+  aria-label={floating ? undefined : word}
+  aria-keyshortcuts={pending ? "Control+Enter Control+Backspace" : undoOpen ? "Control+Z" : undefined}
   onfocusin={syncFocus}
   onfocusout={() => {
     queueMicrotask(() => {
       syncFocus();
-      if (document.activeElement !== cardEl) {
-        cancelHold();
+      const active = document.activeElement;
+      if (cardEl && active instanceof Node && cardEl.contains(active)) {
+        return;
       }
+      cancelHold();
     });
   }}
 >
-  {#if pending}
+  {#if floating}
     {#if effect === "read"}
       <p class="risk-read">Read</p>
     {:else if effect}
-      <div class="risk" role="note" {@attach watchArrow}>
+      <div class="risk" role="note">
         <span class="dot"></span>
         <span>{effectLabel(effect)}</span>
         {#if effectWhy(effect)}
           <span class="why">· {effectWhy(effect)}</span>
         {/if}
       </div>
-      {#if arrow}
-        <svg
-          class="arrow"
-          viewBox={`0 0 ${arrow.width} ${arrow.height}`}
-          aria-hidden="true"
-        >
-          <path class="pen trace shaft" pathLength="1" d={arrow.shaft} />
-          <path class="pen trace head" pathLength="1" d={arrow.head} />
-        </svg>
-      {/if}
     {/if}
 
     <div class="inner">
@@ -699,6 +746,8 @@
         <dl class="evidence" {@attach watchSeen}>
           <dt>repo</dt>
           <dd>{approval.evidence.repo}</dd>
+          <dt>pr</dt>
+          <dd>{approval.evidence.pr ?? ""}</dd>
           <dt>ref</dt>
           <dd>{approval.evidence.ref}</dd>
           <dt>event</dt>
@@ -706,24 +755,18 @@
         </dl>
       </section>
 
-      <details open>
-        <summary>
-          <span class="lhs">
-            <svg class="chev" viewBox="0 0 12 12" aria-hidden="true">
-              <path d={CHEVRON_PATH} />
-            </svg>
-            <span class="draft-label">
-              Draft
-              <svg class="strike" viewBox="0 0 130 12" preserveAspectRatio="none" aria-hidden="true">
-                <path class="pen trace" pathLength="1" d={STRIKE_PATH} style:stroke-dashoffset={1 - strike} />
-              </svg>
-            </span>
-          </span>
-          {#if approval.provider === "mock"}
-            <span class="prov">mock provider, not written by a model</span>
-          {/if}
-        </summary>
-        <p class="draft">
+      <div class="sumline">
+        <span class="dlabel">
+          Draft
+          <svg class="strike" viewBox="0 0 130 12" preserveAspectRatio="none" aria-hidden="true">
+            <path class="pen trace" pathLength="1" d={STRIKE_PATH} style:stroke-dashoffset={1 - strike} />
+          </svg>
+        </span>
+        {#if approval.provider === "mock"}
+          <span class="prov">mock provider, not written by a model</span>
+        {/if}
+      </div>
+      <div class="draft">
           {#each draftPieces as part, index (index)}
             {#if part.code}
               <code>{part.text}</code>
@@ -731,8 +774,7 @@
               {part.text}
             {/if}
           {/each}
-        </p>
-      </details>
+      </div>
 
       <p class="meta">
         {approval.provider} · {approval.model} · {formatTokens(approval.input_tokens)} in / {formatTokens(approval.output_tokens)} out · {formatUsd(approval.micro_usd)}
@@ -760,7 +802,18 @@
       {/if}
 
       <div class="actions">
-        {#if denyOpen}
+        {#if undoOpen && approval.status === "denied"}
+          <button class="approve" type="button" aria-disabled="true" tabindex="-1">
+            <span class="face">Deny draft</span>
+            <span class="ink" aria-hidden="true" style:clip-path={inkClip(1)}>
+              <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                <path class="pen trace" pathLength="1" d={DENY_MARK_PATH} style:stroke-dashoffset="0" />
+              </svg>
+              <span class="face">Deny draft</span>
+            </span>
+          </button>
+          {@render undoButton()}
+        {:else if denyOpen}
           <button class="deny" type="button" disabled={locked} onclick={back}>Back</button>
           <button class="approve" type="button" disabled={locked} onclick={() => void confirmDeny()}>
             Deny draft
@@ -771,30 +824,54 @@
             type="button"
             disabled={busy}
             onkeydown={onApproveKeydown}
-            onclick={() => void onApproveClick()}
+            onpointerdown={onApprovePointerDown}
+            onpointerup={onApprovePointerEnd}
+            onpointerleave={onApprovePointerEnd}
+            onpointercancel={onApprovePointerEnd}
           >
-            {#if holdKind === "approve" || checkOffset < 1}
-              <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
-                <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
-              </svg>
-            {/if}
             <span class="face">
-              <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
-              <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
-                <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
-                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
+              <span class={["face-idle", (committing === "approve" || undoOpen) && "gone"]} aria-hidden={committing === "approve" || undoOpen}>Approve draft</span>
+            </span>
+            <span class="ink" aria-hidden="true" style:clip-path={approveInkClip}>
+              {#if holdKind === "approve" || checkOffset < 1 || undoOpen}
+                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={undoOpen ? 0 : checkOffset} />
                 </svg>
-                Approved
-              </span>
+              {/if}
+              <!-- G04 (LOOK:125): after the decision the check is the confirmation, with no label. -->
+              <span class="face" style:visibility={undoOpen ? "hidden" : null}>Approve draft</span>
             </span>
           </button>
-          <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
+          {#if undoOpen}
+            {@render undoButton()}
+          {:else}
+            <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
+          {/if}
         {/if}
       </div>
 
+      {#snippet undoButton()}
+        <button
+          class="deny undo-open"
+          type="button"
+          disabled={busy}
+          aria-label="Undo, {undoSeconds} seconds left"
+          onmousedown={onUndoMouseDown}
+          onclick={() => void onUndoClick()}
+        >
+          Undo {undoSeconds}s
+        </button>
+      {/snippet}
+
       <div class="quiet">
-        <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && !denyOpen}
+        {#if undoOpen}
+          <p>{approval.status === "denied" ? QUIET_DENIED : postsTo}</p>
+        {:else if helloOpen}
+          <button class="hello" type="button" onmousedown={keepCardFocus} onclick={() => void confirmHello()}>{QUIET_HELLO}</button>
+        {:else}
+          <p>{QUIET_WAITING}</p>
+        {/if}
+        {#if cardFocused && !denyOpen && (pending || undoOpen)}
           {#snippet modifier()}
             <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
           {/snippet}
@@ -809,7 +886,9 @@
             </svg>
           {/snippet}
           <p class={["hold-hint", seenArmed && "armed"]}>
-            {#if seenArmed}
+            {#if undoOpen}
+              {@render modifier()} Z undo
+            {:else if seenArmed}
               hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
             {:else}
               hold {@render modifier()} {@render enterKey()} unlocks once the evidence has been on screen
@@ -819,7 +898,7 @@
       </div>
     </div>
   {:else}
-    <div class="receipt" {@attach tickUndo}>
+    <div class="receipt">
       {#if approval.status === "approved"}
         <svg class="mark" viewBox="0 0 24 24" aria-hidden="true">
           <path class="pen trace draw" pathLength="1" d={CHECK_PATH} />
@@ -845,11 +924,6 @@
       {#if stamp || decisionShort}
         <p class="stamp">{stamp}{#if stamp && decisionShort}<br />{/if}{decisionShort}</p>
       {/if}
-      {#if showUndo}
-        <button class="undo" type="button" onclick={() => void onUndoClick()}>
-          <span class="u">Undo</span><span class="t" aria-hidden="true">{undoSeconds}s</span>
-        </button>
-      {/if}
     </div>
   {/if}
 </article>
@@ -871,25 +945,25 @@
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border-radius: var(--r-xl);
-    box-shadow: var(--glass-edge), var(--shadow-float);
-    padding: var(--s-2) var(--s-2) var(--s-5);
-  }
-
-  .card.glass.receipt {
-    padding: 10px 14px 10px 12px;
-    border: 1px solid var(--hairline);
-    min-height: 52px;
+    box-shadow: var(--glass-edge), var(--shadow-press);
+    padding: var(--s-2) var(--s-2) 16px;
   }
 
   .card.paper {
+    height: 60px;
     background: var(--convex), var(--paper-raised);
     -webkit-backdrop-filter: blur(0px) saturate(100%);
     backdrop-filter: blur(0px) saturate(100%);
     border-radius: var(--r-md);
-    border: 1px solid var(--hairline);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
-    min-height: 52px;
-    padding: 10px 14px 10px 12px;
+    border: 0;
+    box-shadow: var(--highlight-top), 0 0 0 1px var(--hairline);
+    padding: 10px 16px 10px 12px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .card {
+      transition: opacity 160ms linear;
+    }
   }
 
   .card:focus-visible {
@@ -898,7 +972,7 @@
   }
 
   .card.rise {
-    animation: rise var(--dur-stage) var(--ease-out) backwards;
+    animation: rise var(--dur-stage) var(--ease-out) 150ms backwards;
   }
 
   @keyframes rise {
@@ -983,32 +1057,10 @@
     animation: draw var(--dur-draw) var(--ease-draw) both;
   }
 
-  .arrow .shaft {
-    stroke-dashoffset: 0;
-    animation: draw var(--dur-draw) var(--ease-draw) both;
-    animation-delay: calc(var(--dur-stage) + var(--arrow-delay));
-  }
-
-  .arrow .head {
-    stroke-dashoffset: 0;
-    animation: draw var(--arrow-head-draw) var(--ease-draw) both;
-    animation-delay: calc(var(--dur-stage) + var(--arrow-delay) + var(--dur-draw));
-  }
-
   @keyframes draw {
     from {
       stroke-dashoffset: 1;
     }
-  }
-
-  .arrow {
-    position: absolute;
-    right: 34px;
-    top: 38px;
-    width: 58px;
-    height: 46px;
-    overflow: visible;
-    pointer-events: none;
   }
 
   .card-head {
@@ -1016,7 +1068,6 @@
     gap: var(--s-3);
     align-items: flex-start;
     margin-top: var(--s-4);
-    padding-right: 70px;
   }
 
   .agent {
@@ -1060,11 +1111,11 @@
   }
 
   .block {
-    margin-top: var(--s-4);
+    margin-top: 14px;
   }
 
   h3 {
-    margin-bottom: var(--s-2);
+    margin-bottom: 6px;
     color: var(--ink-2);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
@@ -1078,7 +1129,7 @@
     color: var(--ink-1);
     background: color-mix(in oklab, var(--paper-sunken) 94%, transparent);
     border-radius: var(--r-sm);
-    padding: 10px 12px;
+    padding: 9px 12px;
     display: grid;
     grid-template-columns: auto 1fr;
     column-gap: 14px;
@@ -1088,41 +1139,6 @@
     color: var(--ink-2);
   }
 
-  details {
-    margin-top: var(--s-4);
-  }
-
-  summary {
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: var(--s-2);
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
-    font-weight: var(--w-semibold);
-  }
-
-  summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .lhs {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .chev {
-    width: 12px;
-    height: 12px;
-    transition: transform var(--dur-base) var(--ease-out);
-  }
-
-  .chev path,
   .key path {
     fill: none;
     stroke: currentColor;
@@ -1141,14 +1157,6 @@
     display: inline-block;
     vertical-align: -2px;
     overflow: visible;
-  }
-
-  details[open] .chev {
-    transform: rotate(90deg);
-  }
-
-  .draft-label {
-    position: relative;
   }
 
   .strike {
@@ -1173,9 +1181,25 @@
     border-radius: var(--r-xs);
   }
 
+  .sumline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 14px 0 6px;
+    color: var(--ink-2);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+    font-weight: var(--w-semibold);
+  }
+
+  .dlabel {
+    position: relative;
+  }
+
   .draft {
     white-space: pre-wrap;
-    padding: 12px 14px;
+    padding: 11px 14px;
     border-radius: var(--r-sm);
     background: color-mix(in oklab, var(--paper-raised) 94%, transparent);
     box-shadow: 0 0 0 1px var(--hairline);
@@ -1187,7 +1211,7 @@
   }
 
   .meta {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
@@ -1198,7 +1222,7 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: var(--s-2);
-    margin-top: var(--s-5);
+    margin-top: 18px;
   }
 
   button {
@@ -1222,10 +1246,10 @@
   }
 
   .approve {
-    background: var(--ink-1);
-    color: var(--paper-raised);
+    background: var(--convex), var(--paper-raised);
+    color: var(--ink-1);
     border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    box-shadow: var(--highlight-top), 0 1px 2px rgb(var(--shade) / 0.1), 0 6px 14px -6px rgb(var(--shade) / 0.18);
   }
 
   .deny {
@@ -1271,6 +1295,21 @@
     outline-offset: 2px;
   }
 
+  .approve > .ink {
+    position: absolute;
+    inset: -1.5px;
+    z-index: 1;
+    border-radius: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0)), var(--ink-1);
+    color: var(--paper-raised);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16);
+    clip-path: inset(0px 100% 0px 0px);
+  }
+
   .approve .pen {
     stroke: var(--paper-raised);
   }
@@ -1279,11 +1318,7 @@
     width: 18px;
     height: 18px;
     position: absolute;
-    left: 18px;
-  }
-
-  .check.inline {
-    position: static;
+    left: 19.5px;
   }
 
   .face {
@@ -1291,8 +1326,7 @@
     place-items: center;
   }
 
-  .face-idle,
-  .face-done {
+  .face-idle {
     grid-area: 1 / 1;
     display: inline-flex;
     align-items: center;
@@ -1301,20 +1335,21 @@
     transition: opacity var(--dur-soft) var(--ease-in-out);
   }
 
-  .face-done {
-    opacity: 0;
-  }
-
   .face-idle.gone {
     opacity: 0;
   }
 
-  .face-done.show {
-    opacity: 1;
+  .hello {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
   }
 
   .quiet {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     display: flex;
     justify-content: center;
     align-items: baseline;
@@ -1327,6 +1362,8 @@
   }
 
   .hold-hint {
+    /* Own row, so the undo hint keeps the waiting card's height. */
+    flex-basis: 100%;
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
@@ -1440,47 +1477,14 @@
     white-space: nowrap;
   }
 
-  .undo {
-    display: inline-block;
-    gap: 0;
-    height: auto;
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-    color: var(--accent);
-    font-size: var(--t-meta);
-    line-height: 1;
-    font-weight: var(--w-semibold);
-    text-decoration: none;
-    white-space: nowrap;
-  }
-
-  .undo .u {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    text-decoration-thickness: 1px;
-  }
-
-  .undo:hover:not(:disabled),
-  .undo:active:not(:disabled) {
-    transform: none;
-    box-shadow: none;
-  }
-
-  .undo .t {
-    font-family: var(--font-machine);
-    font-weight: var(--w-regular);
-    color: var(--ink-3);
-    text-decoration: none;
-    display: inline-block;
-    margin-left: 4px;
+  .undo-open {
+    font-variant-numeric: tabular-nums;
   }
 
   @media (prefers-reduced-motion: reduce) {
     .card.rise {
-      animation: fade var(--dur-stage) var(--reduced-fade) both;
+      animation: fade var(--dur-stage) var(--reduced-fade) 0ms both;
+      transform: none;
     }
 
     @keyframes fade {
@@ -1489,9 +1493,7 @@
       }
     }
 
-    .draw,
-    .arrow .shaft,
-    .arrow .head {
+    .draw {
       animation: pen-fade var(--dur-base) var(--reduced-fade) both;
       animation-delay: 0s;
       stroke-dashoffset: 0;
@@ -1504,15 +1506,13 @@
     }
 
     .reason,
-    .chev,
     .hold-hint {
       animation: none;
       transition: none;
     }
 
     button:hover:not(:disabled),
-    button:active:not(:disabled),
-    details[open] .chev {
+    button:active:not(:disabled) {
       transform: none;
     }
 
@@ -1526,7 +1526,7 @@
     }
 
     .face-idle,
-    .face-done {
+    .approve > .ink {
       transition: none;
     }
   }

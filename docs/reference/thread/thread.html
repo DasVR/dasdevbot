@@ -1,0 +1,999 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dasdevbot · thread motion prototype</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+/* Fonts are bundled locally (fonts/). No network at runtime. */
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 300 900; font-display: block;
+  src: url("fonts/Figtree-latin-wght.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "Figtree"; font-style: normal; font-weight: 300 900; font-display: block;
+  src: url("fonts/Figtree-latin-ext-wght.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400 600; font-display: block;
+  src: url("fonts/JetBrainsMono-latin-wght.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+@font-face { font-family: "JetBrains Mono"; font-style: normal; font-weight: 400 600; font-display: block;
+  src: url("fonts/JetBrainsMono-latin-ext-wght.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+/* prototype toggle: the same override tokens.css applies under prefers-reduced-motion */
+html.rm { --dur-fast: 0ms; --dur-base: 120ms; --dur-soft: 160ms; --dur-draw: 0ms; --dur-stage: 160ms; --spring-soft: var(--ease-out); }
+/* timing constants from INTERACTIONS.md (CD rulings) */
+:root { --dur-trace-read: 2100ms; --dur-trace-write: 1700ms; --dur-stamp: 400ms; --dur-retract: 160ms; --hold-approve: 600ms; --hold-destructive: 1200ms;
+  /* static paper grain: painted once, never animated */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.15' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .227 0 0 0 0 .157 0 0 0 0 .086 .42 0 0 0 -.17'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
+
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { background: var(--grain), var(--paper-base); color: var(--ink-1); font: var(--w-regular) var(--t-body)/var(--lh-body) var(--font-ui);
+       -webkit-font-smoothing: antialiased; overflow: hidden; }
+button, input, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mono, code { font-family: var(--font-machine); }
+code { font-size: 12.5px; background: var(--paper-sunken); border-radius: var(--r-xs); padding: 1px 5px; }
+.pen { fill: none; stroke: var(--pen); stroke-width: var(--pen-width); stroke-linecap: round; stroke-linejoin: round; }
+.d0 { stroke-dasharray: 1 2; stroke-dashoffset: 1; }  /* 1 2: an undrawn path leaves no round-cap dot */
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* ===== top bar ===== */
+.top { position: fixed; top: 0; left: 0; right: 0; height: 60px; display: flex; align-items: center; gap: 12px; padding: 0 24px; z-index: 30; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .disc { width: 26px; height: 26px; border-radius: 9px; background: var(--ink-1); color: var(--paper-raised); display: grid; place-items: center;
+               font: var(--w-semibold) 13px/1 var(--font-ui); box-shadow: inset 0 1px 0 rgb(255 255 255 / .16); }
+.brand b { font-weight: var(--w-semibold); letter-spacing: var(--track-tight); }
+.brand span { color: var(--ink-3); font-size: var(--t-meta); }
+.proto { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.proto .beat { font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-3); margin-right: 6px; min-width: 150px; text-align: right; }
+.pbtn { height: 30px; padding: 0 12px; border-radius: var(--r-pill); display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+        background: var(--paper-raised); border: 1px solid var(--hairline-strong); color: var(--ink-1); font: var(--w-medium) var(--t-meta)/1 var(--font-ui);
+        transition: transform var(--dur-base) var(--ease-out), border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+.pbtn svg { width: 13px; height: 13px; }
+.pbtn:is(:hover, .is-hover) { border-color: var(--ink-2); transform: translateY(-1px); }
+.pbtn:is(:active, .is-press) { transform: scale(.97, .955); transition-duration: var(--dur-fast); transition-timing-function: var(--ease-press); }
+.pbtn[aria-pressed="true"] { background: var(--ink-1); color: var(--paper-raised); border-color: var(--ink-1); }
+
+/* ===== thread ===== */
+.viewport { position: fixed; top: 60px; left: 0; right: 0; bottom: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column-reverse;
+            scrollbar-width: none; -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 64px); mask-image: linear-gradient(to bottom, transparent 0, #000 64px); }
+.thread { width: 720px; margin: 0 auto; padding: 40px 0 124px; display: flex; flex-direction: column; gap: 22px; }
+.day { align-self: center; font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-3); }
+
+/* Arriq: right, deeper paper, ~20px radius. No tail, no shadow, no outline. */
+.me { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.bub-me { position: relative; max-width: 480px; padding: 10px 16px 11px; border-radius: var(--r-lg); }
+.bub-me > .fill { position: absolute; inset: 0; border-radius: inherit; background: var(--paper-sunken); }
+.bub-me > .txt { position: relative; }
+.at { color: var(--ink-2); font-weight: var(--w-medium); }
+.meta-t { font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-3); padding: 0 8px; }
+
+/* bot turn: monogram + name above the first bubble; big soft raised paper; raise = fill + tone only */
+.turn { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.who { display: flex; align-items: center; gap: 8px; height: 20px; }
+.mg { width: 20px; height: 20px; border-radius: 50%; background: var(--convex), var(--paper-sunken); display: grid; place-items: center;
+      font: var(--w-semibold) 11px/1 var(--font-ui); color: var(--ink-2); box-shadow: var(--highlight-top); }
+.who b { font: var(--w-semibold) var(--t-meta)/var(--lh-meta) var(--font-ui); }
+.who span { font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-3); }
+.bub-bot { margin-left: 28px; max-width: 600px; padding: 15px 20px 16px; border-radius: var(--r-lg); background: var(--convex), var(--paper-raised); }
+.bub-bot .grow { overflow: hidden; }
+.bub-bot .tk { white-space: pre-wrap; }
+
+/* tool steps: flat paper, one ink-2 sentence + mono detail + elapsed; a hairline rail links the marks */
+.tools { margin-left: 28px; width: 560px; }
+.sumwrap { overflow: hidden; height: 0; }
+.sum { height: 30px; display: inline-flex; align-items: center; gap: 8px; padding: 0 10px 0 6px; margin-left: -6px; border: 0; background: none; cursor: pointer;
+       border-radius: var(--r-md); color: var(--ink-2); font: var(--w-medium) var(--t-meta)/1 var(--font-ui); position: relative;
+       transition: transform var(--dur-base) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+.sum::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: rgb(var(--shade) / .05); opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
+.sum:is(:hover, .is-hover)::before { opacity: 1; }
+.sum:is(:active, .is-press) { transform: scale(.97, .955); transition-duration: var(--dur-fast); transition-timing-function: var(--ease-press); }
+.sum .chev { width: 12px; height: 12px; transition: transform var(--dur-base) var(--ease-out); }
+.sum[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.sum .n { display: inline-block; }
+.sum .mono { font-size: var(--t-micro); color: var(--ink-3); }
+.foldlist { overflow: hidden; }
+.step { position: relative; overflow: hidden; }
+.step .in { display: grid; grid-template-columns: 22px 1fr auto; column-gap: 10px; padding: 5px 0 6px; align-items: start; }
+.step .mk { position: relative; width: 22px; height: 20px; display: grid; place-items: center; }
+.step .mk svg { position: absolute; overflow: visible; }
+.step .mk .tr { width: 22px; height: 8px; left: 0; top: 6px; }
+.step .mk .tr .pen { stroke: var(--ink-2); }
+.step .mk .ck { width: 16px; height: 16px; left: 3px; top: 2px; }
+.step .mk .wd { width: 7px; height: 7px; border-radius: 50%; background: var(--risk-external); }
+.step .say { color: var(--ink-2); line-height: 20px; }
+.step .el { font: var(--t-micro)/20px var(--font-machine); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.step .el.wait { font: var(--w-semibold) var(--t-meta)/20px var(--font-ui); color: var(--ink-1); }
+.step .dt { grid-column: 2 / 4; overflow: hidden; }
+.step .dt p { font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-3); padding-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step::after { content: ""; position: absolute; left: 10.5px; top: 25px; bottom: -3px; width: 1px; background: var(--hairline); }
+.step:last-child::after { display: none; }
+
+/* ===== approval card (approval-card.html, look v1.1 §8; no risk arrow per the pen amendment) ===== */
+.slot { margin-left: 28px; width: 520px; }
+.slot:empty { display: none; }
+.card { position: relative; border-radius: var(--r-xl); padding: var(--s-2) var(--s-2) 16px; width: 520px;
+        background: var(--glass-fill); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+        box-shadow: var(--glass-edge), var(--shadow-press); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) { .card, .composer { background: var(--glass-fill-solid); } }
+.card:focus { outline: none; } .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.card > .lift { position: absolute; inset: 0; border-radius: inherit; box-shadow: var(--shadow-float); pointer-events: none; z-index: -1; }
+.card > .grain, .composer > .grain { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; background: var(--grain); background-size: 254px 254px; background-position: 7px 3px; opacity: .55; }
+.card > .rim, .composer > .rim { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; padding: 1.25px;
+  background: linear-gradient(180deg, rgb(255 255 255 / .95), rgb(255 255 255 / .35) 22%, rgb(255 255 255 / 0) 52%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
+.paperize { position: absolute; inset: 0; border-radius: inherit; background: var(--convex), var(--paper-raised); box-shadow: 0 0 0 1px var(--hairline); opacity: 0; pointer-events: none; }
+.card > .risk, .card > .inner { position: relative; z-index: 1; }
+.risk { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 8px 14px; border-radius: var(--r-lg);
+        background: var(--risk-bg); color: var(--risk-external); font: var(--w-semibold) var(--t-meta)/var(--lh-meta) var(--font-ui); }
+.risk .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.risk .why { color: var(--ink-2); font-weight: var(--w-medium); }
+.card[data-risk="destructive"] .risk { color: var(--risk-destructive); background: var(--risk-destructive-bg); }
+.inner { padding: 0 var(--s-4); }
+.card-head { display: flex; gap: var(--s-3); align-items: flex-start; margin-top: var(--s-4); }
+.agent { width: 32px; height: 32px; flex: none; border-radius: var(--r-pill); background: var(--convex), var(--paper-sunken); box-shadow: var(--highlight-top), 0 0 0 1px var(--hairline);
+         display: grid; place-items: center; font: var(--w-semibold) 13px/1 var(--font-ui); color: var(--ink-2); }
+.kicker { color: var(--ink-2); font: var(--w-medium) var(--t-meta)/var(--lh-meta) var(--font-ui); }
+.kicker b { color: var(--ink-1); font-weight: var(--w-semibold); }
+.card h2 { font: var(--w-semibold) var(--t-lead)/var(--lh-lead) var(--font-ui); letter-spacing: var(--track-tight); margin-top: 1px; }
+.purpose { margin-top: var(--s-3); color: var(--ink-2); }
+.block { margin-top: 14px; }
+.card h3, .card .sumline { color: var(--ink-2); font: var(--w-semibold) var(--t-meta)/var(--lh-meta) var(--font-ui); }
+.card h3 { margin-bottom: 6px; }
+.prov { font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-2); background: var(--paper-sunken); padding: 3px 7px; border-radius: var(--r-xs); }
+.evidence { font: 12px/1.6 var(--font-machine); color: var(--ink-1); background: rgb(237 231 221 / .94); border-radius: var(--r-sm); padding: 9px 12px;
+            display: grid; grid-template-columns: auto 1fr; column-gap: 14px; }
+.evidence dt { color: var(--ink-2); } .evidence dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .sumline { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 6px; }
+.dlabel { position: relative; }
+.strike { position: absolute; left: -5px; top: 50%; width: calc(100% + 10px); height: 12px; margin-top: -5px; overflow: visible; }
+.draft { padding: 11px 14px; border-radius: var(--r-sm); background: rgb(251 249 245 / .94); box-shadow: 0 0 0 1px var(--hairline); }
+.draft code { background: none; padding: 0; }
+.cmeta { margin-top: 10px; font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-2); }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-2); margin-top: 18px; }
+.btn { height: 40px; padding: 0 var(--s-4); border-radius: var(--r-md); font: var(--w-semibold) var(--t-body)/1 var(--font-ui); cursor: pointer;
+       display: inline-flex; align-items: center; justify-content: center; gap: 8px; position: relative;
+       transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
+.btn.fill { background: linear-gradient(180deg, rgb(255 255 255 / .10), rgb(255 255 255 / 0)), var(--ink-1); color: var(--paper-raised); border: 1.5px solid var(--ink-1);
+            box-shadow: inset 0 1px 0 rgb(255 255 255 / .16), 0 1px 2px rgb(var(--shade) / .18), 0 6px 14px -6px rgb(var(--shade) / .35); }
+.btn.line { background: var(--convex), var(--paper-raised); color: var(--ink-1); border: 1.5px solid var(--ink-1);
+            box-shadow: var(--highlight-top), 0 1px 2px rgb(var(--shade) / .10), 0 6px 14px -6px rgb(var(--shade) / .18); }
+.btn:is(:hover, .is-hover) { transform: translateY(-1px); }
+.btn.fill:is(:hover, .is-hover) { box-shadow: inset 0 1px 0 rgb(255 255 255 / .16), 0 2px 4px rgb(var(--shade) / .18), 0 10px 20px -8px rgb(var(--shade) / .40); }
+.btn.line:is(:hover, .is-hover) { border-color: #1d1a17; }
+.btn:is(:active, .is-press, .holding) { transform: scale(.97, .955); box-shadow: var(--shadow-press); transition-duration: var(--dur-fast); transition-timing-function: var(--ease-press); }
+.btn.fill .pen { stroke: var(--paper-raised); }
+.lbl { position: relative; display: inline-grid; }
+.lbl > span { grid-area: 1/1; white-space: nowrap; }
+.lbl .l2 { opacity: 0; justify-self: center; }
+.hc { position: absolute; right: calc(100% + 7px); top: 50%; margin-top: -9px; width: 18px; height: 18px; overflow: visible; }
+.btn .t { font: var(--w-regular) var(--t-micro)/1 var(--font-machine); display: inline-block; width: 2.2ch; text-align: left; font-variant-numeric: tabular-nums; }
+.btn .t i { display: inline-block; font-style: normal; }
+.card.decided .btn { pointer-events: none; }
+.card.decided .btn.undo { pointer-events: auto; }
+.quiet { margin-top: 10px; display: grid; text-align: center; color: var(--ink-2); font-size: var(--t-meta); line-height: var(--lh-meta); }
+.quiet > span { grid-area: 1/1; } .quiet .q2 { opacity: 0; }
+
+/* specular: a 1.25px rim + a tight top sheen that follow the pointer by transform (interactions §10) */
+.spec { position: absolute; inset: -1px; border-radius: inherit; padding: 1.5px; pointer-events: none; z-index: 3; opacity: 0; overflow: hidden;
+        transition: opacity var(--dur-soft) var(--ease-out);
+        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
+.spec i { position: absolute; left: 0; top: 0; width: 320px; height: 320px; margin: -160px 0 0 -160px; border-radius: 50%;
+          background: radial-gradient(closest-side, rgb(255 255 255 / 1), rgb(255 255 255 / .55) 40%, rgb(255 255 255 / 0)); will-change: transform; }
+.sheen { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; z-index: 3; opacity: 0; transition: opacity var(--dur-soft) var(--ease-out); }
+.sheen i { position: absolute; left: 0; top: 0; width: 260px; height: 56px; margin: -24px 0 0 -130px; border-radius: 50%;
+           background: radial-gradient(closest-side, rgb(255 255 255 / .75), rgb(255 255 255 / 0)); will-change: transform; }
+.lit > .spec, .lit > .sheen { opacity: 1; transition-duration: var(--dur-base); }
+html.rm .spec, html.rm .sheen { display: none; }
+@media (prefers-reduced-motion: reduce) { .spec, .sheen { display: none; } }
+
+/* receipt: DONE = PAPER, flat (puff is scarce) */
+.receipt { width: 520px; display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 10px 16px 10px 12px;
+           background: var(--convex), var(--paper-raised); border-radius: var(--r-md); box-shadow: var(--highlight-top), 0 0 0 1px var(--hairline); }
+.receipt .mark { width: 24px; height: 24px; flex: none; overflow: visible; }
+.receipt .what { flex: 1; min-width: 0; }
+.receipt .what b { font-weight: var(--w-semibold); }
+.receipt .ok { color: var(--success); } .receipt .no { color: var(--ink-1); }
+.receipt .sub { color: var(--ink-3); font-size: var(--t-meta); line-height: var(--lh-meta); }
+.receipt .id { font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-3); text-align: right; white-space: nowrap; }
+.ghost { position: fixed; z-index: 25; pointer-events: none; }
+.ghost .gp { position: absolute; inset: 0; background: var(--convex), var(--paper-raised); box-shadow: inset 0 0 0 1px var(--hairline); }
+.ghost .gc, .ghost .gk { position: absolute; left: 0; top: 0; }
+.ghost .gk { margin: 0; background: transparent !important; box-shadow: none !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+.ghost .gc .receipt { box-shadow: none; background: transparent; }
+
+/* handoff: a thin line, one pen mark, mono ids */
+.handoff { display: flex; align-items: center; gap: 12px; font: var(--t-micro)/var(--lh-micro) var(--font-machine); color: var(--ink-3); padding: 2px 0; }
+.handoff .ln { flex: 1; height: 1px; background: var(--hairline-strong); }
+.handoff .ln.l { transform-origin: right center; } .handoff .ln.r { transform-origin: left center; }
+.handoff .mid { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.handoff svg { width: 34px; height: 14px; overflow: visible; }
+.handoff b { color: var(--ink-2); font-weight: 500; }
+
+/* ===== composer: liquid glass pill ===== */
+.composer { position: fixed; left: 50%; bottom: 22px; width: 720px; margin-left: -360px; height: 60px; border-radius: var(--r-2xl); z-index: 20;
+            display: flex; align-items: center; gap: 10px; padding: 0 10px;
+            background: var(--glass-fill); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+            box-shadow: var(--glass-edge), var(--shadow-press), var(--shadow-float); }
+.composer > *:not(.grain):not(.rim):not(.spec):not(.sheen):not(.gather):not(.toplight) { position: relative; z-index: 2; }
+.composer:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cbtn { width: 40px; height: 40px; flex: none; border-radius: 50%; display: grid; place-items: center; cursor: pointer; border: 0;
+        transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), opacity var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+.cbtn svg { width: 16px; height: 16px; }
+.plus { background: var(--convex), var(--paper-raised); color: var(--ink-1); box-shadow: var(--highlight-top), 0 0 0 1px rgb(var(--shade) / .10), 0 1px 2px rgb(var(--shade) / .08); }
+.plus:is(:hover, .is-hover) { transform: translateY(-1px); box-shadow: var(--highlight-top), 0 0 0 1px rgb(var(--shade) / .18), 0 4px 10px -4px rgb(var(--shade) / .22); }
+.send { background: linear-gradient(180deg, rgb(255 255 255 / .12), rgb(255 255 255 / 0)), var(--ink-1); color: var(--paper-raised);
+        box-shadow: inset 0 1px 0 rgb(255 255 255 / .18), 0 1px 2px rgb(var(--shade) / .18), 0 6px 14px -6px rgb(var(--shade) / .35); }
+.send:is(:hover, .is-hover):not(:disabled) { transform: translateY(-1px); box-shadow: inset 0 1px 0 rgb(255 255 255 / .18), 0 2px 4px rgb(var(--shade) / .18), 0 10px 20px -8px rgb(var(--shade) / .40); }
+.send:disabled { opacity: .45; cursor: default; box-shadow: none; }
+.cbtn:is(:active, .is-press):not(:disabled) { transform: scale(.93); box-shadow: var(--shadow-press); transition-duration: var(--dur-fast); transition-timing-function: var(--ease-press); }
+.chip { height: 30px; flex: none; display: inline-grid; align-items: center; padding: 0 11px; border-radius: var(--r-pill); cursor: pointer; border: 0;
+        background: rgb(237 231 221 / .94); color: var(--ink-1); font: var(--w-semibold) var(--t-meta)/1 var(--font-ui);
+        transition: transform var(--dur-base) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+.chip > span { grid-area: 1/1; white-space: nowrap; }
+.chip:is(:hover, .is-hover) { background: var(--hairline); }
+.chip:is(:active, .is-press) { transform: scale(.97, .955); transition-duration: var(--dur-fast); transition-timing-function: var(--ease-press); }
+.composer textarea { flex: 1; min-width: 0; border: 0; background: none; resize: none; outline: none; padding: 0; height: 21px; line-height: 21px; white-space: nowrap; overflow: hidden; }
+.composer textarea::placeholder { color: var(--ink-2); }
+.flyer { position: fixed; z-index: 26; pointer-events: none; border-radius: var(--r-lg); padding: 10px 16px 11px; }
+.flyer .fill { position: absolute; inset: 0; border-radius: inherit; background: var(--paper-sunken); }
+.flyer .txt { position: relative; white-space: nowrap; }
+
+/* demo pointer (the recording has no OS cursor) */
+.cursor { position: fixed; left: 0; top: 0; z-index: 100; width: 20px; height: 20px; pointer-events: none; opacity: 0; }
+.cursor svg { width: 20px; height: 20px; overflow: visible; filter: drop-shadow(0 1px 1.5px rgb(var(--shade) / .35)); }
+/* ===== glass push (Arriq via Art Director, 2026-09-29): brighter rim, more present pointer sheen, clearer lift ===== */
+.card > .rim, .composer > .rim { padding: 1.5px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 1) 0%, rgb(255 255 255 / .62) 16%, rgb(255 255 255 / .12) 46%, rgb(255 255 255 / 0) 62%, rgb(255 255 255 / .22) 100%); }
+.composer > .toplight, .card > .toplight { position: absolute; left: 22px; right: 22px; top: 0; height: 1px; pointer-events: none; z-index: 3;
+  background: linear-gradient(90deg, rgb(255 255 255 / 0), rgb(255 255 255 / 1) 18%, rgb(255 255 255 / 1) 82%, rgb(255 255 255 / 0)); }
+.spec { padding: 2px; }
+.spec i { width: 360px; height: 360px; margin: -180px 0 0 -180px; }
+.sheen i { width: 300px; height: 64px; margin: -26px 0 0 -150px; background: radial-gradient(closest-side, rgb(255 255 255 / .95), rgb(255 255 255 / .35) 55%, rgb(255 255 255 / 0)); }
+.gather { position: absolute; inset: 0; border-radius: inherit; overflow: hidden; pointer-events: none; z-index: 1; opacity: 0; transition: opacity var(--dur-soft) var(--ease-out); }
+.gather i { position: absolute; left: 0; top: 0; width: 220px; height: 220px; margin: -110px 0 0 -110px; border-radius: 50%;
+  background: radial-gradient(closest-side, rgb(255 255 255 / .42), rgb(255 255 255 / .12) 55%, rgb(255 255 255 / 0)); will-change: transform; }
+.lit > .gather { opacity: 1; transition-duration: var(--dur-base); }
+html.rm .gather { display: none; }
+@media (prefers-reduced-motion: reduce) { .gather { display: none; } }
+/* lift: a clear glass edge that catches light during the rise, and a short contact shadow on the paper */
+.card > .edge { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; z-index: 3; padding: 1.5px; opacity: 0;
+  background: linear-gradient(180deg, rgb(255 255 255 / 1), rgb(255 255 255 / .7) 30%, rgb(255 255 255 / .55) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
+.card > .contact { position: absolute; left: 6%; right: 6%; bottom: -1px; height: 14px; border-radius: 50%; pointer-events: none; z-index: -1; opacity: 0;
+  background: radial-gradient(closest-side, rgb(var(--shade) / .22), rgb(var(--shade) / 0)); }
+.card { box-shadow: var(--glass-edge); }
+.card > .restshadow { position: absolute; inset: 0; border-radius: inherit; box-shadow: var(--shadow-press); pointer-events: none; z-index: -1; }
+/* step mark column sized so the trace path renders at the one pen weight */
+.step .in { grid-template-columns: 28px 1fr auto; }
+.step .mk { width: 28px; }
+.step .mk .tr { width: 28px; height: 8px; top: 6px; }
+.step .mk .ck { left: 6px; }
+.step::after { left: 13.5px; }
+.lbl .l3 { opacity: 0; justify-self: center; }
+.lbl .l2 { justify-self: start; }
+.cursor svg { transform-origin: 3px 2px; }
+.mg { box-shadow: var(--highlight-top), 0 0 0 1px var(--hairline); }
+.bub-bot p, .bub-me .txt { text-wrap: pretty; }
+/* CD fix 1: approve and deny carry equal weight at rest (both paper, same border); the hold fills approve with ink */
+.btn.approve > .ink { position: absolute; inset: -1.5px; border-radius: inherit; display: flex; align-items: center; justify-content: center; pointer-events: none;
+  background: linear-gradient(180deg, rgb(255 255 255 / .10), rgb(255 255 255 / 0)), var(--ink-1); color: var(--paper-raised);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .16); clip-path: inset(0px 100% 0px 0px); }
+.btn.line .pen { stroke: var(--pen); }
+.btn.approve > .ink .pen { stroke: var(--paper-raised); }
+/* CD fix 3: capture frames carry no chapter label or prototype controls */
+html.cap .proto { display: none; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><div class="disc" aria-hidden="true">D</div><b>dasdevbot</b><span>DasVR/NIL · phase0</span></div>
+  <div class="proto" role="toolbar" aria-label="Prototype controls">
+    <span class="beat" id="beat" aria-hidden="true"></span>
+    <button class="pbtn" id="replay" type="button"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 8a4.8 4.8 0 1 0 1.5-3.5M3.2 2.6v2.6h2.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Replay</button>
+    <button class="pbtn" id="rmt" type="button" aria-pressed="false">Reduced motion</button>
+  </div>
+</header>
+<main class="viewport" id="vp" aria-label="Thread"><div class="thread" id="thread" role="log" aria-live="polite"></div></main>
+<form class="composer" id="composer" autocomplete="off">
+  <div class="grain"></div><div class="gather"><i></i></div><div class="rim"></div><div class="toplight"></div><div class="spec"><i></i></div><div class="sheen"><i></i></div>
+  <button class="cbtn plus" type="button" aria-label="Attach"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+  <button class="chip" id="chip" type="button" aria-label="Wakes Reviewer"><span class="c1">@Reviewer</span></button>
+  <textarea id="msg" rows="1" aria-label="Message" placeholder="Message Reviewer"></textarea>
+  <button class="cbtn send" id="send" type="submit" aria-label="Send" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3.5M3.8 7.4 8 3.2l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+</form>
+<div class="cursor" id="cursor" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M3 2.2 3.4 16l3.7-3.6 2.6 5.6 2.4-1.1-2.6-5.5 5.2-.3z" fill="#2B2723" stroke="#FBF9F5" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
+<div class="sr" id="live" aria-live="polite"></div>
+<script>
+
+/* ================= instrumentation: proves idle is idle ================= */
+const _setTimeout = window.setTimeout.bind(window), _clearTimeout = window.clearTimeout.bind(window);
+const _raf = window.requestAnimationFrame.bind(window), _caf = window.cancelAnimationFrame.bind(window);
+const _setInterval = window.setInterval.bind(window), _clearInterval = window.clearInterval.bind(window);
+const IDLE = { raf: new Set(), to: new Set(), iv: new Set() };
+window.requestAnimationFrame = cb => { const id = _raf(ts => { IDLE.raf.delete(id); cb(ts); }); IDLE.raf.add(id); return id; };
+window.cancelAnimationFrame = id => { IDLE.raf.delete(id); _caf(id); };
+window.setTimeout = (cb, ms, ...a) => { const id = _setTimeout(() => { IDLE.to.delete(id); if (typeof cb === 'function') cb(...a); }, ms); IDLE.to.add(id); return id; };
+window.clearTimeout = id => { IDLE.to.delete(id); _clearTimeout(id); };
+window.setInterval = (cb, ms, ...a) => { const id = _setInterval(cb, ms, ...a); IDLE.iv.add(id); return id; };
+window.clearInterval = id => { IDLE.iv.delete(id); _clearInterval(id); };
+
+/* ================= clock: real time live; virtual, frame-stepped time under ?capture ================= */
+const Q = new URLSearchParams(location.search);
+const CAP = Q.has('capture');
+const Clock = (() => {
+  let t = 0, seq = 0, rq = [];
+  const timers = new Map(), live = new Set(), reg = new WeakMap();
+  const flush = () => new Promise(r => _setTimeout(r, 0));
+  function sync() {
+    let fin = 0;
+    for (const a of document.getAnimations()) {
+      if (!reg.has(a)) { a.pause(); reg.set(a, t); }          // CSS transitions picked up on first sight
+      const local = t - reg.get(a), end = a.effect ? a.effect.getComputedTiming().endTime : 0;
+      if (end !== Infinity && local >= end) { a.finish(); fin++; } else a.currentTime = local;
+    }
+    return fin;
+  }
+  async function settle() { for (let i = 0; i < 16; i++) { const n = sync(); await flush(); if (!n) { sync(); return; } } }
+  return {
+    now: () => CAP ? t : performance.now(),
+    after(ms, fn) {
+      if (!CAP) { const id = setTimeout(() => { live.delete(id); fn(); }, ms); live.add(id); return id; }
+      const id = ++seq; timers.set(id, { at: t + Math.max(0, ms), fn }); return id;
+    },
+    clear(id) { if (id == null) return; if (!CAP) { clearTimeout(id); live.delete(id); } else timers.delete(id); },
+    clearAll() { if (!CAP) { live.forEach(id => clearTimeout(id)); live.clear(); } else timers.clear(); rq = []; },
+    raf(fn) { if (!CAP) return requestAnimationFrame(() => fn()); rq.push(fn); },
+    adopt(a, offset = 0) { if (!CAP) { if (offset) a.currentTime = offset; return; } a.pause(); a.currentTime = offset; reg.set(a, t - offset); },
+    get pending() { return CAP ? timers.size + rq.length : live.size; },
+    async step(dt) {
+      const target = t + dt;
+      for (;;) {
+        let nk = null, nx = null;
+        for (const [k, x] of timers) if (x.at <= target && (!nx || x.at < nx.at)) { nk = k; nx = x; }
+        if (!nx) break;
+        timers.delete(nk); t = Math.max(t, nx.at); await settle(); nx.fn(); await flush();
+      }
+      t = target; const q = rq; rq = []; q.forEach(f => f()); await flush(); await settle();
+    },
+  };
+})();
+
+/* ================= helpers ================= */
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const root = document.documentElement;
+if (Q.has('rm')) root.classList.add('rm');
+if (CAP) root.classList.add('cap');   // capture: chapter label and prototype controls hidden, frame stays clean
+const mq = matchMedia('(prefers-reduced-motion: reduce)');
+const RM = () => mq.matches || root.classList.contains('rm');
+const tok = n => parseFloat(getComputedStyle(root).getPropertyValue('--dur-' + n)) || 0;
+const E = { out: 'cubic-bezier(.22,1,.36,1)', inout: 'cubic-bezier(.65,0,.35,1)', press: 'cubic-bezier(.3,0,.5,1)', exit: 'cubic-bezier(.4,0,1,1)', draw: 'cubic-bezier(.5,.05,.2,1)' };
+function bez(x1, y1, x2, y2) {
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx, cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const sx = t => ((ax * t + bx) * t + cx) * t, sy = t => ((ay * t + by) * t + cy) * t;
+  return x => { if (x <= 0) return 0; if (x >= 1) return 1; let lo = 0, hi = 1, t = x;
+    for (let i = 0; i < 40; i++) { if (sx(t) < x) lo = t; else hi = t; t = (lo + hi) / 2; } return sy(t); };
+}
+const F = { out: bez(.22, 1, .36, 1), inout: bez(.65, 0, .35, 1) };
+const STOP = Symbol('stop');
+let gen = 0;
+const sleep = ms => new Promise((res, rej) => { const g = gen; Clock.after(ms, () => g === gen ? res() : rej(STOP)); });
+function anim(el, kf, dur, ease, opts = {}) {
+  if (!el || !el.isConnected) return Promise.resolve();
+  const { keep, ...o } = opts;
+  const a = el.animate(kf, { duration: Math.max(0, dur), easing: ease || 'linear', fill: 'both', ...o });
+  Clock.adopt(a);
+  return a.finished.then(() => { try { if (keep !== false) a.commitStyles(); } catch (e) {} a.cancel(); }, () => {});
+}
+function loop(el, kf, dur, offset = 0) { const a = el.animate(kf, { duration: dur, iterations: Infinity }); Clock.adopt(a, offset); return a; }
+function tween(ms, ef, cb) {
+  const g = gen;
+  return new Promise(res => { const t0 = Clock.now(); cb(0);
+    const f = () => { if (g !== gen) return res(); const p = ms <= 0 ? 1 : Math.min(1, (Clock.now() - t0) / ms); cb(ef(p)); if (p < 1) Clock.raf(f); else res(); };
+    Clock.raf(f); });
+}
+function draw(path, dur = tok('draw'), delay = 0) {
+  if (!path) return Promise.resolve();
+  path.getAnimations().forEach(a => a.cancel());
+  path.style.strokeDashoffset = '0';
+  if (RM() || dur === 0) return anim(path, [{ opacity: 0 }, { opacity: 1 }], 120, 'linear', { delay, keep: false });
+  return anim(path, [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }], dur, E.draw, { delay, keep: false });
+}
+function retract(path) {
+  if (!path) return; const from = parseFloat(getComputedStyle(path).strokeDashoffset) || 0;
+  path.getAnimations().forEach(a => a.cancel()); path.style.strokeDashoffset = '1';
+  if (!RM() && from < 1) anim(path, [{ strokeDashoffset: from }, { strokeDashoffset: 1 }], 160, E.exit, { keep: false });
+}
+function animH(el, from, to, dur, ease) {  // height only where the brief allows it: unfold, collapse, stream
+  const target = to === 'auto' ? el.scrollHeight : to;
+  el.style.overflow = 'hidden';
+  if (RM() || dur === 0) { el.style.height = to === 'auto' ? '' : to + 'px'; return Promise.resolve(); }
+  el.style.height = from + 'px';
+  return anim(el, [{ height: from + 'px' }, { height: target + 'px' }], dur, ease, { keep: false }).then(() => { el.style.height = to === 'auto' ? '' : to + 'px'; });
+}
+function swap(outEl, inEl, lift = 3) {  // crossfade in place: fast out, base in
+  if (RM()) { anim(outEl, [{ opacity: 1 }, { opacity: 0 }], 120, 'linear'); return anim(inEl, [{ opacity: 0 }, { opacity: 1 }], 120, 'linear'); }
+  anim(outEl, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: `translateY(${-lift}px)` }], tok('fast'), E.exit);
+  return anim(inEl, [{ opacity: 0, transform: `translateY(${lift}px)` }, { opacity: 1, transform: 'none' }], tok('base'), E.out, { delay: 40 });
+}
+function roll(el, v) { if (RM()) { el.textContent = v; return; }
+  anim(el, [{ transform: 'none', opacity: 1 }, { transform: 'translateY(-5px)', opacity: 0 }], 120, E.exit, { keep: false }).then(() => { el.textContent = v;
+    anim(el, [{ transform: 'translateY(5px)', opacity: 0 }, { transform: 'none', opacity: 1 }], tok('base'), E.out, { keep: false }); }); }
+const make = html => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+function say(t) { const l = $('#live'); l.textContent = ''; Clock.after(30, () => l.textContent = t); }
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+/* ================= FLIP: the thread makes room by transform, never a jump ================= */
+const thread = $('#thread');
+const flipTargets = () => [...thread.querySelectorAll(':scope > :not(.turn), :scope > .turn > *')];
+function flip(mutate, { dur, ease = E.out, exclude = [] } = {}) {
+  dur = dur ?? tok('stage');
+  const els = flipTargets(), first = new Map(els.map(e => [e, e.getBoundingClientRect().top]));
+  mutate();
+  if (RM()) return;
+  const live = els.filter(e => e.isConnected && !exclude.includes(e));
+  live.forEach(e => { if (e.__flip) { e.__flip.cancel(); e.__flip = null; } });   // re-target from where it is on screen now
+  live.forEach(e => { const dy = first.get(e) - e.getBoundingClientRect().top; if (Math.abs(dy) < .5) return;
+    const a = e.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: dur, easing: ease }); Clock.adopt(a); e.__flip = a;
+    a.finished.then(() => { if (e.__flip === a) e.__flip = null; }, () => {}); });
+}
+function enter(el, rise = 6, delay = 0) {
+  if (RM()) return anim(el, [{ opacity: 0 }, { opacity: 1 }], 160, 'linear', { delay, keep: false });
+  return anim(el, [{ opacity: 0, transform: `translateY(${rise}px)` }, { opacity: 1, transform: 'none' }], tok('soft'), E.out, { delay, keep: false });
+}
+
+/* ================= pen paths (authored once, never jittered) ================= */
+const P = {
+  check: 'M4.2 12.9c1.5 1.3 3.1 3.1 4.6 5.3.3.4.8.4 1-.1 2.6-5.1 6-9.6 10.2-13.6',
+  strike: 'M2 7.4c19.6-1.8 40.2-2.6 61-2.2 21.4.4 43 1.8 65 3.6',
+  dash: 'M4.5 12.6c5-.7 10-.6 15 .2',
+  reading: 'M1.5 6.8c2.9-2.6 5.4-3 8-1 2.5 1.9 4.8 2.2 7.4.2 2.7-2 5.2-2.2 7.9-.3 2.4 1.7 4.7 1.9 7.3.1 2.3-1.5 4.6-1.9 7.2-.9',
+  writing: 'M1.6 8.6c2.3-.7 4.2-2.3 5.2-4.4.6-1.3-.4-2.2-1.3-1.2-1.4 1.6-1.1 4.6.7 5.6 1.9 1.1 4.1-.4 5.5-2.3 1-1.3 1.8-3.3.8-3.7-1-.4-1.8 1.9-1.3 3.6.6 2.2 3 2.8 5 1.5 1.9-1.2 3-3.2 3.9-4.8.6-1.1-.4-1.9-1.2-1-1.2 1.4-.9 4.1.8 5.1 2.2 1.2 4.9-.4 6.8-2',
+  hand: 'M2 9.6c2.9-.1 5.2-1.4 6.9-3.6 1.1-1.5.2-3-1.2-2-1.7 1.2-1.5 4.3.6 5.3 2.5 1.2 5.6-.3 8.6-1.8 3.5-1.7 7.6-2.7 14.9-2.2',
+};
+const pen = (d, cls = '', w = 1.75) => `<path class="pen d0 ${cls}" pathLength="1" style="stroke-width:${w}px" d="${d}"/>`;
+const CHEV = `<svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const TRACE_KF = [{ offset: 0, strokeDashoffset: 1, opacity: 1, easing: E.draw }, { offset: .55, strokeDashoffset: 0, opacity: 1 }, { offset: .8, strokeDashoffset: 0, opacity: 1, easing: E.exit }, { offset: 1, strokeDashoffset: 0, opacity: 0 }];
+
+/* ================= story ================= */
+const BOTS = { reviewer: { name: 'Reviewer', mono: 'R' }, builder: { name: 'Builder', mono: 'B' } };
+const TYPED = 'Pushed. Review the handoff fix, one comment max.';
+const STEPS = [
+  { say: 'Reading the diff', dt: 'git diff a41c9e2~1 a41c9e2 --stat · 3 files, +16 −6', secs: 3.2, ms: 700, kind: 'reading' },
+  { say: 'Tracing where the handoff lock is released', dt: 'rg -n "release_lock" src/ · 4 hits', secs: 1.9, ms: 660, kind: 'reading' },
+  { say: 'Running the core tests', dt: 'cargo test -p core · 41 passed, 0 failed', secs: 24.6, ms: 760, kind: 'reading' },
+  { say: 'Checking why refresh() can reject', dt: 'git log -L :refresh:src/handoff.ts · 2 commits', secs: 3.1, ms: 640, kind: 'reading' },
+  { say: 'Drafting one review comment', dt: 'reviewer-small · 2,418 in / 212 out · $0.000431', secs: 9.2, ms: 700, kind: 'writing' },
+];
+const POST = { say: 'Posting the comment to DasVR/NIL #212', dt: 'gh pr comment 212 · ev_3f9a2c · external', secs: .6, ms: 520, kind: 'writing' };
+const REPLY1 = 'Found one thing worth raising. If `refresh()` rejects on a 401, the handoff lock is never released, so the next session can’t take it. I drafted one comment suggesting a `try/finally`. Posting to GitHub needs your OK.';
+const REPLY_B = 'Picked up ev_4c83d5. I’ll re-run the handoff tests once CI on #212 is green and report back here.';
+let story0 = new Date(2026, 8, 29, 10, 42, 6).getTime();   // mocks may start the story clock later
+let seqT0 = 0;
+const storyNow = () => new Date(story0 + (Clock.now() - seqT0));
+const fmt12 = (d, secs) => { let h = d.getHours(); const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12; const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${h}:${mm}${secs ? ':' + String(d.getSeconds()).padStart(2, '0') : ''} ${ap}`; };
+
+/* ================= builders ================= */
+function botTurn(k, time) { const b = BOTS[k];
+  return make(`<section class="turn" data-bot="${k}"><div class="who"><span class="mg" aria-hidden="true">${b.mono}</span><b>${b.name}</b><span>${time}</span></div></section>`); }
+function meRow(html, time) { return make(`<div class="me"><div class="bub-me"><div class="fill"></div><p class="txt">${html}</p></div><span class="meta-t">${time}</span></div>`); }
+function rich(s) { return esc(s).replace(/`([^`]+)`/g, '<code>$1</code>'); }
+function renderHistory() { renderHistoryThread(); }   // mocks replace this with their own starting state
+function renderHistoryThread() {   // a little prior history so the paper is never empty above the first message
+  thread.innerHTML = '';
+  thread.append(make(`<p class="day">Yesterday · 4:05 PM</p>`));
+  const r0 = botTurn('reviewer', '4:05 PM');
+  r0.append(make(`<div class="bub-bot"><p>CI on #212 failed on phase0. Two sessions lost the handoff lock after <code>refresh()</code> returned a 401, and neither could take it back without a restart.</p></div>`));
+  thread.append(r0);
+  thread.append(meRow('Can someone take the refresh bug on #212? Sessions keep losing the handoff lock.', '4:12 PM'));
+  const b = botTurn('builder', '4:13 PM');
+  b.append(make(`<div class="bub-bot"><p>On it. The lock is taken in <code>handoff.ts</code> and only released on the happy path. I’ll push a fix to phase0 and hand it to Reviewer.</p></div>`));
+  thread.append(b);
+  const rc = make(`<div class="receipt old" role="status"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true">${pen(P.check)}</svg>
+    <div class="what"><b class="ok">Approved</b> · Push to phase0<div class="sub">Undo closed. Pushed 9c07d1e to DasVR/NIL.</div></div>
+    <div class="id">4:31:08 PM<br>ev_1b7e04</div></div>`);
+  $('path', rc).style.strokeDashoffset = '0';
+  const rs = make(`<div class="slot"></div>`); rs.append(rc); b.append(rs);
+  const h = make(`<div class="handoff" role="note"><span class="ln l"></span><span class="mid"><svg viewBox="0 0 34 14" aria-hidden="true">${pen(P.hand)}</svg><span class="ids">ev_1b7e04 · <b>Builder hands off to Reviewer</b> · ev_1c2a9f</span></span><span class="ln r"></span></div>`);
+  $('path', h).style.strokeDashoffset = '0'; thread.append(h);
+  thread.append(make(`<p class="day">Today · 10:38 AM</p>`));
+  const t = botTurn('reviewer', '10:38 AM');
+  t.append(make(`<div class="bub-bot"><p>Woke on push <code>a41c9e2</code> to DasVR/NIL · phase0, “handoff: release lock on refresh”. Three files changed. Say the word and I’ll review it.</p></div>`));
+  thread.append(t);
+  thread.append(meRow('Hold on, pushing one more fix to the lock path first.', '10:39 AM'));
+}
+/* ================= tool steps ================= */
+function toolsEl() {
+  return make(`<div class="tools"><div class="sumwrap"><button class="sum" type="button" aria-expanded="false">${CHEV}<span class="n">Used 0 tools</span><span class="mono">· 0s</span></button></div><div class="foldlist"></div><div class="livelist"></div></div>`);
+}
+function stepEl(s, waiting) {
+  return make(`<div class="step"><div class="in">
+    <span class="mk"><svg class="tr" viewBox="0 0 44 12" aria-hidden="true">${pen(P[s.kind], '', 2.75)}</svg><svg class="ck" viewBox="0 0 24 24" aria-hidden="true">${pen(P.check, '', 2.625)}</svg>${waiting ? '<span class="wd" aria-hidden="true"></span>' : ''}</span>
+    <span class="say">${esc(s.say)}</span><span class="el ${waiting ? 'wait' : ''}">${waiting ? 'waiting on you' : '0.0s'}</span>
+    <div class="dt"><p>${esc(s.dt)}</p></div></div></div>`);
+}
+function startTrace(st) {
+  const p = $('.tr path', st.row); if (st.loop) st.loop.cancel();
+  if (RM()) { p.style.strokeDashoffset = '0'; p.style.opacity = '1'; st.loop = null; return; }
+  p.style.strokeDashoffset = ''; p.style.opacity = '';
+  const dur = st.s.kind === 'writing' ? 1700 : 2100;   // --dur-trace-write / --dur-trace-read
+  st.loop = loop(p, TRACE_KF, dur, dur * .22);         // the pen is already moving when the step appears
+}
+function stopTrace(st) {
+  const p = $('.tr path', st.row); const l = st.loop; st.loop = null;
+  if (RM() || !l) { l && l.cancel(); p.style.strokeDashoffset = '1'; p.style.opacity = ''; return Promise.resolve(); }
+  return anim(p, [{ opacity: 1 }, { opacity: 0 }], tok('fast'), E.exit, { keep: false }).then(() => { l.cancel(); p.style.strokeDashoffset = '1'; });
+}
+function ticker(st) {
+  const g = gen, t0 = Clock.now(), el = $('.el', st.row);
+  const f = () => { if (g !== gen || st.done) return; const p = Math.min(1, (Clock.now() - t0) / st.s.ms); el.textContent = (st.s.secs * p).toFixed(1) + 's'; if (p < 1) st.tk = Clock.after(100, f); };
+  f();
+}
+function addStep(tools, s, { waiting = false } = {}) {
+  const row = stepEl(s, waiting), st = { s, row, done: false, waiting };
+  const list = tools.__folded ? $('.livelist', tools) : $('.foldlist', tools);
+  list.append(row);
+  if (RM()) anim(row, [{ opacity: 0 }, { opacity: 1 }], 160, 'linear', { keep: false });
+  else { animH(row, 0, 'auto', tok('soft'), E.out); anim($('.in', row), [{ opacity: 0, transform: 'translateY(5px)' }, { opacity: 1, transform: 'none' }], tok('soft'), E.out, { keep: false }); }
+  if (waiting) { const d = $('.wd', row); if (!RM()) anim(d, [{ opacity: 0, transform: 'scale(.6)' }, { opacity: 1, transform: 'none' }], tok('base'), E.out, { delay: 120, keep: false }); }
+  else { startTrace(st); ticker(st); }
+  (tools.__steps ||= []).push(st);
+  return st;
+}
+function finishStep(st) {  // trace lifts, the ink check draws, the detail collapses to one line
+  st.done = true; Clock.clear(st.tk);
+  const el = $('.el', st.row); el.classList.remove('wait'); el.textContent = st.s.secs.toFixed(1) + 's';
+  stopTrace(st);
+  const dt = $('.dt', st.row);
+  animH(dt, dt.offsetHeight, 0, tok('base'), E.out); anim($('p', dt), [{ opacity: 1 }, { opacity: 0 }], tok('fast'), E.exit);
+  return draw($('.ck path', st.row), tok('draw'), RM() ? 0 : 60);
+}
+function sumText(tools) { const done = tools.__steps.filter(s => s.done); const secs = done.reduce((a, s) => a + s.s.secs, 0);
+  return [`Used ${done.length} tool${done.length === 1 ? '' : 's'}`, `· ${Math.round(secs)}s`]; }
+function paintSum(tools, animate) {
+  const [a, b] = sumText(tools), n = $('.sum .n', tools), m = $('.sum .mono', tools);
+  if (!animate || RM()) { n.textContent = a; m.textContent = b; return; }
+  [n, m].forEach((el, i) => anim(el, [{ opacity: 1 }, { opacity: 0 }], tok('fast'), E.exit, { keep: false }).then(() => { el.textContent = i ? b : a; anim(el, [{ opacity: 0 }, { opacity: 1 }], tok('base'), E.out, { keep: false }); }));
+}
+function fold(tools) {  // 3+ finished steps fold into one summary line
+  tools.__folded = true;
+  const fl = $('.foldlist', tools), live = $('.livelist', tools), sw = $('.sumwrap', tools);
+  tools.__steps.filter(s => !s.done).forEach(s => live.append(s.row));   // same visual position, new parent
+  paintSum(tools, false);
+  const h = fl.offsetHeight;
+  animH(sw, 0, 30, tok('soft'), E.inout); anim($('.sum', tools), [{ opacity: 0 }, { opacity: 1 }], tok('soft'), E.out, { delay: 80, keep: false });
+  animH(fl, h, 0, tok('soft'), E.inout); anim(fl, [{ opacity: 1 }, { opacity: 0 }], tok('base'), E.exit, { keep: false });
+}
+async function joinFold(tools, st) {  // a finished live step tucks into the summary
+  const row = st.row, h = row.offsetHeight;
+  paintSum(tools, true);
+  anim($('.in', row), [{ opacity: 1 }, { opacity: 0 }], tok('base'), E.exit, { keep: false });
+  await animH(row, h, 0, tok('soft'), E.inout);
+  $('.foldlist', tools).append(row); row.style.height = ''; row.style.overflow = '';
+}
+function toggleFold(tools) {
+  const b = $('.sum', tools), fl = $('.foldlist', tools), open = b.getAttribute('aria-expanded') !== 'true';
+  b.setAttribute('aria-expanded', open);
+  fl.getAnimations().forEach(a => a.cancel());
+  if (open) { fl.style.opacity = '1'; const kids = [...fl.children];
+    const p = animH(fl, 0, 'auto', tok('soft'), E.out);
+    kids.forEach((k, i) => anim($('.in', k), RM() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: 'translateY(-3px)' }, { opacity: 1, transform: 'none' }], tok('base'), E.out, { delay: RM() ? 0 : 40 + i * 30, keep: false }));
+    return p; }
+  return animH(fl, fl.offsetHeight, 0, tok('soft'), E.inout);
+}
+thread.addEventListener('click', e => { const b = e.target.closest('.sum'); if (b) toggleFold(b.closest('.tools')); });
+
+/* ================= reply streaming: token by token, height eased every frame ================= */
+function tokenize(s) { const out = []; const re = /`[^`]+`[^\s`]*\s*|[^\s`]+\s*/g; let m; while ((m = re.exec(s))) out.push(m[0]); return out; }
+async function streamInto(turn, text, seed) {
+  const g = gen;
+  const b = make(`<div class="bub-bot"><div class="grow"><p class="body"></p></div></div>`);
+  const grow = $('.grow', b), body = $('.body', b);
+  body.innerHTML = rich(text); b.style.visibility = 'hidden'; turn.append(b);
+  const W = Math.ceil(b.getBoundingClientRect().width); b.remove(); b.style.visibility = ''; body.innerHTML = '';
+  b.style.width = W + 'px';            // width fixed up front: no sideways jitter while it fills
+  const toks = tokenize(text);
+  if (RM()) { body.innerHTML = rich(text); flip(() => turn.append(b)); await anim(b, [{ opacity: 0 }, { opacity: 1 }], 160, 'linear', { keep: false }); return b; }
+  grow.style.height = '21px';
+  flip(() => turn.append(b), { exclude: [b] }); enter(b, 6);
+  let h = 21, last = Clock.now(), streaming = true;
+  const fit = () => { if (g !== gen) return;
+    const now = Clock.now(), dt = Math.max(1, now - last); last = now;
+    const target = body.offsetHeight; h += (target - h) * (1 - Math.exp(-dt / 75));
+    if (!streaming && Math.abs(target - h) < .35) { grow.style.height = ''; return; }   // loop ends with the motion
+    grow.style.height = h.toFixed(2) + 'px'; Clock.raf(fit); };
+  Clock.raf(fit);
+  const r = rng(seed);
+  await sleep(140);
+  for (const t of toks) {
+    const span = document.createElement('span'); span.className = 'tk'; span.innerHTML = rich(t); body.append(span);
+    anim(span, [{ opacity: 0 }, { opacity: 1 }], 200, E.out, { keep: false });
+    if (typeof onToken === 'function') onToken(t);   // mocks: the speaking line follows the output
+    await sleep(20 + Math.round(r() * 26) + (/[.,]\s*$/.test(t) ? 50 : 0));
+  }
+  streaming = false;
+  await sleep(200);
+  return b;
+}
+/* ================= approval card ================= */
+let C = null, hold = null;
+/* card content is data: thread.html uses CARD0; the mocks pass their own spec (same markup, same look) */
+const CARD0 = {
+  risk: 'external', riskLabel: 'External', why: 'posts to GitHub, leaves this machine', agent: 'R', bot: 'Reviewer', ask: 'asks before posting',
+  title: 'Post a PR comment', purpose: 'Leave one review comment flagging an unhandled error path in the session handoff.',
+  evidence: [['repo', 'DasVR/NIL'], ['pr', '#212 handoff: release lock on refresh'], ['ref', 'phase0 @ a41c9e2'], ['event', 'ev_3f9a2c · tool.request']],
+  draftLabel: 'Draft', prov: 'mock provider, not written by a model',
+  draft: 'If <code>refresh()</code> rejects on a 401, the handoff lock is never released. Wrap it in try/finally so the next session can take the lock.',
+  cmeta: 'mock · reviewer-small · 2,418 in / 212 out · $0.000431',
+  approve: 'Approve draft', approved: 'Approved', deny: 'Deny draft', denied: 'Denied',
+  quiet: 'Hold to decide. Nothing posts until the 6s undo closes.',
+  afterApprove: 'Posts to DasVR/NIL #212 when undo closes. Nothing is posted yet.', afterDeny: 'Nothing will post. Undo brings the draft back.',
+  receiptWhat: 'Post a PR comment', receiptOk: 'Undo closed. Posting to DasVR/NIL #212 (demo: nothing leaves).', receiptNo: 'Undo closed. Nothing was posted.',
+  receiptId: 'ev_4b1e07', sayWaiting: 'Reviewer is waiting on you: Post a PR comment. External.',
+};
+function cardHTML(k = CARD0) {
+  const undo = `<span class="l3">Undo <span class="t"><i>6</i>s</span></span>`;
+  const apLbl = `<span class="lbl"><svg class="hc" viewBox="0 0 24 24" aria-hidden="true">${pen(P.check, '', 2.33)}</svg><span class="l1">${k.approve}</span><span class="l2">${k.approved}</span>${undo}</span>`;
+  const ev = k.evidence.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('');
+  return `<article class="card" tabindex="0" data-risk="${k.risk}" aria-labelledby="ct">
+  <div class="contact"></div><div class="restshadow"></div><div class="lift"></div><div class="grain"></div><div class="gather"><i></i></div><div class="paperize"></div>
+  <div class="rim"></div><div class="toplight"></div><div class="edge"></div><div class="spec"><i></i></div><div class="sheen"><i></i></div>
+  <div class="risk" role="note"><span class="dot"></span>${k.riskLabel}<span class="why">· ${k.why}</span></div>
+  <div class="inner">
+    <header class="card-head"><div class="agent" aria-hidden="true">${k.agent}</div><div><p class="kicker"><b>${k.bot}</b> · ${k.ask}</p><h2 id="ct">${k.title}</h2></div></header>
+    <p class="purpose">${k.purpose}</p>
+    <section class="block"><h3>Evidence</h3><dl class="evidence">${ev}</dl></section>
+    <div class="sumline"><span class="dlabel">${k.draftLabel}<svg class="strike" viewBox="0 0 130 12" preserveAspectRatio="none" aria-hidden="true">${pen(P.strike)}</svg></span><span class="prov">${k.prov}</span></div>
+    <div class="draft">${k.draft}</div>
+    <p class="cmeta">${k.cmeta}</p>
+    <div class="actions">
+      <button class="btn line approve" type="button">${apLbl}<span class="ink" aria-hidden="true">${apLbl}</span></button>
+      <button class="btn line deny" type="button"><span class="lbl"><span class="l1">${k.deny}</span><span class="l2">${k.denied}</span>${undo}</span></button>
+    </div>
+    <p class="quiet"><span class="q1">${k.quiet}</span><span class="q2"></span></p>
+  </div></article>`;
+}
+function wireSpec(host) {
+  const light = $('.spec i', host), sh = $('.sheen i', host), ga = $('.gather i', host); let pend = false, x = 0, y = 0;
+  host.addEventListener('pointerenter', () => { if (!RM()) host.classList.add('lit'); });
+  host.addEventListener('pointerleave', () => host.classList.remove('lit'));
+  host.addEventListener('pointermove', e => { const r = host.getBoundingClientRect(); x = e.clientX - r.left; y = e.clientY - r.top;
+    if (!pend) { pend = true; Clock.raf(() => { pend = false;   // one frame per pointer move, then nothing
+      light.style.transform = `translate(${x}px, ${Math.min(y, 40) * .35}px)`; sh.style.transform = `translate(${x}px, ${Math.min(y, 30) * .15}px)`;
+      if (ga) ga.style.transform = `translate(${x}px, ${y}px)`; }); } });
+}
+async function liftCard(turn, step, spec = CARD0) {
+  const slot = make(`<div class="slot"></div>`); turn.append(slot);
+  const card = make(cardHTML(spec));
+  let rd, rf;
+  C = { spec, card, slot, step, state: 'waiting', armed: false, kind: null, ap: $('.approve', card), dn: $('.deny', card),
+        decided: new Promise(r => rd = r), filed: new Promise(r => rf = r) };
+  C.resolveDecided = rd; C.resolveFiled = rf;
+  flip(() => slot.append(card), { exclude: [slot], dur: tok('soft') });   // the thread makes room, then the card lifts off the step
+  const d = RM() ? 0 : 150, T = tok('stage');
+  if (RM()) anim(card, [{ opacity: 0 }, { opacity: 1 }], 160, 'linear', { keep: false });
+  else {
+    anim(card, [{ opacity: 0, transform: 'translateY(12px) scale(.98)' }, { opacity: 1, transform: 'none' }], T, E.out, { delay: d, keep: false });   // flat, 12px, ease-out, no spring
+    anim($('.lift', card), [{ opacity: 0 }, { opacity: 1 }], T, E.out, { delay: d + 60, keep: false });
+    // short contact shadow on the paper while it leaves, and a glass edge that catches light on the way up
+    anim($('.contact', card), [{ opacity: 0 }, { opacity: 1, offset: .25 }, { opacity: .7, offset: .6 }, { opacity: 0 }], T + 120, E.out, { delay: d, keep: false });
+    anim($('.edge', card), [{ opacity: 0 }, { opacity: 1, offset: .45 }, { opacity: .38 }], T + 240, E.out, { delay: d });
+  }
+  if (RM()) $('.edge', card).style.opacity = '.38';
+  wireCard(card); say(spec.sayWaiting);
+  await sleep(d + T);
+  C.landAt = Clock.now();
+  const c0 = C; Clock.after(800, () => { if (C === c0) C.armed = true; });   // seen lock
+  return C;
+}
+function wireCard(card) {
+  wireSpec(card);
+  const bind = (btn, kind) => {
+    btn.addEventListener('pointerdown', e => { if (e.button !== 0 || btn.classList.contains('undo')) return; startHold(kind, 'pointer'); });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(t => btn.addEventListener(t, () => hold && hold.src === 'pointer' && cancelHold()));
+    btn.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && !e.repeat && !e.ctrlKey && !e.metaKey) { e.preventDefault(); if (!btn.classList.contains('undo')) startHold(kind, 'btnkey'); } });
+    btn.addEventListener('keyup', () => hold && hold.src === 'btnkey' && cancelHold());
+    btn.addEventListener('click', () => { if (btn.classList.contains('undo')) undoDecision(); });
+  };
+  bind(C.ap, 'approve'); bind(C.dn, 'deny');
+}
+const markPaths = (c, kind) => kind === 'approve' ? $$('.hc path', c.card) : [$('.strike path', c.card)];
+function inkTo(c, p) {  // approve's ink fill = the hold's progress: left-to-right clip (opacity only under reduced motion)
+  const ink = $('.ink', c.ap); ink.getAnimations().forEach(a => a.cancel());
+  if (RM()) { ink.style.clipPath = 'none'; ink.style.opacity = String(p); }
+  else { ink.style.opacity = '1'; ink.style.clipPath = `inset(0px ${((1 - p) * 100).toFixed(3)}% 0px 0px)`; }
+}
+function inkRetract(c) {
+  const ink = $('.ink', c.ap); if (RM()) { anim(ink, [{ opacity: getComputedStyle(ink).opacity }, { opacity: 0 }], 120, 'linear', { keep: false }); ink.style.opacity = '0'; return; }
+  const from = ink.style.clipPath || 'inset(0px 0% 0px 0px)'; ink.style.clipPath = 'inset(0px 100% 0px 0px)';
+  anim(ink, [{ clipPath: from }, { clipPath: 'inset(0px 100% 0px 0px)' }], 160, E.exit, { keep: false });
+}
+function penTo(paths, p) { paths.forEach(q => { if (RM()) { q.style.strokeDashoffset = '0'; q.style.opacity = String(p); } else { q.style.opacity = ''; q.style.strokeDashoffset = String(1 - p); } }); }
+function penRetract(paths) { paths.forEach(q => { if (RM()) { q.style.opacity = ''; q.style.strokeDashoffset = '1'; } else retract(q); }); }
+function startHold(kind, src) {
+  if (!C || C.state !== 'waiting' || hold || !C.armed) return;
+  const c = C, btn = kind === 'approve' ? c.ap : c.dn, paths = markPaths(c, kind);
+  const ms = c.card.dataset.risk === 'destructive' ? 1200 : 600;       // --hold-approve / --hold-destructive
+  paths.forEach(q => q.getAnimations().forEach(a => a.cancel()));
+  btn.classList.add('holding');
+  const h0 = hold = { kind, src, btn, paths, c, t0: Clock.now(), ms };
+  const tick = () => { if (hold !== h0) return; const p = Math.min(1, (Clock.now() - h0.t0) / h0.ms);
+    penTo(paths, p); if (kind === 'approve') inkTo(c, p);                // linear: the check and the ink ARE the progress bar
+    if (p >= 1) { hold = null; btn.classList.remove('holding'); h0.end = Clock.now(); c.holdMs = Math.round(h0.end - h0.t0); commit(kind); return; }
+    Clock.raf(tick); };
+  Clock.raf(tick);
+}
+function cancelHold() { if (!hold) return; const { btn, paths, kind, c } = hold; hold = null; btn.classList.remove('holding'); penRetract(paths); if (kind === 'approve') inkRetract(c); }
+const swapIn = (btn, a, b) => $$('.lbl', btn).forEach(l => swap($('.' + a, l), $('.' + b, l)));
+function commit(kind) {
+  const c = C; c.state = 'decided'; c.kind = kind; c.card.classList.add('decided'); c.decidedAt = Clock.now();
+  const [chosen, other] = kind === 'approve' ? [c.ap, c.dn] : [c.dn, c.ap];
+  swapIn(chosen, 'l1', 'l2'); swapIn(other, 'l1', 'l3'); other.classList.add('undo');
+  penTo(markPaths(c, kind), 1); if (kind === 'approve') inkTo(c, 1);   // approved stays ink
+  const q2 = $('.q2', c.card); q2.textContent = kind === 'approve' ? c.spec.afterApprove : c.spec.afterDeny;
+  swap($('.q1', c.card), q2);
+  const wd = $('.wd', c.step.row), el = $('.el', c.step.row);
+  anim(wd, RM() ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.6)' }], RM() ? 120 : tok('fast'), E.exit);
+  el.classList.remove('wait'); el.textContent = kind === 'approve' ? 'approved · undo open' : 'denied · undo open';
+  say(kind === 'approve' ? 'Approved. Undo is open for 6 seconds.' : 'Denied. Undo is open for 6 seconds.');
+  let n = 6; const digits = $$('.t i', other);
+  const next = () => { if (C !== c || c.state !== 'decided') return; n--; if (n > 0) { digits.forEach(d => roll(d, n)); c.cd = Clock.after(1000, next); } else { c.undoClosedAt = Clock.now(); fileCard(); } };
+  c.cd = Clock.after(1000, next);
+  c.resolveDecided(kind);
+}
+function undoDecision() {
+  const c = C; if (!c || c.state !== 'decided') return; Clock.clear(c.cd); c.state = 'waiting';
+  const kind = c.kind, [chosen, other] = kind === 'approve' ? [c.ap, c.dn] : [c.dn, c.ap];
+  swapIn(chosen, 'l2', 'l1'); swapIn(other, 'l3', 'l1'); other.classList.remove('undo'); c.card.classList.remove('decided');
+  $$('.t i', other).forEach(d => d.textContent = '6');
+  penRetract(markPaths(c, kind)); if (kind === 'approve') inkRetract(c);
+  swap($('.q2', c.card), $('.q1', c.card));
+  const wd = $('.wd', c.step.row), el = $('.el', c.step.row); anim(wd, [{ opacity: 0 }, { opacity: 1 }], tok('base'), E.out); el.classList.add('wait'); el.textContent = 'waiting on you';
+  c.decided = new Promise(r => c.resolveDecided = r);
+  say('Undone. The card is waiting again.'); c.card.focus({ preventScroll: true });
+}
+function receiptHTML(r, k = CARD0) {
+  const ok = r.kind === 'approve';
+  return `<div class="receipt" role="status"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true">${pen(ok ? P.check : P.dash)}</svg>
+    <div class="what"><b class="${ok ? 'ok' : 'no'}">${ok ? 'Approved' : 'Denied'}</b> · ${k.receiptWhat}<div class="sub">${ok ? k.receiptOk : k.receiptNo}</div></div>
+    <div class="id">${r.time}<br>${r.id}</div></div>`;
+}
+async function fileCard() {  // undo closed: the glass sets to paper, then files into its slot as a receipt
+  const c = C; c.state = 'filed'; const card = c.card, slot = c.slot;
+  const rec = { kind: c.kind, time: fmt12(storyNow(), true), id: c.spec.receiptId };
+  const row = make(receiptHTML(rec, c.spec)); const mark = $('.mark path', row);
+  if (RM()) {
+    await anim(card, [{ opacity: 1 }, { opacity: 0 }], 160, 'linear');
+    slot.replaceChildren(row); mark.style.strokeDashoffset = '0';
+    await anim(row, [{ opacity: 0 }, { opacity: 1 }], 160, 'linear', { keep: false });
+  } else {
+    [$('.spec', card), $('.sheen', card), $('.gather', card), $('.edge', card)].forEach(e => anim(e, [{ opacity: getComputedStyle(e).opacity }, { opacity: 0 }], tok('fast'), E.exit));
+    anim($('.lift', card), [{ opacity: 1 }, { opacity: 0 }], tok('soft'), E.inout);
+    await anim($('.paperize', card), [{ opacity: 0 }, { opacity: 1 }], tok('soft'), E.inout);   // set: paper fills in under the words
+    const R0 = card.getBoundingClientRect();
+    const k = card.cloneNode(true); k.classList.add('gk'); k.removeAttribute('tabindex'); k.querySelectorAll('[id]').forEach(n => n.removeAttribute('id'));
+    k.querySelectorAll('.paperize, .spec, .sheen, .lift, .grain, .rim, .toplight, .edge, .gather, .contact, .restshadow').forEach(n => n.remove()); k.style.width = R0.width + 'px';
+    row.style.visibility = 'hidden';
+    flip(() => slot.replaceChildren(row), { exclude: [slot] });           // everything above settles by transform on the same curve as the sheet
+    const R = row.getBoundingClientRect();
+    const g = make(`<div class="ghost"><div class="gp"><div class="gc" style="width:${R.width}px;height:${R.height}px">${receiptHTML(rec, c.spec)}</div></div></div>`);
+    Object.assign(g.style, { left: R0.left + 'px', top: R0.top + 'px', width: R0.width + 'px', height: R0.height + 'px' });
+    $('.gp', g).appendChild(k); document.body.append(g);
+    const T = tok('stage');
+    await Promise.all([
+      anim(g, [{ transform: 'none' }, { transform: `translate(${R.left - R0.left}px, ${R.top - R0.top}px)` }], T, E.out),
+      anim($('.gp', g), [{ clipPath: 'inset(0px 0px 0px 0px round 28px)' }, { clipPath: `inset(0px ${R0.width - R.width}px ${R0.height - R.height}px 0px round 14px)` }], T, E.out),
+      anim(k, [{ opacity: 1 }, { opacity: 0 }], T * .4, E.exit),
+      anim($('.gc', g), [{ opacity: 0 }, { opacity: 1 }], T * .55, E.out, { delay: T * .45 }),
+    ]);
+    row.style.visibility = ''; g.remove();
+    draw(mark);
+    anim(row, [{ transform: 'scale(1)' }, { transform: 'scale(.985, .95)', offset: .3, easing: E.out }, { transform: 'scale(1)' }], 400, E.press, { keep: false });   // filing stamp, never above 1
+  }
+  C = null; say(`Filed ${rec.id}.`); c.resolveFiled(c.kind);
+}
+
+/* ================= handoff ================= */
+async function handoff() {
+  const r = make(`<div class="handoff" role="note"><span class="ln l"></span><span class="mid"><svg viewBox="0 0 34 14" aria-hidden="true">${pen(P.hand)}</svg><span class="ids">ev_4b1e07 · <b>Reviewer hands off to Builder</b> · ev_4c83d5</span></span><span class="ln r"></span></div>`);
+  flip(() => thread.append(r), { exclude: [r] });
+  const [l, rr] = $$('.ln', r), ids = $('.ids', r);
+  if (RM()) { $('path', r).style.strokeDashoffset = '0'; await anim(r, [{ opacity: 0 }, { opacity: 1 }], 160, 'linear', { keep: false }); return; }
+  [l, rr].forEach(e => anim(e, [{ transform: 'scaleX(0)' }, { transform: 'none' }], tok('stage'), E.out, { delay: 40, keep: false }));
+  draw($('path', r), 420, 160);
+  await anim(ids, [{ opacity: 0, transform: 'translateY(3px)' }, { opacity: 1, transform: 'none' }], tok('base'), E.out, { delay: 220, keep: false });
+  await sleep(120);
+}
+/* ================= composer ================= */
+const composer = $('#composer'), ta = $('#msg'), sendBtn = $('#send'), chip = $('#chip');
+wireSpec(composer);
+const updateSend = () => { sendBtn.disabled = !ta.value.trim(); };
+ta.addEventListener('input', updateSend);
+ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); composer.requestSubmit(); } });
+composer.addEventListener('submit', e => { e.preventDefault(); if (ta.value.trim() && !running) sendMessage(); });
+async function typeText(text, ms) {
+  const r = rng(7), per = ms / text.length;
+  for (let i = 1; i <= text.length; i++) { ta.value = text.slice(0, i); updateSend(); await sleep(Math.round(per * (.6 + r() * .8))); }
+}
+async function sendMessage() {  // the words leave the composer and land as a bubble; the thread makes room by FLIP
+  const text = ta.value.trim(); const tr = ta.getBoundingClientRect();
+  const row = meRow(esc(text), fmt12(storyNow())), bub = $('.bub-me', row), mt = $('.meta-t', row);
+  flip(() => thread.append(row), { exclude: [row] });
+  const R = bub.getBoundingClientRect(), txt = $('.txt', bub).getBoundingClientRect();
+  ta.value = ''; updateSend();
+  if (RM()) { anim(row, [{ opacity: 0 }, { opacity: 1 }], 160, 'linear', { keep: false }); return sleep(160); }
+  bub.style.visibility = 'hidden'; mt.style.opacity = '0';
+  const fl = make(`<div class="flyer"><div class="fill"></div><p class="txt">${esc(text)}</p></div>`);
+  Object.assign(fl.style, { left: R.left + 'px', top: R.top + 'px', width: R.width + 'px', height: R.height + 'px' });
+  document.body.append(fl);
+  const dx = tr.left - txt.left, dy = tr.top - txt.top, T = tok('stage');
+  anim(ta, [{ opacity: 0 }, { opacity: 1 }], tok('base'), E.out, { delay: 200, keep: false });
+  await Promise.all([
+    anim(fl, [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], T, E.out, { keep: false }),   // settle, never bounce
+    anim($('.fill', fl), [{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'none' }], T * .8, E.out, { delay: T * .12, keep: false }),
+  ]);
+  bub.style.visibility = ''; fl.remove();
+  anim(mt, [{ opacity: 0 }, { opacity: 1 }], tok('base'), E.out, { keep: false }).then(() => mt.style.opacity = '');
+}
+function wakeAgent(k) {
+  const name = BOTS[k].name, old = $('span', chip), nu = make(`<span>@${name}</span>`);
+  chip.append(nu); chip.setAttribute('aria-label', 'Wakes ' + name); ta.placeholder = 'Message ' + name;
+  swap(old, nu, 3).then(() => old.remove());
+}
+
+/* ================= demo pointer (drives the same handlers a real pointer would) ================= */
+const cursorEl = $('#cursor');
+const cur = { x: 1480, y: 960, hover: null, glass: null, on: false };
+function cursorAt(x, y) {
+  cur.x = x; cur.y = y; cursorEl.style.transform = `translate(${x - 3}px, ${y - 2}px)`;
+  const t = cur.on ? document.elementFromPoint(x, y) : null;
+  const h = t && t.closest('.btn, .cbtn, .chip, .sum, .pbtn');
+  if (h !== cur.hover) { cur.hover && cur.hover.classList.remove('is-hover'); h && h.classList.add('is-hover'); cur.hover = h; }
+  const g = t && t.closest('.composer, .card:not(.gk)');
+  if (g !== cur.glass) { cur.glass && cur.glass.dispatchEvent(new PointerEvent('pointerleave')); g && g.dispatchEvent(new PointerEvent('pointerenter')); cur.glass = g; }
+  g && g.dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y }));
+}
+function showCursor(on) { cur.on = on; if (!on) cursorAt(cur.x, cur.y); else cursorAt(cur.x, cur.y);
+  return anim(cursorEl, [{ opacity: on ? 0 : 1 }, { opacity: on ? 1 : 0 }], RM() ? 120 : 160, on ? E.out : E.exit); }
+async function moveTo(x, y, ms, arc = .08) {
+  const x0 = cur.x, y0 = cur.y, dx = x - x0, dy = y - y0;
+  if (RM()) { await sleep(ms); cursorAt(x, y); return; }
+  await tween(ms, F.inout, p => { const bow = Math.sin(Math.PI * p) * arc; cursorAt(x0 + dx * p - dy * bow, y0 + dy * p + dx * bow); });
+}
+const centerOf = (el, fx = .5, fy = .5) => { const r = el.getBoundingClientRect(); return [r.left + r.width * fx, r.top + r.height * fy]; };
+async function pressVisual(el, ms = 140) { el.classList.add('is-press'); cursorEl.firstElementChild.style.scale = '.92'; await sleep(ms); el.classList.remove('is-press'); cursorEl.firstElementChild.style.scale = ''; }
+
+/* ================= the choreography (~21s) ================= */
+const beats = []; let running = false; const stills = []; const M = {};
+const beatEl = $('#beat');
+const now = () => Math.round(Clock.now() - seqT0);
+function beat(name) { beats.push({ name, t: now() }); beatEl.textContent = name; }
+function mark(k) { M[k] = now(); }
+function still(name) { stills.push({ name, t: now() }); }
+function reset() {
+  gen++; hold = null; C = null; running = false;
+  document.getAnimations().forEach(a => a.cancel());
+  Clock.clearAll();
+  $$('.ghost, .flyer').forEach(n => n.remove());
+  cur.on = false; cursorAt(1480, 960); cursorEl.style.opacity = '0'; cursorEl.firstElementChild.style.scale = '';
+  ta.value = ''; ta.style.opacity = ''; updateSend(); chip.innerHTML = '<span>@Reviewer</span>'; ta.placeholder = 'Message Reviewer';
+  composer.classList.remove('lit'); beats.length = 0; stills.length = 0; Object.keys(M).forEach(k => delete M[k]); beatEl.textContent = '';
+  renderHistory(); if (typeof onReset === 'function') onReset();   // mocks hook their own state here
+}
+async function sequence() {
+  const g = gen; const ok = () => { if (g !== gen) throw STOP; };
+  running = true; seqT0 = Clock.now();
+  try {
+    beat('0 · still'); await sleep(300);
+    beat('1 · send'); mark('typeStart'); await typeText(TYPED, 900); mark('typeEnd'); await sleep(200);
+    pressVisual(sendBtn, 140); await sleep(110);
+    mark('sendStart'); const landing = sendMessage(); Clock.after(Math.round(tok('stage') * .4), () => still('01-send-landing'));
+    await landing; ok(); mark('sendLanded'); beat('1 · landed');
+    await sleep(200);
+
+    beat('2 · tool steps'); mark('turnIn');
+    const turn = botTurn('reviewer', fmt12(storyNow()));
+    flip(() => thread.append(turn), { exclude: [turn] }); enter(turn, 6);
+    await sleep(200);
+    const tools = toolsEl(); turn.append(tools);
+    let prev = null;
+    for (let i = 0; i < STEPS.length; i++) {
+      mark('step' + (i + 1));
+      const st = addStep(tools, STEPS[i]);
+      if (i === 2) Clock.after(150, () => still('02-tools-live'));
+      if (prev) { const p = prev; finishStep(p).then(() => { if (tools.__folded && p.row.parentElement === $('.livelist', tools)) joinFold(tools, p); }); }
+      if (i === 3) Clock.after(tok('draw') + 120, () => { fold(tools); mark('fold'); });
+      prev = st;
+      await sleep(STEPS[i].ms); ok();
+    }
+    await finishStep(prev); ok(); await joinFold(tools, prev); ok();
+    mark('toolsDone'); beat('2 · folded: ' + sumText(tools).join(' '));
+
+    beat('3 · reply streams'); mark('streamStart');
+    await streamInto(turn, REPLY1, 11); ok(); mark('streamEnd');
+
+    beat('4 · risky step pauses'); mark('riskyStep');
+    const tools2 = toolsEl(); turn.append(tools2);
+    const post = addStep(tools2, POST, { waiting: true });
+    await sleep(tok('soft') + 60); ok();
+    beat('4 · card lifts'); mark('cardLift');
+    Clock.after(150 + 190, () => still('03a-approval-rising'));
+    const c = await liftCard(turn, post); ok(); mark('cardLanded');
+    Clock.after(60, () => still('03b-approval-waiting'));
+    await sleep(160); ok();
+    cursorAt(1180, 860); await showCursor(true);
+    const [ax, ay] = centerOf(c.ap, .56, .58); await moveTo(ax, ay, 600); ok();
+    while (!c.armed) await sleep(40);
+    await sleep(90);
+    beat('4 · hold 600ms'); cursorEl.firstElementChild.style.scale = '.92'; mark('holdStart');
+    startHold('approve', 'demo'); Clock.after(330, () => still('03-approval-lifted'));
+    await c.decided; ok(); cursorEl.firstElementChild.style.scale = ''; mark('approved');
+    beat('4 · undo window 6s');
+    await sleep(500); const [ux, uy] = centerOf(c.dn, .5, .55); await moveTo(ux, uy, 520); ok(); await sleep(620);
+    const cr = composer.getBoundingClientRect();
+    await moveTo(cr.left + 140, cr.top + 30, 700); ok();
+    beat('6 · composer specular'); mark('specStart');
+    await moveTo(cr.right - 170, cr.top + 22, 1500, .02); ok();
+    Clock.after(0, () => still('05-composer-glass-hover'));
+    await moveTo(cr.left + 380, cr.top + 34, 800, .03); ok();
+    await moveTo(cr.right + 90, cr.top - 150, 600); ok(); mark('specEnd'); showCursor(false);
+    await c.filed; ok(); mark('filed'); M.undoClosed = Math.round(c.undoClosedAt - seqT0);
+    beat('4 · filed as receipt');
+
+    post.waiting = false; startTrace(post); $('.el', post.row).textContent = '0.0s'; ticker(post);   // the chain resumes
+    const [sx, sy] = centerOf($('.sum', tools), .5, .5);
+    cursorAt(sx + 220, sy + 140); showCursor(true);
+    await moveTo(sx - 30, sy + 2, 460); ok();
+    finishStep(post);
+    beat('2 · chevron re-expands'); mark('expand');
+    await pressVisual($('.sum', tools)); toggleFold(tools);
+    await sleep(760); ok();
+    await pressVisual($('.sum', tools)); mark('collapse'); await toggleFold(tools); ok();
+    moveTo(sx + 360, sy - 60, 500).then(() => showCursor(false));
+    await sleep(160); ok();
+
+    beat('5 · handoff'); mark('handoff');
+    await handoff(); ok(); wakeAgent('builder');
+    await sleep(160); ok();
+    mark('builderIn');
+    const tb = botTurn('builder', fmt12(storyNow()));
+    flip(() => thread.append(tb), { exclude: [tb] }); enter(tb, 6);
+    await sleep(220); ok();
+    await streamInto(tb, REPLY_B, 5); ok();
+    mark('end'); still('04-handoff');
+    beat('end · idle');
+  } catch (e) { if (e !== STOP) throw e; }
+  finally { if (g === gen) running = false; }
+}
+
+/* ================= prototype controls ================= */
+const replay = () => { reset(); sequence(); };
+$('#replay').addEventListener('click', replay);
+$('#rmt').addEventListener('click', e => { const on = root.classList.toggle('rm'); e.currentTarget.setAttribute('aria-pressed', on); replay(); });
+if (root.classList.contains('rm')) $('#rmt').setAttribute('aria-pressed', 'true');
+document.addEventListener('keydown', e => {   // hold Ctrl/⌘↵ (approve) or Ctrl/⌘⌫ (deny) while the card has focus
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && (e.key === 'Enter' || e.key === 'Backspace') && C && document.activeElement === C.card) { e.preventDefault(); if (!e.repeat) startHold(e.key === 'Enter' ? 'approve' : 'deny', 'key'); }
+  if (mod && e.key.toLowerCase() === 'z' && C && C.state === 'decided' && document.activeElement !== ta) { e.preventDefault(); undoDecision(); }
+});
+document.addEventListener('keyup', e => { if (hold && hold.src === 'key' && ['Enter', 'Backspace', 'Meta', 'Control'].includes(e.key)) cancelHold(); });
+window.addEventListener('blur', () => cancelHold());
+
+/* ================= boot + test hooks ================= */
+window.__thread = {
+  beats, stills, marks: M, get running() { return running; },
+  idle: () => ({ animations: document.getAnimations().length, rafPending: IDLE.raf.size, timeoutsPending: IDLE.to.size, intervals: IDLE.iv.size, clockPending: Clock.pending, running }),
+  fonts: async () => { await document.fonts.ready;
+    const faces = [...document.fonts].map(f => ({ family: f.family, weight: f.weight, status: f.status, unicodeRange: f.unicodeRange.slice(0, 22) }));
+    return { check400: document.fonts.check('400 14px Figtree'), check620: document.fonts.check('620 16px Figtree'), checkMono: document.fonts.check('400 11px "JetBrains Mono"'), faces }; },
+};
+window.__cap = { start() { reset(); sequence(); }, step: dt => Clock.step(dt), get done() { return !running && document.getAnimations().length === 0 && Clock.pending === 0; } };
+renderHistory();
+if (!CAP) document.fonts.ready.then(() => Clock.after(500, () => sequence()));
+</script>
+</body>
+</html>

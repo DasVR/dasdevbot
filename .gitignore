@@ -19,3 +19,6 @@ data/
 *.pem
 *.key
 *.token
+
+# Raw mock videos are unreleased design work; never commit them.
+docs/reference/**/*.mp4

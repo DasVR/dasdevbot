@@ -86,8 +86,10 @@ body {
 }
 
 button,
-input {
-  font-family: inherit;
+input,
+textarea {
+  font: inherit;
+  color: inherit;
 }
 
 /* Figtree's semibold is 620. The UA stylesheet sets b/strong to 700. */
