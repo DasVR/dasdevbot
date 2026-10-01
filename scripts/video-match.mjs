@@ -23,7 +23,10 @@ const { chromium } = require("playwright");
 const origin = process.argv[2] ?? "http://127.0.0.1:4173";
 const reviewDir = fileURLToPath(new URL("../docs/review/thread/", import.meta.url));
 const repoDir = fileURLToPath(new URL("../", import.meta.url));
-const refDir = fileURLToPath(new URL("../docs/reference/thread/", import.meta.url));
+// The raw mock videos are unreleased design work and are never committed (public repo).
+// Point these at local copies; the Parity diff records each by box path and sha256.
+const threadRef = process.env.MOCK_THREAD_VIDEO ?? "/workspace/dasdevbot-look/thread/thread.mp4";
+const cardRef = process.env.MOCK_CARD_VIDEO ?? "/workspace/vid/approval-hold-undo-file.mp4";
 const FRAME_MS = 16.667;
 const WIDTH = 1440;
 const HEIGHT = 900;
@@ -313,8 +316,8 @@ async function stack(appPath, refPath, out, startFrame, count) {
   ]);
 }
 
-const threadFrames = await frameCount(`${refDir}thread.mp4`);
-const cardFrames = await frameCount(`${refDir}approval-hold-undo-file.mp4`);
+const threadFrames = await frameCount(threadRef);
+const cardFrames = await frameCount(cardRef);
 if (threadFrames < 1000 || cardFrames < 700) {
   throw new Error(`reference frame counts look wrong (${threadFrames}, ${cardFrames})`);
 }
@@ -400,8 +403,8 @@ if (cardFrame < 0 || cardFrame + cardFrames > threadFrames) {
 mkdirSync(reviewDir, { recursive: true });
 const threadOut = `${reviewDir}thread-vs-video-1440${SUFFIX}.mp4`;
 const cardOut = `${reviewDir}card-vs-video-1440${SUFFIX}.mp4`;
-await stack(appPath, `${refDir}thread.mp4`, threadOut, 0, threadFrames);
-await stack(appPath, `${refDir}approval-hold-undo-file.mp4`, cardOut, cardFrame, cardFrames);
+await stack(appPath, threadRef, threadOut, 0, threadFrames);
+await stack(appPath, cardRef, cardOut, cardFrame, cardFrames);
 
 const report = {
   frameMs: FRAME_MS,
