@@ -1,134 +1,73 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { flip, type AnimationConfig } from "svelte/animate";
-  import { linear } from "svelte/easing";
-  import type { TransitionConfig } from "svelte/transition";
-  import ApprovalCard from "./lib/ApprovalCard.svelte";
   import SecretEntry from "./lib/SecretEntry.svelte";
-  import { tokenEase, tokenMs } from "./lib/cssTokens";
-  import { QUIET_LINE_PATH } from "./lib/pen";
+  import ComposerBar from "./lib/thread/ComposerBar.svelte";
+  import { emptyFrame, frameForShot, isShot } from "./lib/thread/fixture";
+  import {
+    BAR_HEIGHT,
+    COMPOSER_INSET,
+    GUTTER,
+    MASK_FADE,
+    SLOT_WIDTH,
+    THREAD_GAP,
+    THREAD_PAD_BOTTOM,
+    THREAD_WIDTH,
+    TOOLS_WIDTH,
+    TURN_MARK,
+    USER_BUBBLE_MAX,
+    BOT_BUBBLE_MAX,
+    DISC_RADIUS,
+    DISC_SIZE,
+    THREAD_PAD_TOP,
+    USER_ROW_GAP,
+  } from "./lib/thread/metrics";
+  import { threadFromSnapshot, type LocalNote } from "./lib/thread/model";
+  import { fileAsk, playStory, settleAsk, storyMarks, undoAsk } from "./lib/thread/play";
+  import ThreadPane from "./lib/thread/ThreadPane.svelte";
+  import type { ThreadFrame } from "./lib/thread/types";
   import {
     decide,
     emitPush,
-    formatStreamTime,
-    formatUsd,
     getSnapshot,
-    hlcMillis,
-    isTextEntry,
-    shortEventId,
     undo,
-    type Approval,
     type Decision,
     type Snapshot,
   } from "./lib/api";
 
-  /** Flat rows and the roster. tokens.css has no zero radius. */
-  const FLAT_RADIUS = "0";
-  /** Reduced-motion fades. tokens.css has no linear easing token. */
-  const REDUCED_FADE_EASE = linear;
+  const params = new URLSearchParams(window.location.search);
+  const shot = isShot(params.get("shot")) ? params.get("shot") : null;
+  const capture = params.has("capture");
+  const autoplay = params.has("play");
 
+  let frame = $state<ThreadFrame>(shot ? frameForShot(shot) : emptyFrame());
   let snapshot = $state<Snapshot | null>(null);
+  let notes = $state<LocalNote[]>([]);
   let settingsOpen = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
-  let deciding = $state(false);
   let primed = $state(false);
-  let now = $state(Date.now());
+  let playing = $state(false);
+  let generation = 0;
 
-  const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
-  const pending = $derived.by(() => {
-    const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
-    return rows.reduce<Approval | null>((oldest, approval) => {
-      if (!oldest || approval.created_at < oldest.created_at) {
-        return approval;
-      }
-      return oldest;
-    }, null);
-  });
-  const receipts = $derived.by(() => {
-    const map: Record<string, Approval> = {};
-    for (const approval of snapshot?.approvals ?? []) {
-      if (approval.status === "pending") {
-        continue;
-      }
-      map[`approval-requested:${approval.id}`] = approval;
-    }
-    return map;
-  });
-  const stream = $derived.by(() => {
-    const events = snapshot?.events ?? [];
-    const pendingKey = pending ? `approval-requested:${pending.id}` : "";
-    return [...events].reverse().map((event) => {
-      const source = event.source.trim();
-      const shortId = shortEventId(event.id);
-      const millis = hlcMillis(event.hlc);
-      return {
-        id: event.id,
-        mark: source.charAt(0).toUpperCase() || "·",
-        when: millis == null ? "—" : formatStreamTime(millis),
-        iso: millis == null ? "" : new Date(millis).toISOString(),
-        who: source ? `${source} · ${event.kind}` : event.kind,
-        detail: shortId,
-        title: event.hlc,
-        receipt: receipts[event.idempotency_key] ?? null,
-        pendingHere: pendingKey !== "" && event.idempotency_key === pendingKey,
-      };
+  const fixture = $derived(shot !== null || playing || capture);
+  const project = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer")?.project ?? "DasVR/NIL");
+
+  function sleep(ms: number, gen: number): Promise<void> {
+    return new Promise((resolve) => {
+      window.setTimeout(() => resolve(), ms);
     });
-  });
-  const pendingAnchored = $derived(stream.some((row) => row.pendingHere));
-  const anyReceipt = $derived(stream.some((row) => row.receipt !== null));
-  const undoable = $derived.by(() => {
-    const rows =
-      snapshot?.approvals.filter((approval) => {
-        return (
-          (approval.status === "approved" || approval.status === "denied") &&
-          !approval.committed &&
-          approval.undo_until != null &&
-          approval.undo_until > now
-        );
-      }) ?? [];
-    return rows.reduce<Approval | null>((latest, approval) => {
-      if (!latest || (approval.decided_at ?? 0) > (latest.decided_at ?? 0)) {
-        return approval;
-      }
-      return latest;
-    }, null);
-  });
-  // Pending is waiting on a human. A decided, uncommitted approval is filing: ink-3, no dot.
-  const waitingOnHuman = $derived(
-    (snapshot?.approvals ?? []).some(
-      (approval) => approval.agent_id === reviewer?.id && approval.status === "pending",
-    ),
-  );
-  const filingUndo = $derived.by(() => {
-    if (waitingOnHuman || reviewer == null) {
-      return null;
-    }
-    const rows =
-      snapshot?.approvals.filter((approval) => {
-        return (
-          approval.agent_id === reviewer.id &&
-          (approval.status === "approved" || approval.status === "denied") &&
-          !approval.committed
-        );
-      }) ?? [];
-    return rows.reduce<Approval | null>((latest, approval) => {
-      if (!latest || (approval.decided_at ?? 0) > (latest.decided_at ?? 0)) {
-        return approval;
-      }
-      return latest;
-    }, null);
-  });
-  const filingSeconds = $derived(
-    filingUndo?.undo_until == null
-      ? 0
-      : Math.max(0, Math.ceil((filingUndo.undo_until - now) / 1000)),
-  );
+  }
 
   async function refresh(): Promise<void> {
+    if (shot || playing || capture) {
+      return;
+    }
     try {
       snapshot = await getSnapshot();
       error = null;
+      frame.nodes = threadFromSnapshot(snapshot, notes);
+      frame.chip = "Reviewer";
+      frame.placeholder = "Message Reviewer";
       if (!primed) {
         await tick();
         primed = true;
@@ -138,7 +77,7 @@
     }
   }
 
-  async function simulate(forced = false): Promise<void> {
+  async function simulate(forced: boolean): Promise<void> {
     busy = true;
     try {
       await emitPush(forced);
@@ -151,7 +90,11 @@
   }
 
   async function ondecide(id: string, decision: Decision, reason?: string): Promise<boolean> {
-    deciding = true;
+    if (id === "ap_ask") {
+      settleAsk(frame, decision);
+      return true;
+    }
+    busy = true;
     try {
       await decide(id, decision, reason);
       await refresh();
@@ -160,12 +103,24 @@
       error = err instanceof Error ? err.message : "The decision was not recorded.";
       return false;
     } finally {
-      deciding = false;
+      busy = false;
     }
   }
 
+  async function onfile(id: string): Promise<boolean> {
+    if (id === "ap_ask") {
+      fileAsk(frame);
+      return true;
+    }
+    return true;
+  }
+
   async function onundo(id: string): Promise<boolean> {
-    deciding = true;
+    if (id === "ap_ask") {
+      undoAsk(frame);
+      return true;
+    }
+    busy = true;
     try {
       await undo(id);
       await refresh();
@@ -174,164 +129,81 @@
       error = err instanceof Error ? err.message : "The decision could not be undone.";
       return false;
     } finally {
-      deciding = false;
+      busy = false;
     }
   }
 
-  function onWindowKey(event: KeyboardEvent): void {
-    if (event.repeat || isTextEntry(event.target)) {
+  function ondraft(value: string): void {
+    frame.draft = value;
+  }
+
+  function onsend(): void {
+    const text = frame.draft.trim();
+    if (!text || playing) {
       return;
     }
-    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
+    frame.draft = "";
+    if (shot || capture) {
+      frame.nodes = [
+        ...frame.nodes,
+        { type: "user", id: `note-${crypto.randomUUID()}`, text, time: "", hlc: "" },
+      ];
       return;
     }
-    if (event.key !== "z" && event.key !== "Z") {
+    notes = [...notes, { id: `note-${crypto.randomUUID()}`, text, at: Date.now() }];
+    if (snapshot) {
+      frame.nodes = threadFromSnapshot(snapshot, notes);
+    }
+  }
+
+  async function holdApprove(): Promise<void> {
+    const card = document.querySelector('article.card[tabindex="0"]');
+    if (!(card instanceof HTMLElement)) {
       return;
     }
-    const target = undoable;
-    if (!target || target.undo_until == null || target.undo_until <= Date.now()) {
-      return;
-    }
-    event.preventDefault();
-    if (stream.some((row) => row.receipt?.id === target.id)) {
-      return;
-    }
-    void onundo(target.id);
-  }
-
-  function prefersReducedMotion(): boolean {
-    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  }
-
-  // New rows rise 8px. The motion reads --dur-soft / --ease-out at start time.
-  // Reduced motion is a 160ms fade with no travel. The first paint does not play it.
-  function arrive(_node: Element, params: { play: boolean }): TransitionConfig {
-    if (!params.play) {
-      return { duration: 0 };
-    }
-    if (prefersReducedMotion()) {
-      return {
-        duration: tokenMs("--dur-soft", 160),
-        easing: REDUCED_FADE_EASE,
-        css: (t) => `opacity: ${t};`,
-      };
-    }
-    const easeOut = tokenEase("--ease-out");
-    return {
-      duration: tokenMs("--dur-soft", 360),
-      easing: easeOut,
-      css: (t, u) => `opacity: ${t}; transform: translateY(${u * 8}px);`,
-    };
-  }
-
-  // Existing rows step to their new slots. Translate only: Svelte's flip also
-  // scales, which would squash the row a receipt opens in.
-  function stepRows(node: Element, coords: { from: DOMRect; to: DOMRect }): AnimationConfig {
-    const dx = coords.from.left - coords.to.left;
-    const dy = coords.from.top - coords.to.top;
-    const moved = Math.abs(dx) >= 1 || Math.abs(dy) >= 1;
-    const easeOut = tokenEase("--ease-out");
-    const duration = prefersReducedMotion() || !moved ? 0 : tokenMs("--dur-soft", 360);
-    const base = flip(node, coords, { duration, easing: easeOut });
-    const css = base.css;
-    if (!css || duration === 0) {
-      return { duration: 0 };
-    }
-    return {
-      ...base,
-      duration,
-      easing: easeOut,
-      css: (t, u) => css(t, u).replace(/scale\([^)]*\);?$/, "scale(1, 1);"),
-    };
-  }
-
-  function pinOverlay(stage: HTMLElement): () => void {
-    const column = stage.closest("main");
-    if (!column) {
-      return () => {};
-    }
-    const place = () => {
-      const box = column.getBoundingClientRect();
-      stage.style.setProperty("--overlay-left", `${box.left}px`);
-      stage.style.setProperty("--overlay-width", `${box.width}px`);
-    };
-    place();
-    const observer = new ResizeObserver(place);
-    observer.observe(column);
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, { passive: true });
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place);
-    };
-  }
-
-  function flipSlot(node: HTMLElement): () => void {
-    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    let first = node.getBoundingClientRect();
-    let over = node.classList.contains("over");
-    let flying = false;
-    const remember = () => {
-      if (flying) {
-        return;
+    card.focus();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+    let hello: Element | null = null;
+    for (let attempt = 0; attempt < 80 && !hello; attempt += 1) {
+      hello = card.querySelector("button.hello");
+      if (!hello) {
+        await sleep(16.667, generation);
       }
-      first = node.getBoundingClientRect();
-    };
-    const observer = new ResizeObserver(remember);
-    observer.observe(node);
-    const classes = new MutationObserver(() => {
-      const nextOver = node.classList.contains("over");
-      if (nextOver === over) {
-        return;
-      }
-      const origin = first;
-      over = nextOver;
-      const last = node.getBoundingClientRect();
-      const dx = origin.left - last.left;
-      const dy = origin.top - last.top;
-      if (motion.matches || (Math.abs(dx) < 1 && Math.abs(dy) < 1)) {
-        first = last;
-        if (!over) {
-          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
-        }
-        return;
-      }
-      flying = true;
-      if (!nextOver) {
-        node.style.zIndex = "4";
-        node.style.position = "relative";
-      }
-      node.style.transition = "none";
-      node.style.transform = `translate(${dx}px, ${dy}px)`;
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          node.style.transition = "transform var(--dur-stage) var(--ease-out)";
-          node.style.transform = "translate(0px, 0px)";
-        });
-      });
-      const done = (event: TransitionEvent) => {
-        if (event.propertyName !== "transform") {
-          return;
-        }
-        node.removeEventListener("transitionend", done);
-        node.style.transition = "";
-        node.style.transform = "";
-        node.style.zIndex = "";
-        node.style.position = "";
-        flying = false;
-        if (!over) {
-          node.scrollIntoView({ block: "nearest", behavior: motion.matches ? "auto" : "smooth" });
-        }
-        first = node.getBoundingClientRect();
-      };
-      node.addEventListener("transitionend", done);
+    }
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", ctrlKey: true, bubbles: true }));
+    if (!(hello instanceof HTMLElement)) {
+      return;
+    }
+    await sleep(600, generation);
+    hello.click();
+  }
+
+  function placeComposerCursor(): void {
+    const form = document.querySelector("form.composer");
+    if (!(form instanceof HTMLElement)) {
+      return;
+    }
+    const box = form.getBoundingClientRect();
+    frame.sheenX = box.width * 0.72;
+    frame.cursor = { x: box.left + box.width * 0.72, y: box.top + box.height * 0.45, visible: true };
+    frame.lit = true;
+  }
+
+  async function replay(): Promise<void> {
+    generation += 1;
+    const gen = generation;
+    playing = true;
+    error = null;
+    await playStory({
+      frame,
+      sleep: (ms) => sleep(ms, gen),
+      stopped: () => gen !== generation,
+      reduced: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      holdApprove,
     });
-    classes.observe(node, { attributes: true, attributeFilter: ["class"] });
-    return () => {
-      observer.disconnect();
-      classes.disconnect();
-    };
+    if (gen === generation) {
+      playing = false;
+    }
   }
 
   function syncSettings() {
@@ -342,549 +214,264 @@
     syncSettings();
     const onHash = () => syncSettings();
     globalThis.addEventListener("hashchange", onHash);
-    void refresh();
-    const clock = setInterval(() => {
-      now = Date.now();
-    }, 200);
-    const timer = setInterval(() => {
+    document.documentElement.classList.toggle("cap", fixture);
+    const root = window as Window & {
+      __thread?: { start: () => void; readonly running: boolean; readonly marks: Record<string, number> };
+    };
+    root.__thread = {
+      start: () => {
+        void replay();
+      },
+      get running() {
+        return playing;
+      },
+      get marks() {
+        return storyMarks();
+      },
+    };
+    if (shot === "composer") {
+      void tick().then(placeComposerCursor);
+    }
+    if (autoplay || capture) {
+      if (autoplay) {
+        void replay();
+      }
+      return () => {
+        globalThis.removeEventListener("hashchange", onHash);
+        generation += 1;
+      };
+    }
+    if (!shot) {
       void refresh();
-    }, 1000);
+      const timer = window.setInterval(() => {
+        void refresh();
+      }, 1000);
+      return () => {
+        globalThis.removeEventListener("hashchange", onHash);
+        generation += 1;
+        window.clearInterval(timer);
+      };
+    }
     return () => {
       globalThis.removeEventListener("hashchange", onHash);
-      clearInterval(clock);
-      clearInterval(timer);
+      generation += 1;
     };
   });
 </script>
 
-<svelte:window onkeydown={onWindowKey} />
-
-{#snippet approvalSlot(approval: Approval)}
-  <div class={["slot", approval.status === "pending" && "over"]} {@attach flipSlot}>
-    {#key approval.id}
-      <ApprovalCard
-        approval={approval}
-        busy={deciding}
-        shortcutTarget={approval.status === "pending"}
-        ondecide={(decision, reason) => ondecide(approval.id, decision, reason)}
-        onundo={() => onundo(approval.id)}
-      />
-    {/key}
-  </div>
-{/snippet}
-
-<div class="well" style:--flat-radius={FLAT_RADIUS}>
-  <div class="shell">
-    <header class="titlebar">
-      <div class="wordmark">
-        <span class="dots" aria-hidden="true"></span>
-        <strong>dasdevbot</strong>
-      </div>
-      <p class="status">
-        {#if snapshot}
-          {snapshot.role} · protocol {snapshot.protocol} · {snapshot.provider_detail} · sync {snapshot.sync}
-        {:else}
-          connecting
-        {/if}
-      </p>
-    </header>
-
-    {#if error}
-      <p class="banner" role="alert">{error}</p>
-    {/if}
-
-    <div class="body">
-      <aside>
-        <p class="section">Agents</p>
-        {#if reviewer}
-          <div class="agent" data-status={reviewer.status}>
-            <div class="agent-row">
-              <h2>{reviewer.name}</h2>
-              {#if reviewer.status === "working"}
-                <span class="agent-status">{reviewer.status}</span>
-              {:else if filingUndo && filingSeconds > 0}
-                <span class="agent-status">filing · undo {filingSeconds}s</span>
-              {:else if reviewer.status === "blocked" && !filingUndo}
-                <span class="agent-status need">
-                  <span class="need-dot" aria-hidden="true"></span>
-                  {reviewer.status}
-                </span>
-              {/if}
-            </div>
-            <p class="project">{reviewer.project}</p>
-            <p class="budget">{reviewer.tokens_spent} / {reviewer.token_cap} tok</p>
-            <p class="persona">{reviewer.persona.trim()}</p>
-          </div>
-        {:else}
-          <p class="muted">No agents stored.</p>
-        {/if}
-
-        <div class="sim-row">
-          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(false)}>
-            {busy ? "Waking Reviewer" : "Simulate repo.push"}
-          </button>
-          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(true)}>
-            {busy ? "Waking Reviewer" : "Simulate force push"}
-          </button>
-        </div>
-        <p class="hint">Reviewer is a stored row. It runs only when this event wakes it.</p>
-      </aside>
-
-      <main>
-        <p class="section">Stream</p>
-        <div class="stage" {@attach pinOverlay}>
-          <ol class="stream">
-            {#each stream as row (row.id)}
-              {@const approval = row.receipt ?? (row.pendingHere ? pending : null)}
-              {@const filed = row.receipt !== null}
-              <li class={filed ? "slot-row" : "event"} animate:stepRows>
-                {#if !filed}
-                  <div class="row" title={row.title} in:arrive|global={{ play: primed }}>
-                    <time class="when" datetime={row.iso || undefined}>{row.when}</time>
-                    <span class="disc" aria-hidden="true">{row.mark}</span>
-                    <div class="copy">
-                      <p class="who">{row.who}</p>
-                      <p class="detail">{row.detail}</p>
-                    </div>
-                  </div>
-                {/if}
-                {#if approval}
-                  {@render approvalSlot(approval)}
-                {/if}
-              </li>
-            {/each}
-          </ol>
-          {#if pending && !pendingAnchored}
-            {@render approvalSlot(pending)}
-          {:else if !pending && !anyReceipt}
-            <p class="quiet-empty">
-              <svg class="quiet-line" viewBox="0 0 104 10" aria-hidden="true">
-                <path class="pen draw" pathLength="1" d={QUIET_LINE_PATH} />
-              </svg>
-              Nothing is waiting.
-            </p>
-          {/if}
-        </div>
-
-        <p class="section ledger-head">Ledger</p>
-        {#if snapshot && snapshot.ledger.length > 0}
-          <ul class="ledger">
-            {#each snapshot.ledger as line (line.id)}
-              <li>
-                {line.agent_name} · {line.project} · {line.provider} · {line.model} · {line.usage_kind} · {line.input_tokens} in / {line.output_tokens} out · {formatUsd(line.micro_usd)}
-                <span>{line.note}</span>
-              </li>
-            {/each}
-          </ul>
-        {:else}
-          <p class="muted">No spend yet. Idle agents do not call a provider.</p>
-        {/if}
-
-      </main>
+<div
+  class="shell"
+  class:cap={fixture}
+  style:--thread-width={THREAD_WIDTH}
+  style:--gutter={GUTTER}
+  style:--user-max={USER_BUBBLE_MAX}
+  style:--bot-max={BOT_BUBBLE_MAX}
+  style:--slot-width={SLOT_WIDTH}
+  style:--tools-width={TOOLS_WIDTH}
+  style:--bar-height={BAR_HEIGHT}
+  style:--mask-fade={MASK_FADE}
+  style:--composer-inset={COMPOSER_INSET}
+  style:--thread-pad={THREAD_PAD_BOTTOM}
+  style:--thread-pad-top={THREAD_PAD_TOP}
+  style:--thread-gap={THREAD_GAP}
+  style:--turn-mark={TURN_MARK}
+  style:--user-row-gap={USER_ROW_GAP}
+  style:--disc-radius={DISC_RADIUS}
+  style:--disc-size={DISC_SIZE}
+>
+  <header class="top">
+    <div class="wordmark">
+      <span class="disc" aria-hidden="true">D</span>
+      <b>dasdevbot</b>
+      <span>{project} · phase0</span>
     </div>
+    <div class="dev">
+      <button type="button" onclick={() => void replay()}>Replay thread</button>
+      <button type="button" disabled={busy} onclick={() => void simulate(false)}>
+        {busy ? "Waking Reviewer" : "Simulate repo.push"}
+      </button>
+      <button type="button" disabled={busy} onclick={() => void simulate(true)}>
+        {busy ? "Waking Reviewer" : "Simulate force push"}
+      </button>
+    </div>
+  </header>
+
+  {#if error && !fixture}
+    <p class="banner" role="alert">{error}</p>
+  {/if}
+
+  <ThreadPane
+    nodes={frame.nodes}
+    animate={playing || (primed && !shot)}
+    {busy}
+    {ondecide}
+    {onundo}
+    {onfile}
+  />
+
+  <div class="dock">
+    <ComposerBar
+      draft={frame.draft}
+      chip={frame.chip}
+      placeholder={frame.placeholder}
+      lit={frame.lit}
+      sheenX={frame.sheenX}
+      {ondraft}
+      {onsend}
+    />
   </div>
+
+  {#if frame.cursor}
+    <div
+      class="cursor"
+      class:on={frame.cursor.visible}
+      style:left="{frame.cursor.x}px"
+      style:top="{frame.cursor.y}px"
+      aria-hidden="true"
+    >
+      <svg viewBox="0 0 20 20">
+        <path d="M3 2.2 3.4 16l3.7-3.6 2.6 5.6 2.4-1.1-2.6-5.5 5.2-.3z" />
+      </svg>
+    </div>
+  {/if}
   {#if settingsOpen}
     <SecretEntry />
   {/if}
 </div>
 
 <style>
-  .well {
-    min-height: 100%;
-    padding: var(--s-5);
-    background: var(--paper-base);
-  }
-
   .shell {
-    max-width: 1120px;
-    margin: 0 auto;
-    background: var(--paper-raised);
-    border: 1px solid var(--hairline);
-    border-radius: var(--flat-radius);
+    --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.15' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .227 0 0 0 0 .157 0 0 0 0 .086 .42 0 0 0 -.17'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    height: 100vh;
+    position: relative;
     overflow: hidden;
+    background: var(--grain), var(--paper-base);
+    color: var(--ink-1);
   }
 
-  .titlebar {
+  .top {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--bar-height);
     display: flex;
-    justify-content: space-between;
-    gap: var(--s-4);
     align-items: center;
-    padding: var(--s-3) var(--s-4);
-    border-bottom: 1px solid var(--hairline);
+    gap: var(--s-3);
+    padding: 0 var(--s-6);
+    z-index: 5;
   }
 
   .wordmark {
     display: flex;
     align-items: center;
-    gap: var(--s-3);
-    font-weight: var(--w-semibold);
-    letter-spacing: var(--track-tight);
+    gap: 10px;
   }
 
-  .dots {
-    width: 42px;
-    height: 10px;
-    background:
-      radial-gradient(circle at 5px 5px, var(--ink-3) 4px, transparent 4.5px),
-      radial-gradient(circle at 21px 5px, var(--ink-3) 4px, transparent 4.5px),
-      radial-gradient(circle at 37px 5px, var(--ink-3) 4px, transparent 4.5px);
-  }
-
-  .status,
-  .budget,
-  .ledger,
-  .project {
-    font-family: var(--font-machine);
-  }
-
-  .status {
-    color: var(--ink-2);
-    font-size: var(--t-micro);
-    text-align: right;
-  }
-
-  .banner {
-    margin: var(--s-3) var(--s-4) 0;
-    padding: var(--s-2) var(--s-3);
-    border-radius: var(--r-sm);
-    color: var(--ink-1);
-    background: var(--paper-sunken);
-  }
-
-  .body {
+  .disc {
+    width: 26px;
+    height: 26px;
+    border-radius: var(--disc-radius);
+    background: var(--ink-1);
+    color: var(--paper-raised);
     display: grid;
-    grid-template-columns: 280px 1fr;
-    min-height: 640px;
-  }
-
-  aside {
-    padding: var(--s-4);
-    border-right: 1px solid var(--hairline);
-  }
-
-  main {
-    padding: var(--s-4);
-    background: var(--paper-base);
-  }
-
-  .section {
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
+    place-items: center;
+    font-size: var(--disc-size);
     font-weight: var(--w-semibold);
-    margin-bottom: var(--s-3);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16);
   }
 
-  .agent {
-    position: relative;
-    overflow: hidden;
-    padding: var(--s-3);
-    border: 1px solid var(--hairline);
-    border-radius: var(--flat-radius);
-    background: var(--paper-raised);
-  }
-
-  .agent-row {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--s-2);
-    align-items: baseline;
-  }
-
-  h2 {
-    font-size: var(--t-lead);
-    line-height: var(--lh-lead);
-    font-weight: var(--w-semibold);
+  .wordmark b {
     letter-spacing: var(--track-tight);
   }
 
-  .project,
-  .budget,
-  .hint,
-  .muted,
-  .persona {
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-  }
-
-  .agent-status {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s-2);
+  .wordmark span {
     color: var(--ink-3);
     font-size: var(--t-meta);
+    line-height: var(--lh-meta);
   }
 
-  .need-dot {
-    width: 7px;
-    height: 7px;
-    flex: none;
-    border-radius: var(--r-pill);
-    background: var(--risk-external);
-  }
-
-  .persona {
-    margin-top: var(--s-2);
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .budget {
-    margin-top: var(--s-2);
-    color: var(--ink-1);
-  }
-
-  .sim-row {
+  .dev {
+    margin-left: auto;
     display: flex;
-    flex-direction: column;
     gap: var(--s-2);
-    margin-top: var(--s-4);
   }
 
-  .simulate {
-    width: 100%;
-    height: 40px;
-    border-radius: var(--r-md);
-    border: 1.5px solid var(--ink-1);
+  .cap .dev {
+    display: none;
+  }
+
+  .dev button {
+    height: 30px;
+    padding: 0 var(--s-3);
+    border-radius: var(--r-pill);
+    border: 1px solid var(--hairline-strong);
     background: var(--paper-raised);
     color: var(--ink-1);
     font-size: var(--t-meta);
-    font-weight: var(--w-semibold);
+    font-weight: var(--w-medium);
     cursor: pointer;
   }
 
-  .simulate:disabled {
+  .dev button:disabled {
     opacity: 0.45;
     cursor: not-allowed;
   }
 
-  .simulate:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-
-  .hint {
-    margin-top: var(--s-2);
-  }
-
-  .stage {
-    position: relative;
-  }
-
-  .stream {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    margin: 0;
-    padding: 0;
-  }
-
-  .event,
-  .slot-row {
-    list-style: none;
-    border-radius: var(--flat-radius);
-    background: none;
-    box-shadow: none;
-  }
-
-  .row {
-    display: grid;
-    grid-template-columns: 76px 28px minmax(0, 1fr);
-    column-gap: 12px;
-    align-items: center;
-    padding: 10px 2px 10px;
-    /* 37px copy + 20px padding + the 1px rule is 58. Min-height matches the 60px receipt. */
-    min-height: 60px;
-    border: 0;
-    border-bottom: 1px solid var(--hairline);
-    border-radius: var(--flat-radius);
-    background: none;
-    box-shadow: none;
-  }
-
-  .row:hover {
-    border-bottom-color: var(--hairline-strong);
-    background: color-mix(in oklab, var(--paper-sunken) 65%, transparent);
-  }
-
-  .when {
-    font-family: var(--font-machine);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
-    font-weight: var(--w-regular);
-    color: var(--ink-2);
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .disc {
-    width: 28px;
-    height: 28px;
-    flex: none;
-    border-radius: var(--r-pill);
-    background: var(--paper-sunken);
-    box-shadow: 0 0 0 1px var(--hairline);
-    display: grid;
-    place-items: center;
-    color: var(--ink-2);
-    font-size: 12px;
-    line-height: 1;
-    font-weight: var(--w-semibold);
-  }
-
-  .copy {
-    min-width: 0;
-  }
-
-  .who {
-    color: var(--ink-1);
-    font-size: var(--t-body);
-    line-height: var(--lh-body);
-  }
-
-  .detail {
-    margin-top: 2px;
-    font-family: var(--font-machine);
-    font-size: var(--t-micro);
-    line-height: var(--lh-micro);
-    color: var(--ink-3);
-    overflow-wrap: anywhere;
-  }
-
-  /* Filed receipt sits in the row's copy column. Same tracks as .row, without a hairline rule. */
-  .slot-row {
-    display: grid;
-    grid-template-columns: 76px 28px minmax(0, 1fr);
-    column-gap: 12px;
-    padding: 0 2px;
-    border: 0;
-    min-height: 0;
-    height: auto;
-  }
-
-  .slot-row .slot {
-    grid-column: 3;
-    margin-top: 0;
-  }
-
-  .slot {
-    margin-top: 14px;
-    scroll-margin-bottom: 16px;
-  }
-
-  .slot.over {
-    position: fixed;
+  .banner {
+    position: absolute;
+    top: var(--bar-height);
+    left: var(--s-6);
+    right: var(--s-6);
     z-index: 4;
-    left: var(--overlay-left, 0px);
-    width: var(--overlay-width, 100%);
-    bottom: 16px;
-    display: flex;
-    justify-content: center;
-    margin-top: 0;
-    padding: 0 28px;
+    padding: var(--s-2) var(--s-3);
+    border-radius: var(--r-sm);
+    background: var(--paper-sunken);
+    color: var(--ink-1);
+  }
+
+  .dock {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--composer-inset);
+    width: var(--thread-width);
+    margin: 0 auto;
+    z-index: 6;
+  }
+
+  .cursor {
+    position: fixed;
+    z-index: 8;
+    width: 20px;
+    height: 20px;
+    margin: -2px 0 0 -3px;
     pointer-events: none;
-    box-sizing: border-box;
+    color: var(--ink-1);
+    opacity: 0;
+    transition: opacity 160ms var(--ease-out);
   }
 
-  .slot.over :global(article.card) {
-    width: min(520px, 100%);
-    pointer-events: auto;
-  }
-
-  .quiet-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--s-2);
-    margin-top: var(--s-3);
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
-  }
-
-  .quiet-line {
-    width: 104px;
-    height: 10px;
-    overflow: visible;
-  }
-
-  .quiet-empty .pen {
-    fill: none;
-    stroke: var(--pen);
-    stroke-width: var(--pen-width);
-    stroke-linecap: round;
-    vector-effect: non-scaling-stroke;
-  }
-
-  .quiet-empty .draw {
-    stroke-dasharray: 1;
-    stroke-dashoffset: 0;
-    animation: draw-quiet var(--dur-draw) var(--ease-draw) both;
-  }
-
-  @keyframes draw-quiet {
-    from {
-      stroke-dashoffset: 1;
-    }
+  .cursor.on {
+    opacity: 1;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .quiet-empty .draw {
-      animation: none;
+    .cursor {
+      transition: opacity 120ms linear;
     }
   }
 
-  .muted {
-    margin-top: var(--s-2);
-    color: var(--ink-2);
+  .cursor svg {
+    width: 20px;
+    height: 20px;
+    overflow: visible;
   }
 
-  .ledger-head {
-    margin-top: var(--s-6);
-  }
-
-  .ledger {
-    list-style: none;
-    display: grid;
-    gap: var(--s-2);
-  }
-
-  .ledger li {
-    font-size: var(--t-meta);
-    color: var(--ink-1);
-  }
-
-  .ledger span {
-    display: block;
-    color: var(--ink-2);
-    font-size: var(--t-micro);
-  }
-
-  @media (max-width: 860px) {
-    .well {
-      padding: var(--s-2);
-    }
-
-    .body {
-      grid-template-columns: 1fr;
-    }
-
-    aside {
-      border-right: 0;
-      border-bottom: 1px solid var(--hairline);
-    }
-
-    .titlebar {
-      flex-direction: column;
-      align-items: flex-start;
-    }
-
-    .status {
-      text-align: left;
-    }
+  .cursor path {
+    fill: var(--ink-1);
+    stroke: var(--paper-raised);
+    stroke-width: 1.3;
+    stroke-linejoin: round;
   }
 </style>

@@ -194,6 +194,23 @@ function approval(status) {
   };
 }
 
+function destructiveSnapshot() {
+  const card = approval("pending");
+  card.effect_class = "destructive";
+  card.action = "force_push";
+  card.draft = "git push --force origin phase0";
+  card.purpose = "Force-push phase0. This rewrites the remote branch.";
+  return snapshot({
+    status: "blocked",
+    approvals: [card],
+    events: [
+      eventRow("ev_a1b2c3", "repo.push", "push-force", "1759241040000:2:node"),
+      eventRow("ev_d3a91c", "approval.requested", `approval-requested:${card.id}`, "1759241041000:1:node"),
+    ],
+    ledger: [],
+  });
+}
+
 function eventRow(id, kind, key, hlc) {
   return {
     id,
@@ -231,6 +248,8 @@ async function markTextNodes(page) {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     const ids = [];
     let index = 0;
+    let textareaNodes = 0;
+    let placeholderNodes = 0;
     while (walker.nextNode()) {
       const text = walker.currentNode.nodeValue ?? "";
       if (text.trim().length === 0) {
@@ -256,12 +275,48 @@ async function markTextNodes(page) {
         ids.push({ id, text: text.trim().slice(0, 80) });
       }
     }
-    return ids;
+    for (const area of document.querySelectorAll("textarea")) {
+      const style = getComputedStyle(area);
+      if (style.display === "none" || style.visibility === "hidden") {
+        continue;
+      }
+      const rect = area.getBoundingClientRect();
+      if (rect.width < 0.5 || rect.height < 0.5) {
+        continue;
+      }
+      const valueId = `ta${index}`;
+      index += 1;
+      area.setAttribute("data-font-audit", valueId);
+      textareaNodes += 1;
+      ids.push({ id: valueId, text: (area.value || "(empty textarea)").slice(0, 80) });
+      const placeholder = area.getAttribute("placeholder") ?? "";
+      if (placeholder.trim().length > 0) {
+        const probe = document.createElement("span");
+        probe.textContent = placeholder;
+        probe.setAttribute("data-font-audit-placeholder", "1");
+        probe.style.position = "fixed";
+        probe.style.left = "0";
+        probe.style.top = "0";
+        probe.style.fontFamily = style.fontFamily;
+        probe.style.fontSize = style.fontSize;
+        probe.style.fontWeight = style.fontWeight;
+        probe.style.lineHeight = style.lineHeight;
+        probe.style.color = style.color;
+        document.body.append(probe);
+        const placeholderId = `ph${index}`;
+        index += 1;
+        probe.setAttribute("data-font-audit", placeholderId);
+        placeholderNodes += 1;
+        ids.push({ id: placeholderId, text: placeholder.slice(0, 80) });
+      }
+    }
+    return { ids, textareaNodes, placeholderNodes };
   });
 }
 
 async function auditState(page, session, state) {
-  const nodes = await markTextNodes(page);
+  const marked = await markTextNodes(page);
+  const nodes = marked.ids;
   const { root } = await session.send("DOM.getDocument");
   const faceGlyphs = new Map();
   const failures = [];
@@ -289,7 +344,14 @@ async function auditState(page, session, state) {
       }
     }
   }
-  return { state, textNodes: nodes.length, faceGlyphs, failures };
+  return {
+    state,
+    textNodes: nodes.length,
+    textareaNodes: marked.textareaNodes,
+    placeholderNodes: marked.placeholderNodes,
+    faceGlyphs,
+    failures,
+  };
 }
 
 let browser;
@@ -331,7 +393,7 @@ try {
 
   const states = [
     ["idle", idleSnapshot(), async () => page.getByText("Nothing is waiting.").waitFor()],
-    ["stream", streamSnapshot(), async () => page.locator(".stream .row").first().waitFor()],
+    ["stream", streamSnapshot(), async () => page.locator(".system").first().waitFor()],
     [
       "waiting",
       waitingSnapshot(),
@@ -353,12 +415,29 @@ try {
       },
     ],
     ["receipt", receiptSnapshot(), async () => page.locator("article.card .receipt").waitFor()],
+    ["destructive", destructiveSnapshot(), async () => page.locator(".deny").waitFor()],
   ];
 
   const audits = [];
   for (const [name, next, ready] of states) {
     fixture = next;
     await page.goto(origin, { waitUntil: "networkidle" });
+    await page.locator(".wordmark").waitFor();
+    await ready();
+    audits.push(await auditState(page, session, name));
+  }
+
+  const shots = [
+    ["thread-send", "/?shot=send", () => page.getByText("Pushed. Review the handoff fix").waitFor()],
+    ["thread-tools", "/?shot=tools", () => page.getByText("Running the core tests").waitFor()],
+    ["thread-approval", "/?shot=approval", () => page.locator("article.card.glass").waitFor()],
+    ["thread-receipt", "/?shot=receipt", () => page.locator("article.card.paper").last().waitFor()],
+    ["thread-handoff", "/?shot=handoff", () => page.getByText("Reviewer hands off to Builder").waitFor()],
+    ["thread-composer", "/?shot=composer", () => page.locator("form.composer.lit").waitFor()],
+    ["thread-deny", "/?shot=deny", () => page.getByText("Destructive actions are off in this build.").waitFor()],
+  ];
+  for (const [name, path, ready] of shots) {
+    await page.goto(`${origin}${path}`, { waitUntil: "networkidle" });
     await page.locator(".wordmark").waitFor();
     await ready();
     audits.push(await auditState(page, session, name));
@@ -374,6 +453,8 @@ try {
   });
   const totals = new Map();
   let textNodes = 0;
+  let textareaNodes = 0;
+  let placeholderNodes = 0;
   const failures = [];
   if (fontRequests.length === 0) {
     failures.push("no font requests were observed");
@@ -383,6 +464,8 @@ try {
   }
   for (const audit of audits) {
     textNodes += audit.textNodes;
+    textareaNodes += audit.textareaNodes;
+    placeholderNodes += audit.placeholderNodes;
     failures.push(...audit.failures);
     for (const [face, glyphs] of audit.faceGlyphs) {
       totals.set(face, (totals.get(face) ?? 0) + glyphs);
@@ -406,6 +489,12 @@ try {
   }
   if (!faces.some(([face]) => /jetbrains/i.test(face))) {
     failures.push("no visible text used the bundled JetBrains Mono face");
+  }
+  if (textareaNodes === 0) {
+    failures.push("no textarea node was audited");
+  }
+  if (placeholderNodes === 0) {
+    failures.push("no placeholder node was audited");
   }
   if (failures.length > 0) {
     throw new Error(failures.join("\n"));

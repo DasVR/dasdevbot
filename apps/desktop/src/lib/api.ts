@@ -24,6 +24,8 @@ export interface Evidence {
   ref: string;
   event_id: string;
   kind: string;
+  /** Pull request line on the thread card. Absent on daemon rows that have no PR. */
+  pr?: string;
 }
 
 export interface Approval {
@@ -245,15 +247,20 @@ export function formatDecisionStamp(ms: number): string {
   return zone ? `${hh}:${mm}:${ss} ${zone}` : `${hh}:${mm}:${ss}`;
 }
 
+const EVENT_ID = /^ev_[0-9a-f]{6}$/;
+
+/** Visible event id. `ev_` plus 6 lowercase hex. UUIDs keep their last 6 hex digits. */
 export function shortEventId(id: string): string {
   if (!id) {
     return "";
   }
-  if (/^ev_/i.test(id)) {
-    return id;
+  const lower = id.toLowerCase();
+  if (EVENT_ID.test(lower)) {
+    return lower;
   }
-  const compact = id.replace(/-/g, "");
-  return `ev_${compact.slice(-6)}`;
+  const hex = lower.replace(/[^0-9a-f]/g, "");
+  const tail = hex.slice(-6).padStart(6, "0");
+  return `ev_${tail}`;
 }
 
 export function isTextEntry(target: EventTarget | null): boolean {

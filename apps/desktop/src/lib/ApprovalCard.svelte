@@ -20,14 +20,15 @@
   import { tokenEase, tokenMs } from "./cssTokens";
   import {
     CHECK_PATH,
-    CHEVRON_PATH,
     DELETE_KEY_PATH,
     DENY_MARK_PATH,
     ENTER_KEY_PATH,
     STRIKE_PATH,
-    arrowFromId,
-    type ArrowMark,
   } from "./pen";
+
+  const QUIET_WAITING =
+    "Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.";
+  const QUIET_HELLO = "Confirm with Windows Hello";
 
   /** Risk arrow waits after the card rise. No default-motion token is 120ms. */
   const ARROW_DELAY = "120ms";
@@ -51,6 +52,7 @@
     shortcutTarget?: boolean;
     ondecide?: (decision: Decision, reason?: string) => Promise<boolean>;
     onundo?: () => Promise<boolean>;
+    onfile?: () => Promise<boolean>;
   }
 
   let {
@@ -60,6 +62,7 @@
     shortcutTarget = false,
     ondecide,
     onundo,
+    onfile,
   }: Props = $props();
 
   const reducedMotion = new MediaQuery("(prefers-reduced-motion: reduce)");
@@ -75,8 +78,9 @@
   let cardEl = $state<HTMLElement | null>(null);
   let playRise = $state(false);
   let riseNoted = false;
-  let arrow = $state<ArrowMark | null>(null);
   let seenArmed = $state(false);
+  let helloOpen = $state(false);
+  let filing = false;
   let cardFocused = $state(false);
   let denyOpen = $state(false);
   let reason = $state("");
@@ -136,6 +140,15 @@
     return pieces;
   });
   const subline = $derived.by(() => {
+    if (approval.action === "push_to_phase0" && approval.committed) {
+      return "Undo closed. Pushed 9c07d1e to DasVR/NIL.";
+    }
+    if (approval.committed && approval.status === "approved") {
+      return "Undo closed. Posting to DasVR/NIL #212 (demo: nothing leaves).";
+    }
+    if (approval.committed && approval.status === "denied") {
+      return "Undo closed. Nothing was posted.";
+    }
     if (approval.status === "expired") {
       return "Reviewer will ask again on the next push.";
     }
@@ -192,6 +205,17 @@
         seenArmed = false;
       }
     };
+    const fullyInView = (box: DOMRect) =>
+      box.height > 0 &&
+      box.top >= -1 &&
+      box.left >= -1 &&
+      box.bottom <= window.innerHeight + 1 &&
+      box.right <= window.innerWidth + 1;
+    if (fullyInView(card.getBoundingClientRect()) && fullyInView(evidence.getBoundingClientRect())) {
+      cardFull = true;
+      evidenceVisible = true;
+      sync();
+    }
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -216,36 +240,75 @@
     };
   }
 
-  function watchArrow(strip: HTMLElement): () => void {
-    const card = strip.closest("article");
-    if (!card) {
-      return () => {};
-    }
-    const id = approval.id;
-    let current = "";
-    const measure = () => {
-      const next = arrowFromId(id);
-      const key = `${next.width}x${next.height}:${next.shaft}:${next.head}`;
-      if (key === current) {
-        return;
-      }
-      current = key;
-      arrow = next;
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(card);
-    return () => {
-      observer.disconnect();
-    };
-  }
-
   function tickUndo(): () => void {
     nowMs = Date.now();
     const timer = window.setInterval(() => {
       nowMs = Date.now();
-    }, 200);
+      if (filing || approval.status === "pending" || approval.committed || approval.undo_until == null) {
+        return;
+      }
+      if (approval.undo_until <= nowMs) {
+        filing = true;
+        void closeUndo();
+      }
+    }, 16.667);
     return () => window.clearInterval(timer);
+  }
+
+  async function closeUndo(): Promise<void> {
+    const node = cardEl;
+    if (!node) {
+      await onfile?.();
+      return;
+    }
+    node.style.animation = "none";
+    if (reducedMotion.current) {
+      node.style.transition = "opacity 160ms linear";
+      node.style.transform = "none";
+      node.style.opacity = "0";
+      await wait(160);
+      await onfile?.();
+      await tick();
+      if (!cardEl) {
+        return;
+      }
+      cardEl.style.transition = "none";
+      cardEl.style.transform = "none";
+      cardEl.style.height = "60px";
+      cardEl.style.opacity = "0";
+      void cardEl.offsetHeight;
+      cardEl.style.transition = "opacity 160ms linear";
+      cardEl.style.opacity = "1";
+      await wait(160);
+      cardEl.style.transition = "";
+      cardEl.style.opacity = "";
+      cardEl.dataset.filed = "1";
+      return;
+    }
+    const paper =
+      getComputedStyle(document.documentElement).getPropertyValue("--paper-raised").trim() || "#FBF9F5";
+    node.style.transition =
+      "background-color 360ms var(--ease-in-out), box-shadow 360ms var(--ease-in-out)";
+    node.style.backgroundColor = paper;
+    node.style.boxShadow = "var(--highlight-top), 0 0 0 1px var(--hairline)";
+    await wait(360);
+    const from = node.getBoundingClientRect().height;
+    await onfile?.();
+    await tick();
+    if (!cardEl) {
+      return;
+    }
+    cardEl.style.overflow = "hidden";
+    cardEl.style.height = `${from}px`;
+    const filing = cardEl.animate([{ height: `${from}px` }, { height: "60px" }], {
+      duration: 520,
+      easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+      fill: "forwards",
+    });
+    await wait(520);
+    filing.cancel();
+    cardEl.style.height = "60px";
+    cardEl.dataset.filed = "1";
   }
 
   function focusReason(node: HTMLInputElement): () => void {
@@ -424,6 +487,15 @@
     scheduleMorph(measureSettled());
   }
 
+  async function confirmHello(): Promise<void> {
+    if (!helloOpen || locked || !pending) {
+      return;
+    }
+    helloOpen = false;
+    committing = "approve";
+    await settleDecision("approve");
+  }
+
   async function onApproveClick(): Promise<void> {
     if (locked || denyOpen || !pending) {
       return;
@@ -519,8 +591,7 @@
     holdSealed = true;
     if (kind === "approve") {
       checkOffset = 0;
-      committing = "approve";
-      void settleDecision("approve");
+      helloOpen = true;
       return;
     }
     strike = 1;
@@ -664,23 +735,13 @@
     {#if effect === "read"}
       <p class="risk-read">Read</p>
     {:else if effect}
-      <div class="risk" role="note" {@attach watchArrow}>
+      <div class="risk" role="note">
         <span class="dot"></span>
         <span>{effectLabel(effect)}</span>
         {#if effectWhy(effect)}
           <span class="why">· {effectWhy(effect)}</span>
         {/if}
       </div>
-      {#if arrow}
-        <svg
-          class="arrow"
-          viewBox={`0 0 ${arrow.width} ${arrow.height}`}
-          aria-hidden="true"
-        >
-          <path class="pen trace shaft" pathLength="1" d={arrow.shaft} />
-          <path class="pen trace head" pathLength="1" d={arrow.head} />
-        </svg>
-      {/if}
     {/if}
 
     <div class="inner">
@@ -699,6 +760,8 @@
         <dl class="evidence" {@attach watchSeen}>
           <dt>repo</dt>
           <dd>{approval.evidence.repo}</dd>
+          <dt>pr</dt>
+          <dd>{approval.evidence.pr ?? ""}</dd>
           <dt>ref</dt>
           <dd>{approval.evidence.ref}</dd>
           <dt>event</dt>
@@ -706,24 +769,18 @@
         </dl>
       </section>
 
-      <details open>
-        <summary>
-          <span class="lhs">
-            <svg class="chev" viewBox="0 0 12 12" aria-hidden="true">
-              <path d={CHEVRON_PATH} />
-            </svg>
-            <span class="draft-label">
-              Draft
-              <svg class="strike" viewBox="0 0 130 12" preserveAspectRatio="none" aria-hidden="true">
-                <path class="pen trace" pathLength="1" d={STRIKE_PATH} style:stroke-dashoffset={1 - strike} />
-              </svg>
-            </span>
-          </span>
-          {#if approval.provider === "mock"}
-            <span class="prov">mock provider, not written by a model</span>
-          {/if}
-        </summary>
-        <p class="draft">
+      <div class="sumline">
+        <span class="dlabel">
+          Draft
+          <svg class="strike" viewBox="0 0 130 12" preserveAspectRatio="none" aria-hidden="true">
+            <path class="pen trace" pathLength="1" d={STRIKE_PATH} style:stroke-dashoffset={1 - strike} />
+          </svg>
+        </span>
+        {#if approval.provider === "mock"}
+          <span class="prov">mock provider, not written by a model</span>
+        {/if}
+      </div>
+      <div class="draft">
           {#each draftPieces as part, index (index)}
             {#if part.code}
               <code>{part.text}</code>
@@ -731,8 +788,7 @@
               {part.text}
             {/if}
           {/each}
-        </p>
-      </details>
+      </div>
 
       <p class="meta">
         {approval.provider} · {approval.model} · {formatTokens(approval.input_tokens)} in / {formatTokens(approval.output_tokens)} out · {formatUsd(approval.micro_usd)}
@@ -793,7 +849,11 @@
       </div>
 
       <div class="quiet">
-        <p>Records your decision. Nothing is posted in this demo.</p>
+        {#if helloOpen}
+          <button class="hello" type="button" onclick={() => void confirmHello()}>{QUIET_HELLO}</button>
+        {:else}
+          <p>{QUIET_WAITING}</p>
+        {/if}
         {#if cardFocused && !denyOpen}
           {#snippet modifier()}
             <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
@@ -871,8 +931,8 @@
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border-radius: var(--r-xl);
-    box-shadow: var(--glass-edge), var(--shadow-float);
-    padding: var(--s-2) var(--s-2) var(--s-5);
+    box-shadow: var(--glass-edge), var(--shadow-press);
+    padding: var(--s-2) var(--s-2) var(--s-4);
   }
 
   .card.glass.receipt {
@@ -882,14 +942,20 @@
   }
 
   .card.paper {
+    height: 60px;
     background: var(--convex), var(--paper-raised);
     -webkit-backdrop-filter: blur(0px) saturate(100%);
     backdrop-filter: blur(0px) saturate(100%);
     border-radius: var(--r-md);
-    border: 1px solid var(--hairline);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
-    min-height: 52px;
-    padding: 10px 14px 10px 12px;
+    border: 0;
+    box-shadow: var(--highlight-top), 0 0 0 1px var(--hairline);
+    padding: 10px 16px 10px 12px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .card {
+      transition: opacity 160ms linear;
+    }
   }
 
   .card:focus-visible {
@@ -898,7 +964,7 @@
   }
 
   .card.rise {
-    animation: rise var(--dur-stage) var(--ease-out) backwards;
+    animation: rise var(--dur-stage) var(--ease-out) 150ms backwards;
   }
 
   @keyframes rise {
@@ -983,32 +1049,10 @@
     animation: draw var(--dur-draw) var(--ease-draw) both;
   }
 
-  .arrow .shaft {
-    stroke-dashoffset: 0;
-    animation: draw var(--dur-draw) var(--ease-draw) both;
-    animation-delay: calc(var(--dur-stage) + var(--arrow-delay));
-  }
-
-  .arrow .head {
-    stroke-dashoffset: 0;
-    animation: draw var(--arrow-head-draw) var(--ease-draw) both;
-    animation-delay: calc(var(--dur-stage) + var(--arrow-delay) + var(--dur-draw));
-  }
-
   @keyframes draw {
     from {
       stroke-dashoffset: 1;
     }
-  }
-
-  .arrow {
-    position: absolute;
-    right: 34px;
-    top: 38px;
-    width: 58px;
-    height: 46px;
-    overflow: visible;
-    pointer-events: none;
   }
 
   .card-head {
@@ -1016,7 +1060,6 @@
     gap: var(--s-3);
     align-items: flex-start;
     margin-top: var(--s-4);
-    padding-right: 70px;
   }
 
   .agent {
@@ -1060,11 +1103,11 @@
   }
 
   .block {
-    margin-top: var(--s-4);
+    margin-top: 14px;
   }
 
   h3 {
-    margin-bottom: var(--s-2);
+    margin-bottom: 6px;
     color: var(--ink-2);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
@@ -1078,7 +1121,7 @@
     color: var(--ink-1);
     background: color-mix(in oklab, var(--paper-sunken) 94%, transparent);
     border-radius: var(--r-sm);
-    padding: 10px 12px;
+    padding: 9px 12px;
     display: grid;
     grid-template-columns: auto 1fr;
     column-gap: 14px;
@@ -1088,41 +1131,6 @@
     color: var(--ink-2);
   }
 
-  details {
-    margin-top: var(--s-4);
-  }
-
-  summary {
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: var(--s-2);
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
-    font-weight: var(--w-semibold);
-  }
-
-  summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .lhs {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .chev {
-    width: 12px;
-    height: 12px;
-    transition: transform var(--dur-base) var(--ease-out);
-  }
-
-  .chev path,
   .key path {
     fill: none;
     stroke: currentColor;
@@ -1141,14 +1149,6 @@
     display: inline-block;
     vertical-align: -2px;
     overflow: visible;
-  }
-
-  details[open] .chev {
-    transform: rotate(90deg);
-  }
-
-  .draft-label {
-    position: relative;
   }
 
   .strike {
@@ -1173,9 +1173,25 @@
     border-radius: var(--r-xs);
   }
 
+  .sumline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 14px 0 6px;
+    color: var(--ink-2);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+    font-weight: var(--w-semibold);
+  }
+
+  .dlabel {
+    position: relative;
+  }
+
   .draft {
     white-space: pre-wrap;
-    padding: 12px 14px;
+    padding: 11px 14px;
     border-radius: var(--r-sm);
     background: color-mix(in oklab, var(--paper-raised) 94%, transparent);
     box-shadow: 0 0 0 1px var(--hairline);
@@ -1187,7 +1203,7 @@
   }
 
   .meta {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     font-family: var(--font-machine);
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
@@ -1198,7 +1214,7 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: var(--s-2);
-    margin-top: var(--s-5);
+    margin-top: 18px;
   }
 
   button {
@@ -1222,10 +1238,10 @@
   }
 
   .approve {
-    background: var(--ink-1);
-    color: var(--paper-raised);
+    background: var(--convex), var(--paper-raised);
+    color: var(--ink-1);
     border: 1.5px solid var(--ink-1);
-    box-shadow: var(--highlight-top), var(--shadow-puff);
+    box-shadow: var(--highlight-top), 0 1px 2px rgb(var(--shade) / 0.1), 0 6px 14px -6px rgb(var(--shade) / 0.18);
   }
 
   .deny {
@@ -1313,8 +1329,17 @@
     opacity: 1;
   }
 
+  .hello {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
   .quiet {
-    margin-top: var(--s-3);
+    margin-top: 10px;
     display: flex;
     justify-content: center;
     align-items: baseline;
@@ -1480,7 +1505,8 @@
 
   @media (prefers-reduced-motion: reduce) {
     .card.rise {
-      animation: fade var(--dur-stage) var(--reduced-fade) both;
+      animation: fade var(--dur-stage) var(--reduced-fade) 0ms both;
+      transform: none;
     }
 
     @keyframes fade {
@@ -1489,9 +1515,7 @@
       }
     }
 
-    .draw,
-    .arrow .shaft,
-    .arrow .head {
+    .draw {
       animation: pen-fade var(--dur-base) var(--reduced-fade) both;
       animation-delay: 0s;
       stroke-dashoffset: 0;
@@ -1504,15 +1528,13 @@
     }
 
     .reason,
-    .chev,
     .hold-hint {
       animation: none;
       transition: none;
     }
 
     button:hover:not(:disabled),
-    button:active:not(:disabled),
-    details[open] .chev {
+    button:active:not(:disabled) {
       transform: none;
     }
 
