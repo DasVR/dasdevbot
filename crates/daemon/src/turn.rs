@@ -1180,4 +1180,180 @@ mod tests {
         assert_eq!(approvals[0].effect_class, "unknown");
         assert_eq!(approvals[0].status, "denied");
     }
+
+    fn mock_app(store: Store, data: std::path::PathBuf) -> App {
+        let (wake, _rx) = mpsc::channel();
+        App {
+            store: Mutex::new(store),
+            provider: Arc::new(crate::provider::MockProvider::new()),
+            web_root: None,
+            role: "executor".into(),
+            worker_id: "owner".into(),
+            wake,
+            endpoint_id: Mutex::new(None),
+            token: "0123456789abcdef0123456789abcdef".into(),
+            data,
+            audit_seed: [9u8; 32],
+            window_secrets: crate::test_window_secrets(),
+        }
+    }
+
+    fn run_mock_job(kind_name: &str, payload: Value) -> App {
+        let store = Store::open_memory().unwrap();
+        let body = json!({
+            "kind": kind_name,
+            "tainted": true,
+            // A provider or a payload cannot pick the tier.
+            "effect_class": "write_local",
+            "tier": "internal",
+            "payload": payload,
+        });
+        store
+            .enqueue_job(
+                "reviewer",
+                &format!("job-mock-{kind_name}"),
+                &body.to_string(),
+                0,
+            )
+            .unwrap()
+            .unwrap();
+        let job = store.claim_at("owner", 10, 5_000).unwrap().unwrap();
+        let app = mock_app(store, std::path::PathBuf::from("data/dasdevbot.sqlite"));
+        run_turn(&app, &job).unwrap();
+        app
+    }
+
+    #[test]
+    fn a_mock_card_gets_its_tier_from_the_action_type_only() {
+        let claims = json!({
+            "repo": "DasVR/NIL",
+            "ref": "phase0",
+            "effect_class": "write_local",
+            "tier": "internal",
+            "provider": "mock",
+        });
+        for (kind_name, class) in [
+            ("repo.push", "external"),
+            ("repo.force_push", "destructive"),
+        ] {
+            let app = run_mock_job(kind_name, claims.clone());
+            let store = app.store.lock().unwrap();
+            let approvals = store.approvals().unwrap();
+            assert_eq!(approvals.len(), 1, "{kind_name}");
+            assert_eq!(approvals[0].effect_class, class, "{kind_name}");
+            assert_eq!(approvals[0].status, "denied", "{kind_name}");
+            assert_eq!(approvals[0].provider, "none", "{kind_name}");
+        }
+        let app = run_mock_job(
+            "workspace.write",
+            json!({
+                "repo": "DasVR/NIL",
+                "ref": "phase0",
+                "effect_class": "external",
+                "tier": "destructive",
+                "action": "force_push",
+            }),
+        );
+        let store = app.store.lock().unwrap();
+        let approvals = store.approvals().unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].effect_class, "write_local");
+        assert_eq!(approvals[0].action, "edit");
+        assert_eq!(approvals[0].status, "pending");
+        assert_eq!(approvals[0].provider, "mock");
+    }
+
+    #[test]
+    fn approving_a_mock_card_has_no_effect() {
+        use crate::ipc::{sign_decision, SignRequest};
+        use crate::secrets::{MemorySecrets, APPROVAL_KEY_NAME};
+        use crate::verify_user::TestVerifier;
+
+        let data_dir =
+            std::env::temp_dir().join(format!("dasdevbot-mock-effects-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let store = Store::open_memory().unwrap();
+        store
+            .enqueue_job(
+                "reviewer",
+                "job-mock-effects",
+                &json!({
+                    "kind": "workspace.write",
+                    "tainted": true,
+                    "payload": {"repo": "DasVR/NIL", "ref": "phase0"},
+                })
+                .to_string(),
+                0,
+            )
+            .unwrap()
+            .unwrap();
+        let job = store.claim_at("owner", 10, 5_000).unwrap().unwrap();
+        let app = mock_app(store, data_dir.join("dasdevbot.sqlite"));
+        run_turn(&app, &job).unwrap();
+        let mut store = app.store.lock().unwrap();
+        let card = store.approvals().unwrap().remove(0);
+        assert_eq!(card.provider, "mock");
+        assert_eq!(card.effect_class, "write_local");
+        let keys = MemorySecrets::new();
+        keys.insert(
+            APPROVAL_KEY_NAME,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+        // Hello is unchanged: a refused verification does not approve the card.
+        let refused = sign_decision(
+            &mut store,
+            SignRequest {
+                window: dasdevbot_core::CARD_WINDOW,
+                voice: false,
+                approval_id: &card.id,
+                decision: "approve",
+                reason: None,
+                now_ms: 2_000,
+                fencing: 7,
+                secrets: &keys,
+                verifier: &TestVerifier { allow: false },
+                audit_seed: &[9u8; 32],
+                client_signature: None,
+                client_nonce: None,
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(store.approval_status(&card.id).unwrap(), "pending");
+        let signed = sign_decision(
+            &mut store,
+            SignRequest {
+                window: dasdevbot_core::CARD_WINDOW,
+                voice: false,
+                approval_id: &card.id,
+                decision: "approve",
+                reason: None,
+                now_ms: 2_000,
+                fencing: 7,
+                secrets: &keys,
+                verifier: &TestVerifier { allow: true },
+                audit_seed: &[9u8; 32],
+                client_signature: None,
+                client_nonce: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(signed.status, "approved");
+        let committed = store.commit_due(u64::MAX / 4).unwrap();
+        assert_eq!(committed, vec![card.id.clone()]);
+        let payload: String = store
+            .connection()
+            .query_row(
+                "SELECT payload FROM events WHERE kind = ?1",
+                [kind::APPROVAL_COMMITTED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let body: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(body["executed"], false);
+        assert_eq!(app.provider.id(), "mock");
+        // Nothing was written next to the data path, let alone outside it.
+        let written: Vec<_> = std::fs::read_dir(&data_dir).unwrap().collect();
+        assert!(written.is_empty(), "{written:?}");
+        std::fs::remove_dir_all(&data_dir).unwrap();
+    }
 }
