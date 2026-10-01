@@ -26,7 +26,7 @@ const origin = process.argv[2] ?? "http://127.0.0.1:4173";
 const reviewDir = fileURLToPath(new URL("../docs/review/thread/", import.meta.url));
 const tokensPath = fileURLToPath(new URL("../apps/desktop/src/lib/styles/tokens.css", import.meta.url));
 const fontDir = fileURLToPath(new URL("../apps/desktop/src/fonts/", import.meta.url));
-const FRAME_MS = 16.667;
+export const FRAME_MS = 16.667;
 const MAX_FRAMES = Number(process.env.FRAMES ?? 70 * 60);
 const limited = Boolean(process.env.FRAMES);
 
@@ -92,18 +92,18 @@ function jpegSize(buf) {
   return { width: 2880, height: 932 };
 }
 
-function sleep(ms) {
+export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function runFfmpeg(args) {
+export function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
     const child = spawn("ffmpeg", args, { stdio: "inherit" });
     child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
   });
 }
 
-function openPipe(path) {
+export function openPipe(path) {
   const child = spawn(
     "ffmpeg",
     [
@@ -143,13 +143,13 @@ function openPipe(path) {
   return { stdin: child.stdin, done };
 }
 
-async function writeFrame(stdin, buf) {
+export async function writeFrame(stdin, buf) {
   if (!stdin.write(buf)) {
     await new Promise((resolve) => stdin.once("drain", resolve));
   }
 }
 
-async function shoot(cdp) {
+export async function shoot(cdp) {
   let last = new Error("screenshot failed");
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -167,7 +167,7 @@ function pane(x, y, cropW, cropH, outW, outH) {
   return [`crop=${cropW}:${cropH}:${x}:${y}`, `scale=${outW}:${outH}`, "setpts=N/60/TB"].join(",");
 }
 
-function countDuplicateHashes(file) {
+export function countDuplicateHashes(file) {
   return new Promise((resolve, reject) => {
     const child = spawn("ffmpeg", ["-i", file, "-f", "framemd5", "-"], { stdio: ["ignore", "pipe", "pipe"] });
     let buf = "";
@@ -213,7 +213,7 @@ function countDuplicateHashes(file) {
   });
 }
 
-async function installAppClock(frame) {
+export async function installAppClock(frame) {
   await frame.evaluate(() => {
     const win = window;
     let t = 0;
@@ -368,7 +368,7 @@ async function installAppClock(frame) {
   });
 }
 
-async function paint(page) {
+export async function paint(page) {
   await page.evaluate(
     () =>
       new Promise((resolve) => {
@@ -660,47 +660,54 @@ async function capture(browser, { reduced, width, height, out, shootFrames }) {
   return report;
 }
 
-const widths = (process.env.WIDTH ?? "1280,1440")
-  .split(",")
-  .map((value) => Number(value.trim()))
-  .filter((value) => value === 1280 || value === 1440);
-const heights = { 1280: 800, 1440: 900 };
-const marksOnly = process.env.MARKS_ONLY === "1";
+async function main() {
+  const widths = (process.env.WIDTH ?? "1280,1440")
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => value === 1280 || value === 1440);
+  const heights = { 1280: 800, 1440: 900 };
+  const marksOnly = process.env.MARKS_ONLY === "1";
 
-const browser = await chromium.launch({
-  channel: process.env.FONT_PROOF_CHANNEL || "chrome",
-  args: ["--disable-dev-shm-usage"],
-});
-const reports = [];
-try {
-  for (const width of widths) {
-    const height = heights[width];
-    if (process.env.SKIP_FULL !== "1") {
-      reports.push(
-        await capture(browser, {
-          reduced: false,
-          width,
-          height,
-          shootFrames: !marksOnly && !limited,
-          out: `${reviewDir}thread-vs-prototype-${width}.mp4`,
-        }),
-      );
+  const browser = await chromium.launch({
+    channel: process.env.FONT_PROOF_CHANNEL || "chrome",
+    args: ["--disable-dev-shm-usage"],
+  });
+  const reports = [];
+  try {
+    for (const width of widths) {
+      const height = heights[width];
+      if (process.env.SKIP_FULL !== "1") {
+        reports.push(
+          await capture(browser, {
+            reduced: false,
+            width,
+            height,
+            shootFrames: !marksOnly && !limited,
+            out: `${reviewDir}thread-vs-prototype-${width}.mp4`,
+          }),
+        );
+      }
+      if (!limited) {
+        reports.push(
+          await capture(browser, {
+            reduced: true,
+            width,
+            height,
+            shootFrames: !marksOnly,
+            out: `${reviewDir}thread-reduced-${width}.mp4`,
+          }),
+        );
+      }
     }
-    if (!limited) {
-      reports.push(
-        await capture(browser, {
-          reduced: true,
-          width,
-          height,
-          shootFrames: !marksOnly,
-          out: `${reviewDir}thread-reduced-${width}.mp4`,
-        }),
-      );
-    }
+  } finally {
+    await browser.close();
   }
-} finally {
-  await browser.close();
+  mkdirSync(reviewDir, { recursive: true });
+  writeFileSync(join(reviewDir, "motion-marks.json"), JSON.stringify(reports, null, 2));
+  console.log(`wrote ${join(reviewDir, "motion-marks.json")}`);
 }
-mkdirSync(reviewDir, { recursive: true });
-writeFileSync(join(reviewDir, "motion-marks.json"), JSON.stringify(reports, null, 2));
-console.log(`wrote ${join(reviewDir, "motion-marks.json")}`);
+
+// Run only when invoked directly; thread-vs-mock.mjs imports the helpers above.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  await main();
+}
