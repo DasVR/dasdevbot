@@ -675,6 +675,25 @@ impl Store {
         Ok(out)
     }
 
+    /// Demo-only route: `workspace.write` goes to the reviewer only while the
+    /// mock provider runs. Any other provider removes the row, so a database
+    /// that once ran the demo keeps the real routing. The row names a kind and
+    /// an agent; it carries no tier. `classify` still sets the tier.
+    pub fn set_demo_routing(&mut self, enabled: bool) -> Result<()> {
+        if enabled {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES (?1, 'workspace.write', 'reviewer')",
+                [DEMO_WORKSPACE_WRITE_RULE],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM rules WHERE id = ?1",
+                [DEMO_WORKSPACE_WRITE_RULE],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn budget_of(&self, agent_id: &str) -> Result<TokenBudget> {
         let agent = self.agent(agent_id)?;
         Ok(TokenBudget {
@@ -1781,6 +1800,9 @@ fn ensure_node_id(conn: &Connection) -> Result<String> {
     )?;
     Ok(id)
 }
+
+/// Rule id for the demo-only `workspace.write` route. See [`Store::set_demo_routing`].
+pub(crate) const DEMO_WORKSPACE_WRITE_RULE: &str = "rule-demo-workspace-write-reviewer";
 
 fn seed(conn: &Connection) -> Result<()> {
     conn.execute(

@@ -218,6 +218,8 @@ pub fn build_app(
         return Err(Error::Forbidden("audit log failed verification".into()));
     }
     audit_log::audit_grant_seed(&mut store, wall_ms(), &audit_seed)?;
+    // Demo routing follows the provider on every start. Only the mock seeds it.
+    store.set_demo_routing(demo_routing_enabled(provider.as_ref(), &config.role))?;
     let node = store.node_id().to_string();
     let (wake, rx) = mpsc::channel();
     let token = match config.token {
@@ -248,6 +250,12 @@ pub fn build_app(
         window_secrets,
     });
     Ok((app, rx))
+}
+
+/// `serve --provider mock` is the demo. The server role never runs it, so the
+/// route is not seeded there even if a mock is passed in.
+fn demo_routing_enabled(provider: &dyn LlmProvider, role: &str) -> bool {
+    provider.id() == "mock" && role != "server"
 }
 
 fn mint_token() -> String {
@@ -460,6 +468,92 @@ mod tests {
         )
         .unwrap();
         assert_eq!(app.token, supplied);
+    }
+
+    /// Stands in for a real provider by id. It is never called.
+    struct NamedProvider(&'static str);
+
+    impl LlmProvider for NamedProvider {
+        fn complete(
+            &self,
+            _req: &CompletionRequest,
+            _charge: &mut dyn FnMut(&provider::RetryCost) -> std::result::Result<(), ProviderError>,
+        ) -> std::result::Result<provider::Completion, ProviderError> {
+            Err(ProviderError::Failed("not called".into()))
+        }
+
+        fn id(&self) -> &'static str {
+            self.0
+        }
+
+        fn detail(&self) -> String {
+            self.0.into()
+        }
+    }
+
+    fn routes_after_start(
+        data: &Path,
+        role: &str,
+        provider: Box<dyn LlmProvider>,
+    ) -> [Vec<String>; 3] {
+        let (app, _rx) = build_app(
+            Config {
+                data: data.to_path_buf(),
+                web_root: None,
+                role: role.into(),
+                token: Some("0123456789abcdef0123456789abcdef".into()),
+            },
+            provider,
+        )
+        .unwrap();
+        let store = app.store.lock().unwrap();
+        [
+            store.rules_for_kind("workspace.write").unwrap(),
+            store.rules_for_kind("repo.push").unwrap(),
+            store.rules_for_kind("repo.force_push").unwrap(),
+        ]
+    }
+
+    #[test]
+    fn only_the_mock_provider_seeds_the_workspace_write_route() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-route-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let reviewer = vec!["reviewer".to_string()];
+        let real = |id: &'static str| -> Box<dyn LlmProvider> { Box::new(NamedProvider(id)) };
+
+        // Real providers: routing is exactly what main seeds, with no workspace.write.
+        for id in ["ollama", "ollama-local", "claude-cli"] {
+            for role in ["device", "executor", "server"] {
+                let data = dir.join(format!("{id}-{role}.sqlite"));
+                let [write, push, force] = routes_after_start(&data, role, real(id));
+                assert!(write.is_empty(), "{id} on {role} routed workspace.write");
+                assert_eq!(push, reviewer, "{id} on {role}");
+                assert_eq!(force, reviewer, "{id} on {role}");
+            }
+        }
+
+        // The mock on a local role seeds the route.
+        let data = dir.join("demo.sqlite");
+        let [write, push, force] =
+            routes_after_start(&data, "device", Box::new(MockProvider::new()));
+        assert_eq!(write, reviewer);
+        assert_eq!(push, reviewer);
+        assert_eq!(force, reviewer);
+
+        // The same database started with a real provider drops the demo route.
+        let [write, push, force] = routes_after_start(&data, "device", real("ollama"));
+        assert!(write.is_empty(), "the demo route outlived the demo");
+        assert_eq!(push, reviewer);
+        assert_eq!(force, reviewer);
+
+        // The server role refuses the mock; it never gets the route either.
+        let [write, _, _] = routes_after_start(
+            &dir.join("mock-server.sqlite"),
+            "server",
+            Box::new(MockProvider::new()),
+        );
+        assert!(write.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
