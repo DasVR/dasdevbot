@@ -486,6 +486,9 @@ export function createShellMotion(
       clock.cancelAll();
       paint(next);
       await tweenNative(next, 0);
+      if (native && form === next) {
+        paint(next);
+      }
       return;
     }
     hits(next);
@@ -557,6 +560,11 @@ export function createShellMotion(
       tweenNative(next, stageMs),
     ];
     await Promise.all(motion);
+    if (native && form === next) {
+      // The native window resizes while the tween runs, and commitStyles locked
+      // the pre-resize rects in. Repaint against the settled viewport.
+      paint(next);
+    }
     } finally {
       animating = false;
       concealStream(form !== "full");
@@ -756,7 +764,11 @@ export function createShellMotion(
       clock.cancelAll();
       paint(next);
       if (native) {
-        void tweenNative(next, 0);
+        void tweenNative(next, 0).then(() => {
+          if (form === next) {
+            paint(next);
+          }
+        });
       }
     },
     morph: (next) => morph(next),

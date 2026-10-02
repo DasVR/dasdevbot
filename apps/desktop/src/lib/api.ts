@@ -188,12 +188,12 @@ export function clampHoldMs(ms: number): number {
   return Math.min(HOLD_MS_MAX, Math.max(HOLD_MS_MIN, Math.round(ms)));
 }
 
-export function holdDurationMs(effect: EffectClass | null, setting?: number): number {
-  const base = setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
-  if (effect === "destructive") {
-    return clampHoldMs(Math.max(base, tokenMs("--dur-hold-destructive", HOLD_MS_MAX)));
-  }
-  return base;
+/**
+ * Every hold is --dur-hold. Destructive has no hold at all: it is denied by
+ * policy and renders only as the flat ink row (C1), so there is no 1200ms path.
+ */
+export function holdDurationMs(_effect: EffectClass | null, setting?: number): number {
+  return setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
 }
 
 export function formatUsd(micro: number): string {
@@ -346,10 +346,10 @@ export async function getSnapshot(): Promise<Snapshot> {
   return (await response.json()) as Snapshot;
 }
 
-/** Demo `repo.push`. `forced` asks for a destructive force-push instead of a PR comment. */
-export async function emitPush(forced = false): Promise<void> {
+/** Demo `repo.push`. The demo never asks for a destructive force-push. */
+export async function emitPush(): Promise<void> {
   if (tauriInternals()) {
-    await tauriInvoke()("daemon_emit_demo", { forced });
+    await tauriInvoke()("daemon_emit_demo", { forced: false });
     return;
   }
   const response = await fetch("/v1/events", {
@@ -357,13 +357,13 @@ export async function emitPush(forced = false): Promise<void> {
     headers: await jsonHeaders(),
     body: JSON.stringify({
       source: "demo",
-      kind: forced ? "repo.force_push" : "repo.push",
+      kind: "repo.push",
       payload: {
         repo: "DasVR/NIL",
         ref: "phase0",
         subject: "simulated push",
         note: "phase 0 attaches no diff",
-        forced,
+        forced: false,
       },
       idempotency_key: `ui-${crypto.randomUUID()}`,
     }),

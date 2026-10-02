@@ -159,10 +159,10 @@
     }
   }
 
-  async function simulate(forced = false): Promise<void> {
+  async function simulate(): Promise<void> {
     busy = true;
     try {
-      await emitPush(forced);
+      await emitPush();
       await refresh();
     } catch (err) {
       error = err instanceof Error ? err.message : "The event was not accepted.";
@@ -399,7 +399,7 @@
   {busy}
   stage={shell.stage}
   capture={shell.capture}
-  onSimulate={shell.stage ? undefined : (forced) => void simulate(forced)}
+  onSimulate={shell.stage ? undefined : () => void simulate()}
 >
   {#if shell.stage && snapshot == null}
     <StageThread />

@@ -48,7 +48,7 @@
     busy: boolean;
     stage: boolean;
     capture: boolean;
-    onSimulate?: (forced: boolean) => void;
+    onSimulate?: () => void;
     children: Snippet;
   }
 
@@ -294,11 +294,8 @@
       {/each}
       {#if onSimulate}
         <div class="sim">
-          <button type="button" disabled={busy} onclick={() => onSimulate?.(false)}>
+          <button type="button" disabled={busy} onclick={() => onSimulate?.()}>
             {busy ? "Waking Reviewer" : "Simulate repo.push"}
-          </button>
-          <button type="button" disabled={busy} onclick={() => onSimulate?.(true)}>
-            {busy ? "Waking Reviewer" : "Simulate force push"}
           </button>
           <p>Reviewer is a stored row. It runs only when this event wakes it.</p>
         </div>
@@ -312,7 +309,7 @@
 
   </div>
 
-  <div class="composer" {@attach keepComposer}>
+  <div class="composer" class:native {@attach keepComposer}>
     <div class="grain"></div>
     <div class="rim"></div>
     <div class="toplight"></div>
@@ -381,6 +378,15 @@
 
   .desk.native {
     background: transparent;
+  }
+
+  /* A native window is transparent with no acrylic or mica behind it, so the
+     blur has nothing to sample. Native windows use the opaque fallback fill;
+     the radius stays the one applyRect sets. */
+  .composer.native {
+    background: var(--glass-fill-solid);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
   .osbar {
