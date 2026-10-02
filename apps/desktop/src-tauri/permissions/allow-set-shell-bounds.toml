@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-set-shell-bounds"
+description = "Move and resize the main window for a shell form."
+commands.allow = ["set_shell_bounds"]

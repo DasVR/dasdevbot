@@ -7,6 +7,10 @@
   import SecretEntry from "./lib/SecretEntry.svelte";
   import { tokenEase, tokenMs } from "./lib/cssTokens";
   import { QUIET_LINE_PATH } from "./lib/pen";
+  import { shellSearch } from "./lib/shell/geometry";
+  import type { ReviewerChrome } from "./lib/shell/roster";
+  import Shell from "./lib/shell/Shell.svelte";
+  import StageThread from "./lib/shell/StageThread.svelte";
   import {
     decide,
     emitPush,
@@ -14,8 +18,9 @@
     formatUsd,
     getSnapshot,
     hlcMillis,
-    isTextEntry,
+    openCardWindow,
     shortEventId,
+    tauriWindowLabel,
     undo,
     type Approval,
     type Decision,
@@ -24,6 +29,9 @@
 
   /** Flat rows and the roster. tokens.css has no zero radius. */
   const FLAT_RADIUS = "0";
+  /** The shell mock's phase label. The snapshot names a project, not a phase. */
+  const PHASE = "phase0";
+  const shell = typeof window === "undefined" ? { stage: false, capture: false } : shellSearch();
   /** Reduced-motion fades. tokens.css has no linear easing token. */
   const REDUCED_FADE_EASE = linear;
 
@@ -77,23 +85,6 @@
   });
   const pendingAnchored = $derived(stream.some((row) => row.pendingHere));
   const anyReceipt = $derived(stream.some((row) => row.receipt !== null));
-  const undoable = $derived.by(() => {
-    const rows =
-      snapshot?.approvals.filter((approval) => {
-        return (
-          (approval.status === "approved" || approval.status === "denied") &&
-          !approval.committed &&
-          approval.undo_until != null &&
-          approval.undo_until > now
-        );
-      }) ?? [];
-    return rows.reduce<Approval | null>((latest, approval) => {
-      if (!latest || (approval.decided_at ?? 0) > (latest.decided_at ?? 0)) {
-        return approval;
-      }
-      return latest;
-    }, null);
-  });
   // Pending is waiting on a human. A decided, uncommitted approval is filing: ink-3, no dot.
   const waitingOnHuman = $derived(
     (snapshot?.approvals ?? []).some(
@@ -124,6 +115,36 @@
       ? 0
       : Math.max(0, Math.ceil((filingUndo.undo_until - now) / 1000)),
   );
+  const reviewerChrome = $derived.by((): ReviewerChrome | null => {
+    if (reviewer == null) {
+      return null;
+    }
+    let filing: string | null = null;
+    if (filingUndo && filingSeconds > 0) {
+      filing = `${filingUndo.status === "denied" ? "denied" : "approved"} · undo ${filingSeconds}s`;
+    }
+    return {
+      waiting: waitingOnHuman,
+      filing,
+      working: reviewer.status === "working",
+    };
+  });
+  const rosterAgents = $derived(
+    (snapshot?.agents ?? []).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      status: agent.status,
+    })),
+  );
+  const openReviews = $derived(
+    (snapshot?.approvals ?? [])
+      .filter((approval) => approval.status === "pending")
+      .map((approval) => ({
+        id: approval.id,
+        agent: approval.agent_name,
+        title: approval.purpose || approval.action,
+      })),
+  );
 
   async function refresh(): Promise<void> {
     try {
@@ -138,10 +159,10 @@
     }
   }
 
-  async function simulate(forced = false): Promise<void> {
+  async function simulate(): Promise<void> {
     busy = true;
     try {
-      await emitPush(forced);
+      await emitPush();
       await refresh();
     } catch (err) {
       error = err instanceof Error ? err.message : "The event was not accepted.";
@@ -150,7 +171,23 @@
     }
   }
 
+  // Inside Tauri the main window has no decision capability. A decision here
+  // only brings up the card window, which signs it over IPC.
+  const decidesElsewhere = tauriWindowLabel() !== null;
+
+  async function showCardWindow(): Promise<boolean> {
+    try {
+      await openCardWindow();
+    } catch (err) {
+      error = err instanceof Error ? err.message : "The card window did not open.";
+    }
+    return false;
+  }
+
   async function ondecide(id: string, decision: Decision, reason?: string): Promise<boolean> {
+    if (decidesElsewhere) {
+      return showCardWindow();
+    }
     deciding = true;
     try {
       await decide(id, decision, reason);
@@ -165,6 +202,9 @@
   }
 
   async function onundo(id: string): Promise<boolean> {
+    if (decidesElsewhere) {
+      return showCardWindow();
+    }
     deciding = true;
     try {
       await undo(id);
@@ -176,27 +216,6 @@
     } finally {
       deciding = false;
     }
-  }
-
-  function onWindowKey(event: KeyboardEvent): void {
-    if (event.repeat || isTextEntry(event.target)) {
-      return;
-    }
-    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
-      return;
-    }
-    if (event.key !== "z" && event.key !== "Z") {
-      return;
-    }
-    const target = undoable;
-    if (!target || target.undo_until == null || target.undo_until <= Date.now()) {
-      return;
-    }
-    event.preventDefault();
-    if (stream.some((row) => row.receipt?.id === target.id)) {
-      return;
-    }
-    void onundo(target.id);
   }
 
   function prefersReducedMotion(): boolean {
@@ -357,8 +376,6 @@
   });
 </script>
 
-<svelte:window onkeydown={onWindowKey} />
-
 {#snippet approvalSlot(approval: Approval)}
   <div class={["slot", approval.status === "pending" && "over"]} {@attach flipSlot}>
     {#key approval.id}
@@ -373,64 +390,25 @@
   </div>
 {/snippet}
 
-<div class="well" style:--flat-radius={FLAT_RADIUS}>
-  <div class="shell">
-    <header class="titlebar">
-      <div class="wordmark">
-        <span class="dots" aria-hidden="true"></span>
-        <strong>dasdevbot</strong>
-      </div>
-      <p class="status">
-        {#if snapshot}
-          {snapshot.role} · protocol {snapshot.protocol} · {snapshot.provider_detail} · sync {snapshot.sync}
-        {:else}
-          connecting
-        {/if}
-      </p>
-    </header>
+<Shell
+  agents={rosterAgents}
+  project={reviewer?.project ?? "DasVR/NIL"}
+  phase={PHASE}
+  reviewer={reviewerChrome}
+  pending={openReviews}
+  {busy}
+  stage={shell.stage}
+  capture={shell.capture}
+  onSimulate={shell.stage ? undefined : () => void simulate()}
+>
+  {#if shell.stage && snapshot == null}
+    <StageThread />
+  {:else}
+  {#if error && !shell.stage}
+    <p class="banner" role="alert">{error}</p>
+  {/if}
 
-    {#if error}
-      <p class="banner" role="alert">{error}</p>
-    {/if}
-
-    <div class="body">
-      <aside>
-        <p class="section">Agents</p>
-        {#if reviewer}
-          <div class="agent" data-status={reviewer.status}>
-            <div class="agent-row">
-              <h2>{reviewer.name}</h2>
-              {#if reviewer.status === "working"}
-                <span class="agent-status">{reviewer.status}</span>
-              {:else if filingUndo && filingSeconds > 0}
-                <span class="agent-status">filing · undo {filingSeconds}s</span>
-              {:else if reviewer.status === "blocked" && !filingUndo}
-                <span class="agent-status need">
-                  <span class="need-dot" aria-hidden="true"></span>
-                  {reviewer.status}
-                </span>
-              {/if}
-            </div>
-            <p class="project">{reviewer.project}</p>
-            <p class="budget">{reviewer.tokens_spent} / {reviewer.token_cap} tok</p>
-            <p class="persona">{reviewer.persona.trim()}</p>
-          </div>
-        {:else}
-          <p class="muted">No agents stored.</p>
-        {/if}
-
-        <div class="sim-row">
-          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(false)}>
-            {busy ? "Waking Reviewer" : "Simulate repo.push"}
-          </button>
-          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(true)}>
-            {busy ? "Waking Reviewer" : "Simulate force push"}
-          </button>
-        </div>
-        <p class="hint">Reviewer is a stored row. It runs only when this event wakes it.</p>
-      </aside>
-
-      <main>
+  <main style:--flat-radius={FLAT_RADIUS}>
         <p class="section">Stream</p>
         <div class="stage" {@attach pinOverlay}>
           <ol class="stream">
@@ -480,91 +458,26 @@
           <p class="muted">No spend yet. Idle agents do not call a provider.</p>
         {/if}
 
-      </main>
-    </div>
-  </div>
+  </main>
+  {/if}
   {#if settingsOpen}
     <SecretEntry />
   {/if}
-</div>
+</Shell>
 
 <style>
-  .well {
-    min-height: 100%;
-    padding: var(--s-5);
-    background: var(--paper-base);
-  }
-
-  .shell {
-    max-width: 1120px;
-    margin: 0 auto;
-    background: var(--paper-raised);
-    border: 1px solid var(--hairline);
-    border-radius: var(--flat-radius);
-    overflow: hidden;
-  }
-
-  .titlebar {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--s-4);
-    align-items: center;
-    padding: var(--s-3) var(--s-4);
-    border-bottom: 1px solid var(--hairline);
-  }
-
-  .wordmark {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
-    font-weight: var(--w-semibold);
-    letter-spacing: var(--track-tight);
-  }
-
-  .dots {
-    width: 42px;
-    height: 10px;
-    background:
-      radial-gradient(circle at 5px 5px, var(--ink-3) 4px, transparent 4.5px),
-      radial-gradient(circle at 21px 5px, var(--ink-3) 4px, transparent 4.5px),
-      radial-gradient(circle at 37px 5px, var(--ink-3) 4px, transparent 4.5px);
-  }
-
-  .status,
-  .budget,
-  .ledger,
-  .project {
-    font-family: var(--font-machine);
-  }
-
-  .status {
-    color: var(--ink-2);
-    font-size: var(--t-micro);
-    text-align: right;
-  }
-
   .banner {
-    margin: var(--s-3) var(--s-4) 0;
+    margin: 0 0 var(--s-3);
     padding: var(--s-2) var(--s-3);
     border-radius: var(--r-sm);
     color: var(--ink-1);
     background: var(--paper-sunken);
   }
 
-  .body {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    min-height: 640px;
-  }
-
-  aside {
-    padding: var(--s-4);
-    border-right: 1px solid var(--hairline);
-  }
-
   main {
     padding: var(--s-4);
-    background: var(--paper-base);
+    padding-bottom: 96px;
+    background: transparent;
   }
 
   .section {
@@ -573,101 +486,6 @@
     line-height: var(--lh-meta);
     font-weight: var(--w-semibold);
     margin-bottom: var(--s-3);
-  }
-
-  .agent {
-    position: relative;
-    overflow: hidden;
-    padding: var(--s-3);
-    border: 1px solid var(--hairline);
-    border-radius: var(--flat-radius);
-    background: var(--paper-raised);
-  }
-
-  .agent-row {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--s-2);
-    align-items: baseline;
-  }
-
-  h2 {
-    font-size: var(--t-lead);
-    line-height: var(--lh-lead);
-    font-weight: var(--w-semibold);
-    letter-spacing: var(--track-tight);
-  }
-
-  .project,
-  .budget,
-  .hint,
-  .muted,
-  .persona {
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-  }
-
-  .agent-status {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s-2);
-    color: var(--ink-3);
-    font-size: var(--t-meta);
-  }
-
-  .need-dot {
-    width: 7px;
-    height: 7px;
-    flex: none;
-    border-radius: var(--r-pill);
-    background: var(--risk-external);
-  }
-
-  .persona {
-    margin-top: var(--s-2);
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .budget {
-    margin-top: var(--s-2);
-    color: var(--ink-1);
-  }
-
-  .sim-row {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s-2);
-    margin-top: var(--s-4);
-  }
-
-  .simulate {
-    width: 100%;
-    height: 40px;
-    border-radius: var(--r-md);
-    border: 1.5px solid var(--ink-1);
-    background: var(--paper-raised);
-    color: var(--ink-1);
-    font-size: var(--t-meta);
-    font-weight: var(--w-semibold);
-    cursor: pointer;
-  }
-
-  .simulate:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .simulate:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-
-  .hint {
-    margin-top: var(--s-2);
   }
 
   .stage {
@@ -689,6 +507,7 @@
     border-radius: var(--flat-radius);
     background: none;
     box-shadow: none;
+    min-width: 0;
   }
 
   .row {
@@ -744,6 +563,9 @@
     color: var(--ink-1);
     font-size: var(--t-body);
     line-height: var(--lh-body);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .detail {
@@ -752,7 +574,9 @@
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
     color: var(--ink-3);
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* Filed receipt sits in the row's copy column. Same tracks as .row, without a hairline rule. */
@@ -769,6 +593,17 @@
   .slot-row .slot {
     grid-column: 3;
     margin-top: 0;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .slot-row .slot :global(article.card) {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  :global(.win[data-shell-form="companion"]) main {
+    padding: 0;
   }
 
   .slot {
@@ -781,7 +616,7 @@
     z-index: 4;
     left: var(--overlay-left, 0px);
     width: var(--overlay-width, 100%);
-    bottom: 16px;
+    bottom: calc(var(--composer-block, 0px) + 16px);
     display: flex;
     justify-content: center;
     margin-top: 0;
@@ -841,6 +676,11 @@
   .muted {
     margin-top: var(--s-2);
     color: var(--ink-2);
+    font-size: var(--t-meta);
+  }
+
+  .ledger {
+    font-family: var(--font-machine);
   }
 
   .ledger-head {
@@ -862,29 +702,5 @@
     display: block;
     color: var(--ink-2);
     font-size: var(--t-micro);
-  }
-
-  @media (max-width: 860px) {
-    .well {
-      padding: var(--s-2);
-    }
-
-    .body {
-      grid-template-columns: 1fr;
-    }
-
-    aside {
-      border-right: 0;
-      border-bottom: 1px solid var(--hairline);
-    }
-
-    .titlebar {
-      flex-direction: column;
-      align-items: flex-start;
-    }
-
-    .status {
-      text-align: left;
-    }
   }
 </style>

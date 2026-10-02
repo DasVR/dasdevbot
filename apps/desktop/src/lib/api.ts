@@ -188,12 +188,12 @@ export function clampHoldMs(ms: number): number {
   return Math.min(HOLD_MS_MAX, Math.max(HOLD_MS_MIN, Math.round(ms)));
 }
 
-export function holdDurationMs(effect: EffectClass | null, setting?: number): number {
-  const base = setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
-  if (effect === "destructive") {
-    return clampHoldMs(Math.max(base, tokenMs("--dur-hold-destructive", HOLD_MS_MAX)));
-  }
-  return base;
+/**
+ * Every hold is --dur-hold. Destructive has no hold at all: it is denied by
+ * policy and renders only as the flat ink row (C1), so there is no 1200ms path.
+ */
+export function holdDurationMs(_effect: EffectClass | null, setting?: number): number {
+  return setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
 }
 
 export function formatUsd(micro: number): string {
@@ -270,10 +270,6 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return target.closest(".composer") !== null;
 }
 
-type TauriInternals = {
-  invoke?: (cmd: string) => Promise<unknown>;
-};
-
 function shellToken(): string {
   const shell = globalThis as typeof globalThis & { __DASDEVBOT_TOKEN?: unknown };
   const value = shell.__DASDEVBOT_TOKEN;
@@ -324,7 +320,25 @@ async function jsonHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
+/** The Tauri window this page runs in, or null in a plain browser. */
+export function tauriWindowLabel(): string | null {
+  const host = globalThis as typeof globalThis & {
+    __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
+  };
+  return host.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? null;
+}
+
+/** Show the card window. Only the card window can sign or undo a decision. */
+export async function openCardWindow(): Promise<void> {
+  await tauriInvoke()("open_card_window");
+}
+
 export async function getSnapshot(): Promise<Snapshot> {
+  // A bundled webview is on the Tauri origin and the daemon sends no CORS
+  // headers, so the shell reads the snapshot over loopback for it.
+  if (tauriInternals()) {
+    return (await tauriInvoke()("daemon_snapshot")) as Snapshot;
+  }
   const response = await fetch("/v1/snapshot");
   if (!response.ok) {
     throw new Error(await readError(response));
@@ -332,8 +346,12 @@ export async function getSnapshot(): Promise<Snapshot> {
   return (await response.json()) as Snapshot;
 }
 
-/** Demo `repo.push`. `forced` asks for a destructive force-push instead of a PR comment. */
-export async function emitPush(forced = false): Promise<void> {
+/** Demo `repo.push`. The demo never asks for a destructive force-push. */
+export async function emitPush(): Promise<void> {
+  if (tauriInternals()) {
+    await tauriInvoke()("daemon_emit_demo", { forced: false });
+    return;
+  }
   const response = await fetch("/v1/events", {
     method: "POST",
     headers: await jsonHeaders(),
@@ -345,7 +363,7 @@ export async function emitPush(forced = false): Promise<void> {
         ref: "phase0",
         subject: "simulated push",
         note: "phase 0 attaches no diff",
-        forced,
+        forced: false,
       },
       idempotency_key: `ui-${crypto.randomUUID()}`,
     }),
@@ -356,10 +374,10 @@ export async function emitPush(forced = false): Promise<void> {
 }
 
 type TauriInternals = {
-  invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+  invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 };
 
-function tauriInvoke(): TauriInternals["invoke"] {
+function tauriInvoke(): NonNullable<TauriInternals["invoke"]> {
   const internals = (globalThis as { __TAURI_INTERNALS__?: TauriInternals }).__TAURI_INTERNALS__;
   if (!internals?.invoke) {
     throw new Error("approval decisions are Tauri IPC only");

@@ -43,6 +43,8 @@
   const ICON_STROKE = "1.5";
   /** Pen marks. Same weight as --pen-width. Not a new token. */
   const PEN_STROKE = "1.75px";
+  /** Action area and evidence must be fully in the viewport before the dwell can start. */
+  const ACTION_SEEN_RATIO = 0.99;
 
   interface Props {
     approval: Approval;
@@ -90,6 +92,12 @@
   let holdFrame = 0;
   let morphTimer = 0;
   let holdSealed = false;
+  let actionsEl: HTMLElement | null = null;
+  let actionsFull = false;
+  let evidenceVisible = false;
+  let seenTimer = 0;
+  let dwelling = false;
+  let sightCut = false;
 
   const locked = $derived(busy || committing !== null);
   const duration = $derived(holdDurationMs(effect, holdMs));
@@ -174,30 +182,143 @@
     };
   }
 
-  function watchSeen(evidence: HTMLElement): () => void {
-    const card = evidence.closest("article");
-    if (!card) {
-      return () => {};
+  function ancestorBlocksSight(card: HTMLElement): boolean {
+    if (card.closest("[inert]")) {
+      return true;
     }
-    let cardFull = false;
-    let evidenceVisible = false;
-    let timer = 0;
-    const sync = () => {
-      window.clearTimeout(timer);
-      if (cardFull && evidenceVisible) {
-        timer = window.setTimeout(() => {
-          seenArmed = true;
-        }, SEEN_LOCK_MS);
+    let opacity = 1;
+    let node: HTMLElement | null = card;
+    while (node) {
+      const style = getComputedStyle(node);
+      if (style.visibility === "hidden" || style.display === "none") {
+        return true;
+      }
+      const value = Number.parseFloat(style.opacity);
+      if (Number.isFinite(value)) {
+        opacity *= value;
+      }
+      node = node.parentElement;
+    }
+    return opacity <= 0;
+  }
+
+  function actionCovered(actions: HTMLElement, card: HTMLElement): boolean {
+    const box = actions.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) {
+      return true;
+    }
+    if (box.bottom <= 0 || box.right <= 0 || box.top >= window.innerHeight || box.left >= window.innerWidth) {
+      return true;
+    }
+    const x = box.left + box.width / 2;
+    const y = box.top + box.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return !(hit instanceof Node && card.contains(hit));
+  }
+
+  function undoSight(card: HTMLElement): boolean {
+    if (document.visibilityState !== "visible" || sightCut) {
+      return false;
+    }
+    const win = card.closest(".win");
+    if (win instanceof HTMLElement) {
+      const form = win.dataset.shellForm;
+      if (form === "pill" || form === "companion") {
+        return false;
+      }
+    }
+    if (ancestorBlocksSight(card)) {
+      return false;
+    }
+    const box = card.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) {
+      return false;
+    }
+    if (box.bottom <= 0 || box.right <= 0 || box.top >= window.innerHeight || box.left >= window.innerWidth) {
+      return false;
+    }
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return hit instanceof Node && card.contains(hit);
+  }
+
+  function cardCanBeSeen(card: HTMLElement): boolean {
+    if (document.visibilityState !== "visible" || sightCut) {
+      return false;
+    }
+    if (!actionsFull || !evidenceVisible) {
+      return false;
+    }
+    const win = card.closest(".win");
+    if (win instanceof HTMLElement) {
+      const form = win.dataset.shellForm;
+      if (form === "pill" || form === "companion") {
+        return false;
+      }
+    }
+    if (ancestorBlocksSight(card)) {
+      return false;
+    }
+    if (actionsEl != null && actionCovered(actionsEl, card)) {
+      return false;
+    }
+    return true;
+  }
+
+  function loseSight(): void {
+    window.clearTimeout(seenTimer);
+    seenTimer = 0;
+    dwelling = false;
+    seenArmed = false;
+    cancelAnimationFrame(holdFrame);
+    if (!holdSealed) {
+      holdKind = null;
+      checkOffset = 1;
+      strike = 0;
+    }
+    const active = document.activeElement;
+    if (cardEl != null && active instanceof HTMLElement && cardEl.contains(active)) {
+      active.blur();
+    }
+  }
+
+  function syncSight(): void {
+    if (!pending || cardEl == null) {
+      return;
+    }
+    if (!cardCanBeSeen(cardEl)) {
+      loseSight();
+      return;
+    }
+    if (seenArmed || dwelling) {
+      return;
+    }
+    dwelling = true;
+    seenTimer = window.setTimeout(() => {
+      dwelling = false;
+      if (cardEl != null && cardCanBeSeen(cardEl)) {
+        seenArmed = true;
       } else {
         seenArmed = false;
       }
+    }, SEEN_LOCK_MS);
+  }
+
+  function watchSeen(evidence: HTMLElement): () => void {
+    const card = evidence.closest("article");
+    const actions = card?.querySelector(".actions");
+    if (!(card instanceof HTMLElement) || !(actions instanceof HTMLElement)) {
+      return () => {};
+    }
+    actionsEl = actions;
+    const sync = () => {
+      syncSight();
     };
     const observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          const full = entry.intersectionRatio >= 0.99;
-          if (entry.target === card) {
-            cardFull = full;
+          const full = entry.intersectionRatio >= ACTION_SEEN_RATIO;
+          if (entry.target === actions) {
+            actionsFull = full;
           }
           if (entry.target === evidence) {
             evidenceVisible = full;
@@ -205,13 +326,29 @@
         }
         sync();
       },
-      { threshold: [0, 0.99, 1] },
+      { threshold: [0, ACTION_SEEN_RATIO, 1] },
     );
-    observer.observe(card);
+    observer.observe(actions);
     observer.observe(evidence);
+    const hideWatch = new MutationObserver(sync);
+    const watched = ["style", "inert", "data-shell-form"];
+    hideWatch.observe(card, { attributes: true, attributeFilter: ["style", "inert"] });
+    let parent = card.parentElement;
+    while (parent) {
+      hideWatch.observe(parent, { attributes: true, attributeFilter: watched });
+      parent = parent.parentElement;
+    }
     return () => {
-      window.clearTimeout(timer);
+      window.clearTimeout(seenTimer);
+      seenTimer = 0;
+      dwelling = false;
       observer.disconnect();
+      hideWatch.disconnect();
+      if (actionsEl === actions) {
+        actionsEl = null;
+      }
+      actionsFull = false;
+      evidenceVisible = false;
       seenArmed = false;
     };
   }
@@ -255,6 +392,21 @@
 
   function syncFocus(): void {
     cardFocused = document.activeElement === cardEl;
+    syncSight();
+  }
+
+  function onWindowBlur(): void {
+    sightCut = true;
+    syncSight();
+  }
+
+  function onWindowFocus(): void {
+    sightCut = false;
+    syncSight();
+  }
+
+  function onVisibilityChange(): void {
+    syncSight();
   }
 
   function wait(ms: number): Promise<void> {
@@ -408,7 +560,18 @@
     return ondecide(decision, note);
   }
 
+  function decisionAllowed(): boolean {
+    return seenArmed && cardEl != null && document.visibilityState === "visible" && cardCanBeSeen(cardEl);
+  }
+
   async function settleDecision(decision: Decision, note?: string): Promise<void> {
+    if (!decisionAllowed()) {
+      loseSight();
+      committing = null;
+      checkOffset = 1;
+      strike = 0;
+      return;
+    }
     lockHeight();
     const ok = await runDecide(decision, note);
     if (!ok) {
@@ -425,7 +588,7 @@
   }
 
   async function onApproveClick(): Promise<void> {
-    if (locked || denyOpen || !pending) {
+    if (locked || denyOpen || !pending || !decisionAllowed()) {
       return;
     }
     committing = "approve";
@@ -447,7 +610,7 @@
   }
 
   async function confirmDeny(): Promise<void> {
-    if (locked || !pending) {
+    if (locked || !pending || !decisionAllowed()) {
       return;
     }
     committing = "deny";
@@ -515,6 +678,10 @@
   }
 
   function finishHold(kind: HoldKind): void {
+    if (document.activeElement !== cardEl || !decisionAllowed()) {
+      loseSight();
+      return;
+    }
     holdKind = null;
     holdSealed = true;
     if (kind === "approve") {
@@ -528,7 +695,7 @@
   }
 
   function startHold(kind: HoldKind): void {
-    if (locked || denyOpen || !pending || !seenArmed || document.activeElement !== cardEl) {
+    if (locked || denyOpen || !pending || document.activeElement !== cardEl || !decisionAllowed()) {
       return;
     }
     cancelAnimationFrame(holdFrame);
@@ -538,6 +705,10 @@
     const start = performance.now();
     const step = (now: number) => {
       if (holdKind !== kind) {
+        return;
+      }
+      if (document.activeElement !== cardEl || !decisionAllowed()) {
+        loseSight();
         return;
       }
       const progress = Math.min(1, (now - start) / ms);
@@ -560,7 +731,7 @@
       return;
     }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && (event.key === "z" || event.key === "Z")) {
-      if (showUndo) {
+      if (showUndo && cardEl != null && document.activeElement === cardEl && undoSight(cardEl)) {
         event.preventDefault();
         void onUndoClick();
       }
@@ -568,14 +739,19 @@
     }
     if (event.altKey && !event.metaKey && !event.ctrlKey && event.key === "ArrowDown" && shortcutTarget && pending) {
       event.preventDefault();
-      cardEl?.focus();
+      if (cardEl == null || !cardCanBeSeen(cardEl)) {
+        return;
+      }
+      cardEl.focus();
+    }
+  }
+
+  function onCardKeydown(event: KeyboardEvent): void {
+    if (event.repeat || isTextEntry(event.target) || document.activeElement !== cardEl) {
       return;
     }
-    const chord = event.metaKey || event.ctrlKey;
-    if (!chord || event.altKey || !pending || denyOpen || locked) {
-      return;
-    }
-    if (document.activeElement !== cardEl || !seenArmed) {
+    const chord = (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+    if (!chord || !pending || denyOpen || locked) {
       return;
     }
     if (event.key === "Enter") {
@@ -601,16 +777,13 @@
   }
 
   function onApproveKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Enter" && event.key !== " ") {
-      return;
-    }
-    if (!seenArmed || locked) {
+    if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
     }
   }
 
   async function onUndoClick(): Promise<void> {
-    if (!onundo || !showUndo) {
+    if (!onundo || !showUndo || cardEl == null || !undoSight(cardEl)) {
       return;
     }
     lockHeight();
@@ -632,9 +805,15 @@
   }
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} onkeyup={onWindowKeyup} />
+<svelte:window
+  onkeydown={onWindowKeydown}
+  onkeyup={onWindowKeyup}
+  onblur={onWindowBlur}
+  onfocus={onWindowFocus}
+/>
+<svelte:document onvisibilitychange={onVisibilityChange} />
 
-<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <article
   {@attach bindCard}
   class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
@@ -646,16 +825,21 @@
   style:--icon-stroke={ICON_STROKE}
   style:--pen-stroke={PEN_STROKE}
   data-risk={risk}
-  tabindex={pending ? 0 : undefined}
+  tabindex={pending || showUndo ? 0 : undefined}
   aria-labelledby={pending ? titleId : undefined}
   aria-label={pending ? undefined : word}
   aria-keyshortcuts={pending ? "Control+Enter Control+Backspace" : undefined}
+  onkeydown={onCardKeydown}
   onfocusin={syncFocus}
   onfocusout={() => {
     queueMicrotask(() => {
       syncFocus();
       if (document.activeElement !== cardEl) {
-        cancelHold();
+        if (cardEl == null || !cardCanBeSeen(cardEl)) {
+          loseSight();
+        } else {
+          cancelHold();
+        }
       }
     });
   }}
@@ -1392,6 +1576,8 @@
     align-items: center;
     gap: 12px;
     min-height: 0;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .mark {
@@ -1407,6 +1593,10 @@
 
   .line {
     font-weight: var(--w-regular);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .what b {
@@ -1429,6 +1619,9 @@
     color: var(--ink-3);
     font-size: var(--t-meta);
     line-height: var(--lh-meta);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .stamp {

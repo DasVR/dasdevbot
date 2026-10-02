@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-card-window"
+description = "Show and focus the card window. Deciding stays in the card window."
+commands.allow = ["open_card_window"]
