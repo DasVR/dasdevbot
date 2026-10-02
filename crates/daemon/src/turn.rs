@@ -811,9 +811,14 @@ fn prepare(
         evidence_ref: reference.to_string(),
         evidence_event_id: event_id.to_string(),
         evidence_kind: kind_name.to_string(),
-        purpose: format!(
-            "Post a review comment on {repo} at {reference}. Nothing is sent until you approve, and phase 0 does not send it at all."
-        ),
+        purpose: match class {
+            EffectClass::WriteLocal => format!(
+                "Edit the local workspace for {repo} at {reference}. Nothing is written until you approve, and phase 0 does not write it at all."
+            ),
+            _ => format!(
+                "Post a review comment on {repo} at {reference}. Nothing is sent until you approve, and phase 0 does not send it at all."
+            ),
+        },
         thread_id,
         tainted,
         class,

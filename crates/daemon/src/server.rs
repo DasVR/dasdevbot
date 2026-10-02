@@ -829,6 +829,271 @@ mod tests {
         assert_eq!(after["approvals"][0]["effect_class"], "destructive");
     }
 
+    /// A demo daemon (`serve --provider mock` on the executor role, which
+    /// runs turns) behind real HTTP.
+    fn demo_daemon(data: std::path::PathBuf) -> (Arc<App>, String) {
+        let (app, rx) = crate::build_app(
+            Config {
+                data,
+                web_root: None,
+                role: "executor".into(),
+                token: Some(STRONG_TOKEN.into()),
+            },
+            Box::new(MockProvider::new()),
+        )
+        .unwrap();
+        spawn_worker(Arc::clone(&app), rx);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_string();
+        let served = Arc::clone(&app);
+        std::thread::spawn(move || serve_incoming(served, server));
+        (app, addr)
+    }
+
+    fn emit(agent: &ureq::Agent, addr: &str, kind: &str, key: &str, payload: serde_json::Value) {
+        let emitted = agent
+            .post(&format!("http://{addr}/v1/events"))
+            .set("Authorization", &format!("Bearer {STRONG_TOKEN}"))
+            .send_json(json!({
+                "source": "demo",
+                "kind": kind,
+                "payload": payload,
+                "idempotency_key": key,
+            }))
+            .unwrap()
+            .into_json::<EmitResponse>()
+            .unwrap();
+        assert!(emitted.created, "{kind}");
+        assert_eq!(emitted.jobs.len(), 1, "{kind} was not routed");
+    }
+
+    fn wait_approvals(agent: &ureq::Agent, addr: &str, count: usize) -> Vec<serde_json::Value> {
+        let start = Instant::now();
+        loop {
+            let snap: serde_json::Value = agent
+                .get(&format!("http://{addr}/v1/snapshot"))
+                .call()
+                .unwrap()
+                .into_json()
+                .unwrap();
+            let rows = snap["approvals"].as_array().cloned().unwrap_or_default();
+            if rows.len() >= count {
+                return rows;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("expected {count} approvals: {snap}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn card_for<'a>(rows: &'a [serde_json::Value], kind: &str) -> &'a serde_json::Value {
+        rows.iter()
+            .find(|row| row["evidence"]["kind"] == kind)
+            .unwrap_or_else(|| panic!("no card for {kind}"))
+    }
+
+    #[test]
+    fn the_demo_route_cannot_change_a_tier_or_lift_a_deny() {
+        let dir = std::env::temp_dir().join(format!("dasdevbot-tier-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let (app, addr) = demo_daemon(dir.join("db.sqlite"));
+        {
+            // A route row names a kind and an agent. It has no tier to set.
+            let store = app.store.lock().unwrap();
+            let mut stmt = store
+                .connection()
+                .prepare("SELECT name FROM pragma_table_info('rules') ORDER BY cid")
+                .unwrap();
+            let columns: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect();
+            assert_eq!(columns, ["id", "kind", "agent_id"]);
+            assert_eq!(
+                store.rules_for_kind("workspace.write").unwrap(),
+                ["reviewer"]
+            );
+        }
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        // Every payload claims a different tier. None of them is believed.
+        let claims = json!({
+            "repo": "DasVR/NIL",
+            "ref": "phase0",
+            "effect_class": "write_local",
+            "tier": "internal",
+            "action": "edit",
+        });
+        emit(&agent, &addr, "repo.push", "tier-push", claims.clone());
+        emit(&agent, &addr, "repo.force_push", "tier-force", claims);
+        emit(
+            &agent,
+            &addr,
+            "workspace.write",
+            "tier-write",
+            json!({
+                "repo": "DasVR/NIL",
+                "ref": "phase0",
+                "effect_class": "external",
+                "tier": "destructive",
+                "action": "force_push",
+            }),
+        );
+        let rows = wait_approvals(&agent, &addr, 3);
+        let push = card_for(&rows, "repo.push");
+        assert_eq!(push["effect_class"], "external");
+        assert_eq!(push["action"], "post_pr_comment");
+        assert_eq!(push["status"], "denied");
+        let force = card_for(&rows, "repo.force_push");
+        assert_eq!(force["effect_class"], "destructive");
+        assert_eq!(force["action"], "force_push");
+        assert_eq!(force["status"], "denied");
+        let write = card_for(&rows, "workspace.write");
+        assert_eq!(write["effect_class"], "write_local");
+        assert_eq!(write["action"], "edit");
+        assert_eq!(write["status"], "pending");
+        assert!(write["purpose"]
+            .as_str()
+            .unwrap()
+            .starts_with("Edit the local workspace"));
+    }
+
+    /// Every file under `root` outside `data_dir`, with its size and mtime.
+    fn files_outside(
+        root: &std::path::Path,
+        data_dir: &std::path::Path,
+    ) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
+        let mut out = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.starts_with(data_dir) {
+                    continue;
+                }
+                let meta = fs::metadata(&path).unwrap();
+                if meta.is_dir() {
+                    pending.push(path.clone());
+                }
+                out.push((path, meta.len(), meta.modified().unwrap()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn approving_a_demo_workspace_write_card_over_ipc_writes_nothing_outside_data() {
+        use crate::secrets::{MemorySecrets, APPROVAL_KEY_NAME};
+        use crate::shell_ipc::{handle_line, Peer};
+        use crate::verify_user::TestVerifier;
+
+        let root = std::env::temp_dir().join(format!("dasdevbot-demo-{}", uuid::Uuid::new_v4()));
+        let data_dir = root.join("data");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("README.md"), "untouched\n").unwrap();
+        let before = files_outside(&root, &data_dir);
+
+        let (app, addr) = demo_daemon(data_dir.join("db.sqlite"));
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(2))
+            .build();
+        let _ = wait_ok(&agent, &format!("http://{addr}/v1/health"));
+        emit(
+            &agent,
+            &addr,
+            "workspace.write",
+            "demo-write-1",
+            json!({
+                "repo": "DasVR/NIL",
+                "ref": "phase0",
+                "path": workspace.join("README.md").display().to_string(),
+            }),
+        );
+        let rows = wait_approvals(&agent, &addr, 1);
+        let card = card_for(&rows, "workspace.write");
+        assert_eq!(card["status"], "pending");
+        assert_eq!(card["effect_class"], "write_local");
+        let id = card["id"].as_str().unwrap().to_string();
+
+        // HTTP decide and undo stay a fixed 403.
+        let decided = agent
+            .post(&format!("http://{addr}/v1/approvals/{id}/decision"))
+            .set("Authorization", &format!("Bearer {STRONG_TOKEN}"))
+            .send_json(json!({"decision": "approve"}))
+            .unwrap_err();
+        assert_ipc_only(decided);
+        let undone = agent
+            .post(&format!("http://{addr}/v1/approvals/{id}/undo"))
+            .set("Authorization", &format!("Bearer {STRONG_TOKEN}"))
+            .send_json(json!({}))
+            .unwrap_err();
+        assert_ipc_only(undone);
+
+        let keys = MemorySecrets::new();
+        keys.insert(
+            APPROVAL_KEY_NAME,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+        let decide = |secret: &str, allow: bool| {
+            handle_line(
+                &app,
+                &TestVerifier { allow },
+                &keys,
+                Peer { is_self: true },
+                &json!({
+                    "op": "decide",
+                    "token": app.token,
+                    "approval_id": id,
+                    "decision": "approve",
+                    "window_secret": secret,
+                })
+                .to_string(),
+            )
+        };
+        let status = || app.store.lock().unwrap().approval_status(&id).unwrap();
+
+        // Only the card window may decide, and only after Hello.
+        let main = decide(&app.window_secrets.main, true);
+        assert!(main.contains("\"ok\":false"), "{main}");
+        assert_eq!(status(), "pending");
+        let refused = decide(&app.window_secrets.card, false);
+        assert!(refused.contains("user verification"), "{refused}");
+        assert_eq!(status(), "pending");
+        let approved = decide(&app.window_secrets.card, true);
+        assert!(approved.contains("\"ok\":true"), "{approved}");
+        assert_eq!(status(), "approved");
+
+        // Commit runs perform_commit_effect, which stays a no-op.
+        let committed = app.store.lock().unwrap().commit_due(u64::MAX / 4).unwrap();
+        assert_eq!(committed, vec![id.clone()]);
+        let payload: String = app
+            .store
+            .lock()
+            .unwrap()
+            .connection()
+            .query_row(
+                "SELECT payload FROM events WHERE kind = 'approval.committed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(body["executed"], false);
+
+        assert_eq!(files_outside(&root, &data_dir), before);
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).unwrap(),
+            "untouched\n"
+        );
+    }
+
     #[test]
     fn a_bearer_in_the_query_string_is_rejected_without_echoing_it() {
         assert!(url_exposes_bearer("/v1/health?token=abc", "not-the-query"));
