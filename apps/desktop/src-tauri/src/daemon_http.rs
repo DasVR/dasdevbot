@@ -14,6 +14,7 @@ const DAEMON: &str = "http://127.0.0.1:8787";
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
+        .timeout_connect(Duration::from_millis(500))
         .timeout(Duration::from_secs(5))
         .build()
 }
@@ -41,8 +42,25 @@ pub(crate) fn demo_kind(forced: bool) -> &'static str {
     }
 }
 
+/// Run blocking loopback work off the main thread. A sync `#[tauri::command]`
+/// runs on the main (UI) thread in Tauri 2, so a slow daemon froze every
+/// window for up to the HTTP timeout.
+pub(crate) async fn off_main<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|err| err.to_string())?
+}
+
 #[tauri::command]
-pub(crate) fn daemon_snapshot() -> Result<serde_json::Value, String> {
+pub(crate) async fn daemon_snapshot() -> Result<serde_json::Value, String> {
+    off_main(snapshot_blocking).await
+}
+
+fn snapshot_blocking() -> Result<serde_json::Value, String> {
     let response = agent()
         .get(&format!("{DAEMON}/v1/snapshot"))
         .call()
@@ -51,7 +69,11 @@ pub(crate) fn daemon_snapshot() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub(crate) fn daemon_emit_demo(forced: bool) -> Result<(), String> {
+pub(crate) async fn daemon_emit_demo(forced: bool) -> Result<(), String> {
+    off_main(move || emit_blocking(forced)).await
+}
+
+fn emit_blocking(forced: bool) -> Result<(), String> {
     let token = crate::read_session_token()?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

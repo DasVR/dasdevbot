@@ -377,10 +377,19 @@
     };
   }
 
+  // Ticks only while the undo window is open. A filed receipt used to keep a
+  // 200ms interval forever, one per receipt, so the cost grew with every card.
   function tickUndo(): () => void {
     nowMs = Date.now();
+    const until = approval.undo_until;
+    if (until == null || approval.committed || until <= nowMs) {
+      return () => {};
+    }
     const timer = window.setInterval(() => {
       nowMs = Date.now();
+      if (nowMs >= until) {
+        window.clearInterval(timer);
+      }
     }, 200);
     return () => window.clearInterval(timer);
   }
@@ -1067,8 +1076,10 @@
 
   .card.paper {
     background: var(--convex), var(--paper-raised);
-    -webkit-backdrop-filter: blur(0px) saturate(100%);
-    backdrop-filter: blur(0px) saturate(100%);
+    /* none, not blur(0px): any other value gives every filed receipt its own
+       backdrop-filter surface, and the stream keeps all of them. */
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     border-radius: var(--r-md);
     border: 1px solid var(--hairline);
     box-shadow: var(--highlight-top), var(--shadow-puff);

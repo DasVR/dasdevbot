@@ -5,6 +5,7 @@
   import { onMount } from "svelte";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
   import { decide, getSnapshot, undo, type Approval, type Decision } from "./lib/api";
+  import { startPolling } from "./lib/poll";
 
   let approvals = $state<Approval[]>([]);
   let error = $state<string | null>(null);
@@ -62,14 +63,13 @@
   }
 
   onMount(() => {
-    void refresh();
+    const stopPolling = startPolling(refresh, 1000);
     const clock = setInterval(() => {
       now = Date.now();
     }, 200);
-    const timer = setInterval(() => void refresh(), 1000);
     return () => {
       clearInterval(clock);
-      clearInterval(timer);
+      stopPolling();
     };
   });
 </script>
