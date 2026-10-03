@@ -7,6 +7,7 @@
   import SecretEntry from "./lib/SecretEntry.svelte";
   import { tokenEase, tokenMs } from "./lib/cssTokens";
   import { QUIET_LINE_PATH } from "./lib/pen";
+  import { startPolling } from "./lib/poll";
   import { shellSearch } from "./lib/shell/geometry";
   import type { ReviewerChrome } from "./lib/shell/roster";
   import Shell from "./lib/shell/Shell.svelte";
@@ -43,6 +44,7 @@
   let primed = $state(false);
   let now = $state(Date.now());
 
+  const STREAM_ROWS = 40;
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const pending = $derived.by(() => {
     const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
@@ -66,7 +68,10 @@
   const stream = $derived.by(() => {
     const events = snapshot?.events ?? [];
     const pendingKey = pending ? `approval-requested:${pending.id}` : "";
-    return [...events].reverse().map((event) => {
+    // The daemon keeps every event. The stream renders the newest
+    // STREAM_ROWS so the DOM, and each receipt card's observers, stay bounded
+    // however long the demo runs.
+    return [...events].reverse().slice(-STREAM_ROWS).map((event) => {
       const source = event.source.trim();
       const shortId = shortEventId(event.id);
       const millis = hlcMillis(event.hlc);
@@ -361,17 +366,14 @@
     syncSettings();
     const onHash = () => syncSettings();
     globalThis.addEventListener("hashchange", onHash);
-    void refresh();
+    const stopPolling = startPolling(refresh, 1000);
     const clock = setInterval(() => {
       now = Date.now();
     }, 200);
-    const timer = setInterval(() => {
-      void refresh();
-    }, 1000);
     return () => {
       globalThis.removeEventListener("hashchange", onHash);
       clearInterval(clock);
-      clearInterval(timer);
+      stopPolling();
     };
   });
 </script>

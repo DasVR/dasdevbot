@@ -15,4 +15,10 @@ const isCard =
   tauriWindowLabel() === "card" ||
   (tauriWindowLabel() === null && new URLSearchParams(globalThis.location.search).get("window") === "card");
 
-mount(isCard ? CardWindow : App, { target });
+// The settings and voice windows are created hidden at startup and have no
+// page yet. Mounting the full App there ran a second and third poll loop,
+// shell and stream for nothing, so they stay empty.
+const idle = tauriWindowLabel() === "settings" || tauriWindowLabel() === "voice";
+if (!idle) {
+  mount(isCard ? CardWindow : App, { target });
+}
