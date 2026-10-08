@@ -175,9 +175,9 @@ async function waitForHttp(url) {
   throw new Error(`preview did not respond at ${url}`);
 }
 
-function stub({ label, snapshot, helloMs = 0, cancel = false }) {
+function stub({ label, snapshot, helloMs = 0, cancel = false, decides = false }) {
   return [
-    ({ label, snapshot, helloMs, cancel }) => {
+    ({ label, snapshot, helloMs, cancel, decides }) => {
       window.__invokes = [];
       window.__TAURI_INTERNALS__ = {
         metadata: { currentWindow: { label } },
@@ -194,14 +194,33 @@ function stub({ label, snapshot, helloMs = 0, cancel = false }) {
           }
           if (command === "sign_decision") {
             return new Promise((resolve, reject) =>
-              setTimeout(() => (cancel ? reject(new Error("Windows Hello consent was denied")) : resolve(null)), helloMs),
+              setTimeout(() => {
+                if (cancel) {
+                  reject(new Error("Windows Hello consent was denied"));
+                  return;
+                }
+                if (decides) {
+                  // The daemon's answer from here on: decided, undo window open.
+                  const at = Date.now();
+                  snapshot = {
+                    ...snapshot,
+                    approvals: snapshot.approvals.map((approval) => ({
+                      ...approval,
+                      status: "approved",
+                      decided_at: at,
+                      undo_until: at + 6000,
+                    })),
+                  };
+                }
+                resolve(null);
+              }, helloMs),
             );
           }
           return Promise.resolve(null);
         },
       };
     },
-    { label, snapshot, helloMs, cancel },
+    { label, snapshot, helloMs, cancel, decides },
   ];
 }
 
@@ -339,6 +358,59 @@ try {
   }
   await page.waitForFunction(() => !document.querySelector("article.card .quiet .hello"), null, { timeout: 3000 });
   await page.close();
+
+  // UX follow-up 1: after Hello the decided face (single check, "Approved")
+  // shows, fully, for at least FACE_FRAMES frames before the receipt replaces
+  // the card. The card video holds it for the 16-frame paperize (60fps frames
+  // 613-628) before the fold; the card used to cut straight to the receipt in
+  // the frame the decision landed (0 frames).
+  const FACE_FRAMES = 16;
+  for (const motion of ["no-preference", "reduce"]) {
+    const page = await browser.newPage({ viewport: { width: 560, height: 760 } });
+    await page.emulateMedia({ reducedMotion: motion });
+    await page.addInitScript(...stub({ label: "card", snapshot, helloMs: 300, decides: true }));
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Approve draft" }).waitFor();
+    await arm(page);
+    await page.evaluate(() => {
+      window.__faceFrames = [];
+      const sample = () => {
+        const card = document.querySelector("article.card");
+        const face = card?.querySelector("button.approve .face-done");
+        window.__faceFrames.push({
+          t: performance.now(),
+          face: face ? Number(getComputedStyle(face).opacity) : 0,
+          check: Boolean(face?.querySelector("svg")),
+          label: face?.textContent?.trim() ?? "",
+          receipt: Boolean(card?.classList.contains("receipt") || card?.querySelector(".receipt")),
+        });
+        if (window.__faceFrames.length < 600) {
+          requestAnimationFrame(sample);
+        }
+      };
+      requestAnimationFrame(sample);
+    });
+    await page.locator("article.card button.approve").focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.__faceFrames.some((frame) => frame.receipt), null, { timeout: 6000 });
+    const frames = await page.evaluate(() => window.__faceFrames);
+    const first = frames.findIndex((frame) => frame.receipt);
+    let held = 0;
+    for (let i = first - 1; i >= 0 && frames[i].face >= 0.99 && !frames[i].receipt; i -= 1) {
+      held += 1;
+    }
+    const shown = frames.slice(first - held, first);
+    const ms = held > 0 ? Math.round(frames[first].t - frames[first - held].t) : 0;
+    if (held < FACE_FRAMES || shown.some((frame) => !frame.check || frame.label !== "Approved")) {
+      throw new Error(
+        `${motion}: the Approved face showed ${held} frames (${ms}ms) before the receipt; it must show at least ${FACE_FRAMES}`,
+      );
+    }
+    // The receipt still carries Undo inside the undo window.
+    await page.getByRole("button", { name: /^Undo/ }).waitFor({ timeout: 3000 });
+    console.log(`card-window: Approved face ${held} frames (${ms}ms) before the receipt (${motion})`);
+    await page.close();
+  }
 
   // Hello cancelled: back to waiting, no error.
   const cancelled = await openCard(browser, { snapshot, helloMs: 200, cancel: true });

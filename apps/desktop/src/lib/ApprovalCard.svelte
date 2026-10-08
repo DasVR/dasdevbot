@@ -48,6 +48,8 @@
   const ACTION_SEEN_RATIO = 0.99;
   /** Sent by the Tauri shell (`src-tauri/src/native_sight.rs`). */
   const NATIVE_SIGHT_EVENT = "dasdevbot:native-sight";
+  /** Fully shown decided face before the fold: 18 frames at 60fps (video: 16). */
+  const FACE_HOLD_MS = 300;
 
   interface Props {
     approval: Approval;
@@ -58,6 +60,12 @@
     onundo?: () => Promise<boolean>;
     /** Escape on the card itself. The host moves focus to its container. */
     onescape?: () => void;
+    /**
+     * Fires once the decided face has been shown and the fold into the receipt
+     * has played. The card window holds its snapshot refresh until then, so the
+     * face is not cut away the instant the decision lands.
+     */
+    onsettled?: () => Promise<void>;
     /** A receipt shown outside the card window: no Undo control, nothing to decide. */
     readonly?: boolean;
     /**
@@ -75,6 +83,7 @@
     ondecide,
     onundo,
     onescape,
+    onsettled,
     readonly = false,
     focusOnShow = false,
   }: Props = $props();
@@ -685,6 +694,21 @@
     await tick();
     if (!cardEl) {
       return;
+    }
+    // UX follow-up 1: the decided face (single check, "Approved") must read
+    // before the receipt. It fades in over --dur-soft, then holds for
+    // FACE_HOLD_MS while fully shown, then the card folds into the receipt.
+    // The card video holds the face for the 16-frame paperize (60fps frames
+    // 613-628) before its fold starts at 629. The video's earlier 6s on the
+    // face is its undo window, which here lives on the receipt (LOOK 8.3), so
+    // it is not spent on the card.
+    if (onsettled) {
+      await wait(tokenMs("--dur-soft", 360) + FACE_HOLD_MS);
+      await onsettled();
+      await tick();
+      if (!cardEl) {
+        return;
+      }
     }
     scheduleMorph(measureSettled());
   }

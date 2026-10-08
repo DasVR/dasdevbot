@@ -13,9 +13,21 @@
   let now = $state(Date.now());
   let mainEl = $state<HTMLElement | null>(null);
 
+  // The card being decided, frozen as it was until it has shown its decided
+  // face and asked for the receipt (onsettled). Without this the snapshot
+  // refresh swapped the card for the receipt in the frame the decision landed.
+  let held = $state<Approval | null>(null);
+  let heldTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function release(): void {
+    clearTimeout(heldTimer);
+    held = null;
+  }
+
   // The open card, or the one whose undo window is still running.
   const current = $derived(
-    approvals.find(waitsOnHuman) ??
+    held ??
+      approvals.find(waitsOnHuman) ??
       approvals.find(
         (approval) =>
           !approval.committed &&
@@ -37,11 +49,16 @@
 
   async function ondecide(id: string, decision: Decision, reason?: string): Promise<boolean> {
     deciding = true;
+    held = approvals.find((approval) => approval.id === id) ?? null;
     try {
       await decide(id, decision, reason);
-      await refresh();
+      // The receipt waits for onsettled. If the card never asks (it was
+      // unmounted), let the snapshot through anyway.
+      clearTimeout(heldTimer);
+      heldTimer = setTimeout(release, 3000);
       return true;
     } catch (err) {
+      release();
       const message = err instanceof Error ? err.message : "The decision was not recorded.";
       // Cancelling the Hello prompt returns to the waiting card with no error.
       error = isHelloCancel(message) ? null : message;
@@ -49,6 +66,11 @@
     } finally {
       deciding = false;
     }
+  }
+
+  async function onsettled(): Promise<void> {
+    await refresh();
+    release();
   }
 
   async function onundo(id: string): Promise<boolean> {
@@ -91,6 +113,7 @@
         ondecide={(decision, reason) => ondecide(current.id, decision, reason)}
         onundo={() => onundo(current.id)}
         onescape={() => mainEl?.focus()}
+        {onsettled}
       />
     {/key}
   {:else}
