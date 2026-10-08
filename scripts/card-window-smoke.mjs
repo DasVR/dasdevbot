@@ -181,6 +181,9 @@ function stub({ label, snapshot, helloMs = 0, cancel = false, decides = false })
       window.__invokes = [];
       window.__TAURI_INTERNALS__ = {
         metadata: { currentWindow: { label } },
+        setSnapshot(next) {
+          snapshot = next;
+        },
         invoke(command, args = {}) {
           window.__invokes.push({ command, args });
           if (command === "daemon_snapshot") {
@@ -201,13 +204,17 @@ function stub({ label, snapshot, helloMs = 0, cancel = false, decides = false })
                 }
                 if (decides) {
                   // The daemon's answer from here on: decided, undo window open.
+                  // Each signed decision is a fresh event (store.rs: Uuid::new_v4).
                   const at = Date.now();
+                  window.__signed = (window.__signed ?? 0) + 1;
+                  const status = args.decision === "deny" ? "denied" : "approved";
                   snapshot = {
                     ...snapshot,
                     approvals: snapshot.approvals.map((approval) => ({
                       ...approval,
-                      status: "approved",
+                      status,
                       decided_at: at,
+                      decision_event_id: `ev_${String(window.__signed).repeat(8)}decided`,
                       undo_until: at + 6000,
                     })),
                   };
@@ -215,6 +222,20 @@ function stub({ label, snapshot, helloMs = 0, cancel = false, decides = false })
                 resolve(null);
               }, helloMs),
             );
+          }
+          if (command === "undo_decision" && decides) {
+            // Inside the window the daemon reverts to pending and clears the
+            // decision event (store.rs undo_inside_the_window_reverts_to_pending).
+            snapshot = {
+              ...snapshot,
+              approvals: snapshot.approvals.map((approval) => ({
+                ...approval,
+                status: "pending",
+                decided_at: null,
+                decision_event_id: null,
+                undo_until: null,
+              })),
+            };
           }
           return Promise.resolve(null);
         },
@@ -359,12 +380,44 @@ try {
   await page.waitForFunction(() => !document.querySelector("article.card .quiet .hello"), null, { timeout: 3000 });
   await page.close();
 
-  // UX follow-up 1: after Hello the decided face (single check, "Approved")
-  // shows, fully, for at least FACE_FRAMES frames before the receipt replaces
-  // the card. The card video holds it for the 16-frame paperize (60fps frames
-  // 613-628) before the fold; the card used to cut straight to the receipt in
-  // the frame the decision landed (0 frames).
-  const FACE_FRAMES = 16;
+  // CD (LOOK 8.3 rows 125-128, INTERACTIONS S5 70-73): after Hello the card
+  // stays glass with the drawn check and "Approved" for the whole 6s undo
+  // window, Deny's slot counting Undo down. Only when the window closes does
+  // the glass set to paper and fold into the receipt, which has no Undo.
+  // The card video: the face swap starts at 60fps f246 and the paperize at
+  // f613 (367 frames); its countdown is the 6s window = 360 frames, the other
+  // ~7 frames are the video's commit lead. The app's window is the daemon's
+  // undo_until (decided_at + 6000ms), so the decided glass must span
+  // 360 frames (6.0s) within a frame-timing tolerance.
+  const WINDOW_FRAMES = 360;
+  async function sampleCard(page) {
+    await page.evaluate(() => {
+      window.__cardFrames = [];
+      window.__sampling = true;
+      const sample = () => {
+        const card = document.querySelector("article.card");
+        const face = card?.querySelector("button.approve .face-done");
+        const style = card ? getComputedStyle(card) : null;
+        window.__cardFrames.push({
+          t: performance.now(),
+          face: face ? Number(getComputedStyle(face).opacity) : 0,
+          check: Boolean(face?.querySelector("svg")),
+          label: face?.textContent?.trim() ?? "",
+          glass: Boolean(card?.classList.contains("glass")),
+          receipt: Boolean(card?.classList.contains("receipt")),
+          undo: card?.querySelector("button.undo .face-done.show")?.textContent?.replace(/\s+/g, "") ?? null,
+          buttons: card?.querySelectorAll("button").length ?? 0,
+          height: card ? card.getBoundingClientRect().height : 0,
+          opacity: style ? Number(style.opacity) : 0,
+        });
+        if (window.__sampling && window.__cardFrames.length < 1200) {
+          requestAnimationFrame(sample);
+        }
+      };
+      requestAnimationFrame(sample);
+    });
+  }
+
   for (const motion of ["no-preference", "reduce"]) {
     const page = await browser.newPage({ viewport: { width: 560, height: 760 } });
     await page.emulateMedia({ reducedMotion: motion });
@@ -372,44 +425,210 @@ try {
     await page.goto(origin, { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "Approve draft" }).waitFor();
     await arm(page);
-    await page.evaluate(() => {
-      window.__faceFrames = [];
-      const sample = () => {
-        const card = document.querySelector("article.card");
-        const face = card?.querySelector("button.approve .face-done");
-        window.__faceFrames.push({
-          t: performance.now(),
-          face: face ? Number(getComputedStyle(face).opacity) : 0,
-          check: Boolean(face?.querySelector("svg")),
-          label: face?.textContent?.trim() ?? "",
-          receipt: Boolean(card?.classList.contains("receipt") || card?.querySelector(".receipt")),
-        });
-        if (window.__faceFrames.length < 600) {
-          requestAnimationFrame(sample);
-        }
-      };
-      requestAnimationFrame(sample);
-    });
+    await sampleCard(page);
     await page.locator("article.card button.approve").focus();
     await page.keyboard.press("Enter");
-    await page.waitForFunction(() => window.__faceFrames.some((frame) => frame.receipt), null, { timeout: 6000 });
-    const frames = await page.evaluate(() => window.__faceFrames);
-    const first = frames.findIndex((frame) => frame.receipt);
-    let held = 0;
-    for (let i = first - 1; i >= 0 && frames[i].face >= 0.99 && !frames[i].receipt; i -= 1) {
-      held += 1;
+    await page.waitForFunction(() => window.__cardFrames.some((frame) => frame.receipt), null, { timeout: 9000 });
+    await page.waitForTimeout(900);
+    await page.evaluate(() => {
+      window.__sampling = false;
+    });
+    const frames = await page.evaluate(() => window.__cardFrames);
+    const swap = frames.findIndex((frame) => frame.face > 0.01);
+    const full = frames.findIndex((frame) => frame.face >= 0.99);
+    const paper = frames.findIndex((frame, i) => i > swap && !frame.glass);
+    const filed = frames.findIndex((frame) => frame.receipt);
+    if (swap < 0 || full < 0 || paper < 0 || filed < 0) {
+      throw new Error(`${motion}: the decided face never showed or never filed ${JSON.stringify({ swap, full, paper, filed })}`);
     }
-    const shown = frames.slice(first - held, first);
-    const ms = held > 0 ? Math.round(frames[first].t - frames[first - held].t) : 0;
-    if (held < FACE_FRAMES || shown.some((frame) => !frame.check || frame.label !== "Approved")) {
-      throw new Error(
-        `${motion}: the Approved face showed ${held} frames (${ms}ms) before the receipt; it must show at least ${FACE_FRAMES}`,
-      );
+    const glassSpan = frames.slice(swap, paper);
+    const spanMs = Math.round(frames[paper].t - frames[swap].t);
+    const spanFrames = paper - swap;
+    const fullFrames = paper - full;
+    if (glassSpan.some((frame) => !frame.glass || frame.receipt || !frame.check || frame.label !== "Approved")) {
+      throw new Error(`${motion}: the decided glass did not hold the check and "Approved" throughout`);
     }
-    // The receipt still carries Undo inside the undo window.
-    await page.getByRole("button", { name: /^Undo/ }).waitFor({ timeout: 3000 });
-    console.log(`card-window: Approved face ${held} frames (${ms}ms) before the receipt (${motion})`);
+    if (spanMs < 5900 || spanMs > 6250) {
+      throw new Error(`${motion}: the decided glass held ${spanFrames} frames (${spanMs}ms); the undo window is ${WINDOW_FRAMES} frames (6000ms)`);
+    }
+    // Undo counts down on the card, not the receipt.
+    const undoLabels = [...new Set(glassSpan.map((frame) => frame.undo))];
+    if (!undoLabels.includes("Undo6s") || !undoLabels.includes("Undo1s") || undoLabels.includes(null)) {
+      throw new Error(`${motion}: the card's Undo countdown ${JSON.stringify(undoLabels)}`);
+    }
+    // The fold: frames between the glass and the settled receipt where the
+    // height (or, reduced, the 160ms crossfade) is between its ends.
+    const settled = frames[frames.length - 1];
+    const from = frames[paper - 1].height;
+    const fold = frames.slice(filed).filter((frame) =>
+      motion === "reduce"
+        ? frame.opacity > 0.001 && frame.opacity < 0.999
+        : Math.abs(frame.height - settled.height) > 0.5 && Math.abs(frame.height - from) > 0.5,
+    ).length;
+    if (fold <= 0) {
+      throw new Error(`${motion}: foldFrames 0 (the card cut to the receipt)`);
+    }
+    if (settled.buttons !== 0 || settled.undo !== null || !settled.receipt) {
+      throw new Error(`${motion}: the filed receipt carries a control ${JSON.stringify(settled)}`);
+    }
+    if ((await page.getByRole("button", { name: /Undo/ }).count()) !== 0) {
+      throw new Error(`${motion}: the filed receipt has an Undo`);
+    }
+    console.log(
+      `card-window: decided glass ${spanFrames} frames (${spanMs}ms, face fully shown ${fullFrames} frames), paperize ${filed - paper} frames, foldFrames ${fold}, receipt buttons ${settled.buttons} (${motion})`,
+    );
     await page.close();
+  }
+
+  // INTERACTIONS S5 + SD condition 2: Ctrl/Cmd+Z undoes only while the card is
+  // glass, visible and focused, and passes undoSight. Blurred, hidden,
+  // minimized, collapsed, covered or unfocused: no undo_decision.
+  {
+    const page = await browser.newPage({ viewport: { width: 560, height: 760 } });
+    await page.addInitScript(...stub({ label: "card", snapshot, helloMs: 200, decides: true }));
+    await page.goto(origin, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Approve draft" }).waitFor();
+    await arm(page);
+    await page.locator("article.card button.approve").focus();
+    await page.keyboard.press("Enter");
+    await page.locator("article.card button.undo").waitFor({ timeout: 3000 });
+    const undos = () => page.evaluate(() => window.__invokes.filter((entry) => entry.command === "undo_decision").length);
+    const stillDecided = () =>
+      page.evaluate(() => Boolean(document.querySelector("article.card.glass button.undo")) && Boolean(document.querySelector("article.card .face-done.show")));
+    const focusCard = () => page.evaluate(() => document.querySelector("article.card")?.focus());
+    const cases = [
+      ["blurred", () => page.evaluate(() => window.dispatchEvent(new Event("blur"))), () => page.evaluate(() => window.dispatchEvent(new Event("focus")))],
+      [
+        "hidden",
+        () =>
+          page.evaluate(() => {
+            Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+            document.dispatchEvent(new Event("visibilitychange"));
+          }),
+        () =>
+          page.evaluate(() => {
+            delete document.visibilityState;
+            document.dispatchEvent(new Event("visibilitychange"));
+          }),
+      ],
+      [
+        "minimized",
+        () => page.evaluate(() => window.dispatchEvent(new CustomEvent("dasdevbot:native-sight", { detail: { visible: false } }))),
+        () => page.evaluate(() => window.dispatchEvent(new CustomEvent("dasdevbot:native-sight", { detail: { visible: true } }))),
+      ],
+      [
+        "collapsed",
+        () =>
+          page.evaluate(() => {
+            const main = document.querySelector("main.card-window");
+            main.classList.add("win");
+            main.dataset.shellForm = "pill";
+          }),
+        () =>
+          page.evaluate(() => {
+            const main = document.querySelector("main.card-window");
+            main.classList.remove("win");
+            delete main.dataset.shellForm;
+          }),
+      ],
+      [
+        "covered",
+        () => page.evaluate(() => document.querySelector("main.card-window").setAttribute("inert", "")),
+        () => page.evaluate(() => document.querySelector("main.card-window").removeAttribute("inert")),
+      ],
+      ["unfocused", () => page.evaluate(() => document.querySelector("main.card-window").focus()), async () => {}],
+    ];
+    const refused = [];
+    for (const [name, enter, leave] of cases) {
+      await focusCard();
+      await enter();
+      await page.keyboard.press("Control+z");
+      await page.keyboard.press("Meta+z");
+      await page.waitForTimeout(120);
+      if ((await undos()) !== 0 || !(await stillDecided())) {
+        throw new Error(`Ctrl/Cmd+Z undid while the card was ${name}`);
+      }
+      await leave();
+      refused.push(name);
+    }
+    // Glass, visible, focused: one Ctrl+Z undoes through undo_decision.
+    await focusCard();
+    await page.keyboard.press("Control+z");
+    await page.waitForFunction(() => document.querySelector("article.card .face-idle:not(.gone)") && !document.querySelector("article.card button.undo"), null, { timeout: 2000 });
+    const undoneAt = Date.now();
+    const restored = await page.evaluate(() => ({
+      undos: window.__invokes.filter((entry) => entry.command === "undo_decision").length,
+      approve: document.querySelector("article.card button.approve .face-idle:not(.gone)")?.textContent?.trim() ?? "",
+      deny: document.querySelector("article.card button.deny .face-idle:not(.gone)")?.textContent?.trim() ?? "",
+      faceDone: document.querySelectorAll("article.card .face-done.show").length,
+      armed: Boolean(document.querySelector("article.card .hold-hint.armed")),
+      focus: document.activeElement?.matches("article.card") ?? false,
+    }));
+    if (restored.undos !== 1 || restored.faceDone !== 0 || !restored.approve.startsWith("Approve draft") || restored.deny !== "Deny draft") {
+      throw new Error(`Ctrl+Z did not restore the waiting card ${JSON.stringify(restored)}`);
+    }
+    if (restored.armed || !restored.focus) {
+      throw new Error(`the seen lock was not re-armed from zero after undo ${JSON.stringify(restored)}`);
+    }
+    // The check retracts (ink back to 0) and the lock re-arms only after a fresh dwell.
+    await page.waitForFunction(() => document.querySelector("article.card .hold-hint.armed"), null, { timeout: 4000 });
+    const dwell = Date.now() - undoneAt;
+    const ink = await page.evaluate(() => document.querySelector("article.card button.approve > .ink")?.style.clipPath ?? "");
+    if (dwell < 700 || !/inset\(0px 100(\.000)?% 0px 0px\)/.test(ink)) {
+      throw new Error(`after undo: re-armed in ${dwell}ms, ink ${ink}`);
+    }
+    // A second approve is a new signed decision with a new event id.
+    await page.locator("article.card button.approve").focus();
+    await page.keyboard.press("Enter");
+    await page.locator("article.card.receipt").waitFor({ timeout: 9000 });
+    await page.waitForTimeout(800);
+    const second = await page.evaluate(() => ({
+      signs: window.__invokes.filter((entry) => entry.command === "sign_decision").length,
+      stamp: document.querySelector("article.card .stamp")?.textContent ?? "",
+    }));
+    if (second.signs !== 2 || !second.stamp.includes("2222") || second.stamp.includes("1111")) {
+      throw new Error(`the second approve did not file under a new event id ${JSON.stringify(second)}`);
+    }
+    console.log(
+      `card-window: Ctrl/Cmd+Z refused while ${refused.join(", ")}; focused undo restored "Approve draft" + Deny, seen lock re-armed after ${dwell}ms, re-approve filed ${second.stamp.replace(/\s+/g, " ").trim()} (sign_decision x${second.signs}, undo_decision x${restored.undos})`,
+    );
+    await page.close();
+  }
+
+  // INTERACTIONS S5: the roster's waiting dot leaves for the undo window
+  // ("approved · undo Ns", ink-3, no dot) and comes back on undo.
+  {
+    const main = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await main.addInitScript(...stub({ label: "main", snapshot }));
+    await main.goto(origin, { waitUntil: "networkidle" });
+    const roster = () =>
+      main.evaluate(() => ({
+        dot: document.querySelectorAll(".roster .wdot").length,
+        lines: [...document.querySelectorAll(".roster .sub")].map((el) => el.textContent?.trim() ?? "").filter(Boolean),
+      }));
+    await main.waitForFunction(() => document.querySelectorAll(".roster .wdot").length === 1, null, { timeout: 4000 });
+    const at = Date.now();
+    await main.evaluate(
+      ({ snapshot, at }) =>
+        window.__TAURI_INTERNALS__.setSnapshot({
+          ...snapshot,
+          approvals: snapshot.approvals.map((a) => ({ ...a, status: "approved", decided_at: at, decision_event_id: "ev_11111111", undo_until: at + 6000 })),
+        }),
+      { snapshot, at },
+    );
+    await main.waitForFunction(() => document.querySelectorAll(".roster .wdot").length === 0, null, { timeout: 4000 });
+    const during = await roster();
+    if (!during.lines.some((line) => /^approved · undo \ds$/.test(line))) {
+      throw new Error(`roster during the undo window ${JSON.stringify(during)}`);
+    }
+    await main.evaluate(({ snapshot }) => window.__TAURI_INTERNALS__.setSnapshot(snapshot), { snapshot });
+    await main.waitForFunction(() => document.querySelectorAll(".roster .wdot").length === 1, null, { timeout: 4000 });
+    const after = await roster();
+    if (!after.lines.includes("waiting on you")) {
+      throw new Error(`roster after undo ${JSON.stringify(after)}`);
+    }
+    console.log(`card-window: roster dot ${during.dot} during the window (${during.lines.join(" | ")}), ${after.dot} after undo`);
+    await main.close();
   }
 
   // Hello cancelled: back to waiting, no error.
