@@ -367,10 +367,12 @@ function stampCommands(target, frames, label) {
 }
 
 async function encodePair(dir, refPrefix, refStamps, appStamps, offsets, labels, size, video) {
-  // Align on the detected first action by trimming the earlier side's lead-in.
-  const lead = Math.max(offsets.ref, offsets.app);
-  const trimRef = lead - offsets.ref;
-  const trimApp = lead - offsets.app;
+  // Align on the detected first action by trimming the later side's lead-in
+  // (F3: trimming the earlier side put ref f18 at clip f17 and app f19 at
+  // clip f19, shifting the full-clip morphs by +2).
+  const lead = Math.min(offsets.ref, offsets.app);
+  const trimRef = offsets.ref - lead;
+  const trimApp = offsets.app - lead;
   const count = Math.min(refStamps.length - trimRef, appStamps.length - trimApp);
   const cmdFile = path.join(dir, "stamps.cmd");
   await writeFile(
