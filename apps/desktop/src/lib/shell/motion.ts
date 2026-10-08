@@ -107,6 +107,32 @@ class MotionClock {
     });
   }
 
+  /**
+   * Cancel only the animations running on these elements. Unlike cancelAll it
+   * leaves timers alone, so a sequence sleep (the reduced cursor jump) lives.
+   */
+  cancelOn(els: Element[]): void {
+    const set = new Set(els);
+    const stay: Tracked[] = [];
+    for (const tracked of this.anims) {
+      const target = (tracked.anim.effect as KeyframeEffect | null)?.target ?? null;
+      if (target && set.has(target)) {
+        tracked.anim.cancel();
+        tracked.resolve();
+      } else {
+        stay.push(tracked);
+      }
+    }
+    this.anims = stay;
+    if (!this.capture) {
+      for (const el of els) {
+        for (const anim of el.getAnimations()) {
+          anim.cancel();
+        }
+      }
+    }
+  }
+
   cancelAll(): void {
     for (const tracked of this.anims) {
       tracked.anim.cancel();
@@ -497,9 +523,22 @@ export function createShellMotion(
    */
   function crossFade(layers: HTMLElement[], before: number[], next: ShellForm): Promise<void> {
     const runs: Promise<void>[] = [];
+    const winAt = layers.indexOf(nodes.win);
+    const winFrom = winAt >= 0 ? before[winAt] : 1;
+    const winTo = readOpacity(nodes.win);
+    const winFades = winAt >= 0 && Math.abs(winTo - winFrom) >= 0.001;
     layers.forEach((el, i) => {
       const to = readOpacity(el);
       if (Math.abs(to - before[i]) < 0.001) {
+        return;
+      }
+      if (winFades && el !== nodes.win && nodes.win.contains(el)) {
+        // Inside a fading window a layer reads at the window's opacity, as in
+        // the mock, never window x layer. Opening, it is already at its end;
+        // folding, it holds where it was until the window has faded.
+        if (winTo < winFrom) {
+          runs.push(clock.play(el, [{ opacity: before[i] }, { opacity: before[i] }], REDUCED_FADE_MS, "linear", 0, "none"));
+        }
         return;
       }
       if (el === nodes.win && next === "pill") {
@@ -581,14 +620,41 @@ export function createShellMotion(
    * ends, and the eased progress. Every frame (and every resize the OS
    * delivers) lays them into the window's current size.
    */
-  let tween: { from: Insets; to: Insets; fromR: number; toR: number; e: number } | null = null;
+  let tween: {
+    from: Insets;
+    to: Insets;
+    fromBox: { w: number; h: number };
+    toBox: { w: number; h: number };
+    fromR: number;
+    toR: number;
+    e: number;
+  } | null = null;
+
+  /**
+   * F1: how far the window the composer is laid into has actually got. The OS
+   * resize lags the tween, so insets eased by time and laid into a window
+   * that has not grown yet squeeze the composer (400 -> 20px, y=0). Easing
+   * them by the window's own progress keeps every frame a real composer.
+   */
+  function boxProgress(box: { w: number; h: number }): number {
+    if (!tween) {
+      return 1;
+    }
+    const dw = tween.toBox.w - tween.fromBox.w;
+    const dh = tween.toBox.h - tween.fromBox.h;
+    const [start, delta, now] = Math.abs(dw) >= Math.abs(dh) ? [tween.fromBox.w, dw, box.w] : [tween.fromBox.h, dh, box.h];
+    if (Math.abs(delta) < 1) {
+      return tween.e;
+    }
+    return Math.min(1, Math.max(0, (now - start) / delta));
+  }
 
   function placeTween(): void {
     if (!tween) {
       return;
     }
     const box = viewport();
-    applyRect(nodes.composer, placeIn(lerpInsets(tween.from, tween.to, tween.e), box));
+    applyRect(nodes.composer, placeIn(lerpInsets(tween.from, tween.to, boxProgress(box)), box));
     applyRect(nodes.win, { x: 0, y: 0, w: box.w, h: box.h, r: lerp(tween.fromR, tween.toR, tween.e) });
   }
 
@@ -603,10 +669,14 @@ export function createShellMotion(
       return;
     }
     const ease = tokenEase("--ease-out");
-    const t0 = performance.now();
+    // F1: the clock starts when the tween paints its first frame. Coming out
+    // of the pill that frame can land ~380ms after the morph starts, and a
+    // clock started earlier opened the tween at p=0.72: one 746px jump.
+    let t0: number | null = null;
     await new Promise<void>((resolve) => {
       const frame = () => {
-        const p = Math.min(1, (performance.now() - t0) / ms);
+        t0 ??= clock.now();
+        const p = Math.min(1, (clock.now() - t0) / ms);
         const e = ease(p);
         const rect: NativeRect = {
           x: from.x + (target.x - from.x) * e,
@@ -620,12 +690,12 @@ export function createShellMotion(
           placeTween();
         }
         if (p < 1) {
-          window.requestAnimationFrame(frame);
+          clock.raf(frame);
         } else {
           resolve();
         }
       };
-      window.requestAnimationFrame(frame);
+      clock.raf(frame);
     });
   }
 
@@ -644,18 +714,28 @@ export function createShellMotion(
     syncLay();
     reserveCardClearance(next, targetBox);
     if (options.reduced()) {
-      clock.cancelAll();
-      // UID 5: geometry snaps; the layers cross-fade linearly instead of popping.
+      // F2: cancel only this morph's own layers. clock.cancelAll() also
+      // cleared the sequence's timers, so the un-awaited reduced cursor move
+      // (a sleep, then a jump) never landed at (1060,640) or (1180,470).
       const layers = fadeLayers();
+      clock.cancelOn([...layers, nodes.composer]);
+      // UID 5: geometry snaps; the layers cross-fade linearly instead of popping.
       const before = layers.map((el) => readOpacity(el));
       holdNative(targetBox);
       paint(next);
       const fades = crossFade(layers, before, next);
+      // F2: the morph ends when the mock's does: its reduced toShell awaits
+      // the rect morph over --dur-stage (160ms reduced), not the 130ms fade,
+      // so ending on the fade put every later beat 2 frames early (-6 by the
+      // cursor fade).
+      // An empty animation, not a timer: like the mock's rect morph it ends on
+      // a frame boundary, so the next beat starts on the mock's frame.
+      const ends = clock.play(nodes.win, [{}, {}], tokenMs("--dur-stage", 160), "linear", 0, "none");
       await tweenNative(next, 0, plan);
       if (native && form === next) {
         paint(next);
       }
-      await fades;
+      await Promise.all([fades, ends]);
       return;
     }
     hits(next);
@@ -670,7 +750,11 @@ export function createShellMotion(
     const fromWin = winRect(from);
     const toWin = winRect(next, targetBox);
     const fromCmp = composerRect(from);
-    const toCmp = composerRect(next, targetBox);
+    // F1: the composer is laid into the target window, never squeezed into the
+    // window it is leaving. composerRect(next, targetBox) pins the target
+    // rect back into the current 400x52 viewport, and the insets of that
+    // against targetBox leave a degenerate end (20px wide, y=0).
+    const toCmp = targetBox ? placeComposer(next, targetBox, winRect(next, targetBox)) : composerRect(next);
 
     if (from === "full" && next === "companion") {
       void fade(nodes.roster, 0, fast);
@@ -728,6 +812,8 @@ export function createShellMotion(
       tween = {
         from: insetsOf(fromCmp, startBox),
         to: insetsOf(toCmp, targetBox),
+        fromBox: startBox,
+        toBox: targetBox,
         fromR: fromWin.r,
         toR: toWin.r,
         e: 0,

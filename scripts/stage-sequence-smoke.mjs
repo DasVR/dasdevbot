@@ -65,8 +65,11 @@ async function waitForHttp(url) {
   throw new Error(`preview did not respond at ${url}`);
 }
 
-async function main(browser) {
+async function main(browser, reduced = false) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  if (reduced) {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+  }
   await page.goto(`${origin}/?shellCapture=1`, { waitUntil: "load" });
   await page.waitForFunction(() => typeof window.__shellCap?.start === "function");
   await page.evaluate(() => document.fonts.ready);
@@ -93,6 +96,7 @@ async function main(browser) {
       const style = count ? getComputedStyle(count) : null;
       const cursor = document.querySelector(".cursor");
       const m = cursor ? /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(cursor.style.transform) : null;
+      const placed = cursor && cursor.style.left ? { x: parseFloat(cursor.style.left) + 3, y: parseFloat(cursor.style.top) + 2 } : null;
       const wt = document.querySelector(".cl.pill .wt")?.getBoundingClientRect();
       return {
         t: window.__shellCap.now(),
@@ -102,10 +106,21 @@ async function main(browser) {
         deployerTop: deployer?.getBoundingClientRect().top ?? 0,
         rolling: Boolean(count && count.getAnimations().length > 0) || (style ? style.opacity !== "1" : false),
         press: document.querySelector(".composer")?.classList.contains("is-press") ?? false,
-        cursor: m ? { x: Number(m[1]) + 3, y: Number(m[2]) + 2 } : null,
+        cursor: m ? { x: Number(m[1]) + 3, y: Number(m[2]) + 2 } : placed,
         wt: wt ? { x: wt.left + wt.width / 2, y: wt.top + wt.height / 2 } : null,
       };
     });
+
+  // F1 (stage path): the composer is never a stub (width or y at 0) and
+  // never jumps more than this per frame on any of the 6 morphs. The native
+  // path is checked by native-lag-smoke.
+  const MAX_JUMP = 150;
+  const composerOf = () =>
+    page.evaluate(() => {
+      const r = document.querySelector(".composer").getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+  let prevComposer = await composerOf();
 
   const first = await read();
   if (first.sub.replace(/\s+/g, " ") !== "2m14s · 208 / 8000 tok" || first.subLines !== 2) {
@@ -120,6 +135,12 @@ async function main(browser) {
   let after = null;
   for (; frame < 900; frame += 1) {
     await page.evaluate(() => window.__shellCap.step(1000 / 60));
+    const cmp = await composerOf();
+    const jump = Math.max(Math.abs(cmp.x - prevComposer.x), Math.abs(cmp.y - prevComposer.y), Math.abs(cmp.w - prevComposer.w));
+    if (cmp.w < 300 || cmp.y < 1 || jump > MAX_JUMP) {
+      throw new Error(`F1: frame ${frame} composer ${JSON.stringify(cmp)} jumped ${Math.round(jump)}px (max ${MAX_JUMP})`);
+    }
+    prevComposer = cmp;
     const now = await read();
     if (rollFrame < 0 && now.rolling) {
       rollFrame = frame;
@@ -160,10 +181,72 @@ async function main(browser) {
   await page.close();
 }
 
+/**
+ * F2 (reduced): the mock jumps the cursor to (1057,638) at frame 229 and
+ * (1177,468) at frame 410 (4a ?capture&rm, 60fps). The old code dropped both:
+ * clock.cancelAll() in the reduced morph cancelled the un-awaited move's sleep.
+ * Each reduced morph also used to end ~2 frames early, so the drift built to
+ * -6 by the cursor fade. Both are checked against the mock's own frames.
+ */
+async function reducedMotion(browser) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`${origin}/?shellCapture=1`, { waitUntil: "load" });
+  await page.waitForFunction(() => typeof window.__shellCap?.start === "function");
+  await page.evaluate(() => window.__shellCap.start());
+  const jumps = [];
+  const beats = {};
+  for (let frame = 0; frame < 500; frame += 1) {
+    const now = await page.evaluate(() => {
+      const cursor = document.querySelector(".cursor");
+      const m = cursor && /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(cursor.style.transform);
+      const at = m
+        ? { x: Number(m[1]) + 3, y: Number(m[2]) + 2 }
+        : cursor && cursor.style.left
+          ? { x: parseFloat(cursor.style.left) + 3, y: parseFloat(cursor.style.top) + 2 }
+          : null;
+      return {
+        at,
+        count: document.querySelector(".cl.pill .wt .n")?.textContent?.trim() ?? "",
+        op: cursor ? Number(getComputedStyle(cursor).opacity) : null,
+      };
+    });
+    if (now.at && (jumps.length === 0 || Math.hypot(now.at.x - jumps.at(-1).x, now.at.y - jumps.at(-1).y) > 50)) {
+      jumps.push({ frame, x: Math.round(now.at.x), y: Math.round(now.at.y) });
+    }
+    if (now.count === "2" && beats.count == null) {
+      beats.count = frame;
+    }
+    if (beats.fade == null && now.op != null && now.op < 1 && now.op > 0 && frame > 300) {
+      beats.fade = frame;
+    }
+    await page.evaluate(() => window.__shellCap.step(1000 / 60));
+  }
+  // 354: the pill aim, after the pill morph and two sleeps; it lands on the
+  // mock's frame only if every reduced morph ends on the mock's frame.
+  const want = [
+    [229, 1060, 640],
+    [354, 872, 826],
+    [410, 1180, 470],
+  ];
+  for (const [frame, x, y] of want) {
+    const hit = jumps.find((jump) => jump.frame === frame && Math.hypot(jump.x - x, jump.y - y) <= 4);
+    if (!hit) {
+      throw new Error(`F2: no cursor jump to (${x},${y}) at frame ${frame}; saw ${JSON.stringify(jumps)}`);
+    }
+  }
+  if (beats.fade !== 415) {
+    throw new Error(`F2: reduced morphs end off the mock (cursor fade frame ${beats.fade} vs 415)`);
+  }
+  console.log(`stage-sequence-smoke: reduced cursor jumps ${JSON.stringify(jumps.filter((j) => j.frame > 200))}, count frame ${beats.count}, fade frame ${beats.fade}`);
+  await page.close();
+}
+
 const browser = await launchBrowser();
 try {
   await waitForHttp(origin);
   await main(browser);
+  await reducedMotion(browser);
   console.log("stage-sequence-smoke: pass");
 } finally {
   await browser.close();

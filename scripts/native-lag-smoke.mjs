@@ -39,8 +39,11 @@ function freePort() {
   });
 }
 
+// Playwright's headless shell, not the Chrome channel: headless Chrome drops
+// rAF to ~1fps in a 400x52 (pill) viewport (measured 1.5 vs 60.5 fps on the
+// same page), which no per-frame assertion survives. WebView2 does not.
 function launchBrowser() {
-  return chromium.launch({ channel: "chrome" }).catch(() => chromium.launch());
+  return chromium.launch();
 }
 
 const port = await freePort();
@@ -80,6 +83,11 @@ async function waitForHttp(url) {
   }
   throw new Error(`preview did not respond at ${url}`);
 }
+
+// F1: the old pill->full jumped 746px in one frame; a real morph moves under
+// 150px a frame at 60fps over the 520ms stage (measured max 115px, the first
+// ease-out frame of full->companion).
+const MAX_JUMP = 150;
 
 async function run(browser, lag) {
   const context = await browser.newContext({ viewport: { width: 1360, height: 828 } });
@@ -125,6 +133,7 @@ async function run(browser, lag) {
   );
   await page.addInitScript(() => {
     window.__clip = 0;
+    window.__shape = null;
     const sample = () => {
       const el = document.querySelector(".composer");
       if (el) {
@@ -132,6 +141,32 @@ async function run(browser, lag) {
         if (r.width > 0 && r.height > 0) {
           const over = Math.max(0, -r.left, -r.top, r.right - innerWidth, r.bottom - innerHeight);
           window.__clip = Math.max(window.__clip, over);
+          // F1: a stub composer or a jump. The old pill->full pinned it at y=0
+          // and narrowed it 400->20px for up to 17 frames, then jumped 746px.
+          // y=0 is a stub only in a window taller than the composer: the pill
+          // composer is the whole 400x52 window. Every form's composer is at
+          // least 376px wide. The jump is per display frame (16.7ms; a frame
+          // the headless resize stub stalls counts as the frames it spans), in
+          // window terms: left/right insets, width and the gap under it.
+          const s = window.__shape;
+          if (s) {
+            const now = performance.now();
+            const cur = { l: r.left, r: innerWidth - r.right, b: innerHeight - r.bottom, w: r.width, y: r.top, t: now };
+            if (s.prev) {
+              const frames = Math.max(1, Math.round((now - s.prev.t) / (1000 / 60)));
+              const jump = Math.max(...["l", "r", "b", "w"].map((k) => Math.abs(cur[k] - s.prev[k]))) / frames;
+              if (jump > s.jump) {
+                s.jump = jump;
+                s.at = { frames, raw: Math.round(jump * frames) };
+              }
+            }
+            s.minW = Math.min(s.minW, r.width);
+            if (r.top < 1 && innerHeight > r.height + 24) {
+              s.stubs += 1;
+            }
+            s.frames += 1;
+            s.prev = cur;
+          }
         }
       }
       requestAnimationFrame(sample);
@@ -179,14 +214,28 @@ async function run(browser, lag) {
     }
   };
   const clips = {};
+  const shape = {};
   const step = async (name, act, form) => {
     await page.evaluate(() => {
       window.__clip = 0;
+      window.__shape = { prev: null, jump: 0, minW: Infinity, stubs: 0, frames: 0 };
     });
     await act();
+    // The morph has ended when the viewport is the form's target size.
+    const size = { full: [1360, 828], companion: [400, 790], pill: [400, 52] }[form];
+    await page.waitForFunction(
+      ([want, w, h]) => document.querySelector(".win").dataset.shellForm === want && innerWidth === w && innerHeight === h,
+      [form, ...size],
+      { timeout: 8000 },
+    );
     await settle();
     check(await measure(), form);
     clips[name] = Math.round(await page.evaluate(() => window.__clip));
+    const s = await page.evaluate(() => window.__shape);
+    shape[name] = { jump: Math.round(s.jump), minW: Math.round(s.minW), stubs: s.stubs, frames: s.frames, at: s.at };
+    if (s.stubs > 0 || s.minW < 300 || s.jump > MAX_JUMP) {
+      throw new Error(`lag ${lag}: ${name} composer went degenerate or jumped ${JSON.stringify(shape[name])} (max jump ${MAX_JUMP}px/frame)`);
+    }
   };
   check(await measure(), "full");
   await step("full>companion", () => page.locator('button[aria-label="Companion window"]').click(), "companion");
@@ -196,6 +245,7 @@ async function run(browser, lag) {
   await step("full>pill", () => page.locator('button[aria-label="Float as a pill"]').click(), "pill");
   await step("pill>full", () => page.keyboard.press("Escape"), "full");
   console.log(`native-lag-smoke: lag ${lag} mid-morph composer clip px ${JSON.stringify(clips)}`);
+  console.log(`native-lag-smoke: lag ${lag} composer per frame ${JSON.stringify(shape)}`);
   const worst = Object.entries(clips).filter(([, px]) => px > 1);
   if (worst.length) {
     throw new Error(`lag ${lag}: composer clipped mid-morph ${JSON.stringify(Object.fromEntries(worst))}`);
