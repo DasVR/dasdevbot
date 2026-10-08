@@ -126,9 +126,11 @@ async function prepareMocks(dir) {
     await cp(path.join(fonts, from), path.join(dir, "fonts", to));
   }
   await cp(path.join(desktop, "src/lib/styles/tokens.css"), path.join(dir, "tokens.css"));
-  // The 4a background window embeds thread.html; keep it a plain paper page so
-  // both sides frost the same flat desk.
-  await writeFile(path.join(dir, "thread.html"), '<!doctype html><html><body style="background:#F6F2EB"></body></html>');
+  // The 4a background window embeds the real thread.html?capture under its
+  // frost (mock 4a:1238). The app's stage draws the same thread (UID 4), so
+  // the reference keeps it rather than a flat page.
+  const thread = await readFile(path.join(look, "thread.html"), "utf8");
+  await writeFile(path.join(dir, "thread.html"), thread.replaceAll('format("woff2")', 'format("woff2-variations")'));
   for (const name of ["4a-shell-morph.html", "3a-modes.html"]) {
     let html = await readFile(path.join(look, "mocks", name), "utf8");
     html = html.replaceAll('format("woff2")', 'format("woff2-variations")');
