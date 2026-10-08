@@ -44,6 +44,7 @@
     { "class": "DEVIATION", "rule": "The mascot is Curl. 7a is a character study that includes Curl. The other characters are not a build target.", "cite": "SCREENS.md:197" },
     { "class": "DEVIATION", "rule": "Windows only. The island and the menu bar in 6a are out. The tray stays.", "cite": "SCREENS.md:172" },
     { "class": "PARITY", "rule": "During the 6s undo the card stays glass. A glass card in that window follows the ruling.", "cite": "DASDEVBOT-LOOK.md:321" },
+    { "class": "PARITY", "rule": "After Hello the card stays glass with the drawn check and \"Approved\" for the full 6s undo, Undo counting down on the card; the glass sets to paper and folds only when the window closes; the filed receipt has no Undo; Ctrl/Cmd+Z (glass, visible, focused) restores Approve draft, the roster dot and the seen lock; a re-decision is a new event.", "cite": "DASDEVBOT-LOOK.md:125-128, INTERACTIONS.md:70-73" },
     { "class": "PARITY", "rule": "The queue is oldest-first and does not auto-advance. #26 rendered Reviewer 11:14, then the expiring row in place (\"expires 1:30\"), then Builder 11:52. The header count was 3.", "cite": "SCREENS.md:160" }
   ],
   "needsCdRuling": [

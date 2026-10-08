@@ -355,7 +355,7 @@
           }
         }
       ],
-      "wallSeconds": 343,
+      "wallSeconds": 337,
       "commit": ""
     },
     {
@@ -427,7 +427,7 @@
         }
       },
       "ssim": {
-        "mean": 0.9281,
+        "mean": 0.928,
         "min": 0.7552,
         "worst": [
           {
@@ -710,7 +710,7 @@
           }
         }
       ],
-      "wallSeconds": 298,
+      "wallSeconds": 304,
       "commit": ""
     },
     {
@@ -1066,7 +1066,7 @@
           }
         }
       ],
-      "wallSeconds": 257,
+      "wallSeconds": 252,
       "commit": ""
     },
     {
@@ -1422,7 +1422,7 @@
           }
         }
       ],
-      "wallSeconds": 248,
+      "wallSeconds": 252,
       "commit": ""
     },
     {
@@ -1433,5 +1433,5 @@
       "gap": "03-modes not built, due by Oct 14"
     }
   ],
-  "generatedAt": "2026-10-08T20:18:00.702Z"
+  "generatedAt": "2026-10-08T21:30:49.100Z"
 }
