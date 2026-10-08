@@ -26,7 +26,16 @@
   } from "./icons";
   import { type ShellCapApi, type ShellStageApi } from "./globals";
   import { createShellMotion, type ShellMotion } from "./motion";
-  import { inTauri, windowCommand } from "./native";
+  import {
+    CAPTION_GLYPHS,
+    SNAP_EVENT,
+    inTauri,
+    isMaximized,
+    onWindows,
+    placeSnapOverlay,
+    windowCommand,
+    type SnapPointer,
+  } from "./native";
   import {
     liveRoster,
     stageRoster,
@@ -91,6 +100,59 @@
   let toPillEl = $state<HTMLElement | null>(null);
 
   const native = inTauri();
+  /** Segoe Fluent Icons caption glyphs on Windows; the SVG elsewhere. */
+  const fluent = native && onWindows();
+  let maximized = $state(false);
+  /** The Snap overlay owns the pointer over maximize: it reports hover and press. */
+  let snapHover = $state(false);
+  let snapPress = $state(false);
+
+  /**
+   * CD ruling a: Snap Layouts. Keep the native overlay exactly over the drawn
+   * maximize button, and drive its hover/press fills from the overlay's
+   * reports, since the button itself gets no pointer events under it.
+   */
+  function snapMaximize(node: HTMLElement): () => void {
+    if (!native) {
+      return () => {};
+    }
+    let frame = 0;
+    const report = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const box = node.getBoundingClientRect();
+        const shown = form !== "pill" && box.width > 0 && box.height > 0;
+        void placeSnapOverlay(shown ? { x: box.left, y: box.top, width: box.width, height: box.height } : null);
+        void isMaximized()?.then((value) => {
+          maximized = value;
+        });
+      });
+    };
+    const onSnap = (event: Event) => {
+      const state = (event as CustomEvent<{ state?: SnapPointer }>).detail?.state;
+      snapHover = state === "hover" || state === "press" || (state === "release" && snapHover);
+      snapPress = state === "press";
+    };
+    const observer = new ResizeObserver(report);
+    observer.observe(node);
+    observer.observe(document.documentElement);
+    window.addEventListener("resize", report);
+    window.addEventListener(SNAP_EVENT, onSnap);
+    report();
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", report);
+      window.removeEventListener(SNAP_EVENT, onSnap);
+      void placeSnapOverlay(null);
+    };
+  }
+
+  $effect(() => {
+    if (native && form === "pill") {
+      void placeSnapOverlay(null);
+    }
+  });
 
   const waitingShown = $derived(stage && pending.length === 0 ? 1 : pending.length);
   const rows = $derived(stage ? stageRoster() : liveRoster(agents, reviewer, "reviewer"));
@@ -352,20 +414,34 @@
         </button>
       </div>
       {#if native}
-        <!-- CD ruling 1: Windows caption buttons at the right edge, 46x46, OS hover and close red. Declared deviation: OS chrome, Windows-only Phase 1. -->
-        <div class="captions">
+        <!-- CD ruling a: drawn Windows caption buttons at native metrics (Segoe Fluent Icons, Win11 fills, no hover transition), Snap Layouts via the HTMAXBUTTON overlay (src-tauri/src/snap.rs). Declared deviation: OS chrome, Windows-only Phase 1. -->
+        <div class={["captions", fluent && "fluent"]}>
           <button type="button" aria-label="Minimize" onclick={() => void windowCommand("window_minimize")}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MINIMIZE_PATH} /></svg>
+            {#if fluent}
+              <span class="glyph" aria-hidden="true">{CAPTION_GLYPHS.minimize}</span>
+            {:else}
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MINIMIZE_PATH} /></svg>
+            {/if}
           </button>
           <button
             type="button"
-            aria-label="Maximize"
+            class={["max", snapHover && "os-hover", snapPress && "os-press"]}
+            aria-label={maximized ? "Restore" : "Maximize"}
+            {@attach snapMaximize}
             onclick={() => void windowCommand("window_toggle_maximize")}
           >
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MAXIMIZE_PATH} /></svg>
+            {#if fluent}
+              <span class="glyph" aria-hidden="true">{maximized ? CAPTION_GLYPHS.restore : CAPTION_GLYPHS.maximize}</span>
+            {:else}
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MAXIMIZE_PATH} /></svg>
+            {/if}
           </button>
           <button type="button" aria-label="Close" onclick={() => void windowCommand("window_close")}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={CLOSE_PATH} /></svg>
+            {#if fluent}
+              <span class="glyph" aria-hidden="true">{CAPTION_GLYPHS.close}</span>
+            {:else}
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d={CLOSE_PATH} /></svg>
+            {/if}
           </button>
         </div>
       {/if}
@@ -588,8 +664,9 @@
     z-index: 1;
   }
 
-  /* Windows 11 caption metrics: 46px wide, full titlebar height, square,
-     the OS hover wash and a red close. The fade is the OS's quick fade. */
+  /* Windows 11 caption metrics: 46px wide, full titlebar height, square.
+     Fills are Win11 light SubtleFillColorSecondary/Tertiary; close hover is
+     #C42B1C with a white glyph. No transition: Windows swaps them at once. */
   .captions button {
     width: 46px;
     height: var(--titlebar-height);
@@ -600,18 +677,18 @@
     display: grid;
     place-items: center;
     cursor: default;
-    transition:
-      background-color 83ms linear,
-      color 83ms linear;
+    transition: none;
   }
 
-  .captions button:hover {
+  .captions button:hover,
+  .captions button.os-hover {
     background: rgb(0 0 0 / 0.0373);
   }
 
-  .captions button:active {
+  .captions button:active,
+  .captions button.os-press {
     background: rgb(0 0 0 / 0.0241);
-    color: var(--ink-2);
+    color: rgb(0 0 0 / 0.6063);
   }
 
   .captions button[aria-label="Close"]:hover {
@@ -624,7 +701,17 @@
     color: rgb(255 255 255 / 0.7);
   }
 
-  /* 16px box: the glyphs come out at Segoe's 10px caption size. */
+  /* Segoe Fluent Icons at the Win11 caption size (10px). */
+  .captions .glyph {
+    font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets";
+    font-size: 10px;
+    line-height: 1;
+    font-weight: normal;
+    font-style: normal;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Non-Windows dev fallback: the SVG at Segoe's 10px caption size. */
   .captions button svg {
     stroke-width: 1px;
     stroke-linecap: butt;

@@ -13,6 +13,7 @@ mod daemon_http;
 mod geometry;
 mod native_sight;
 mod shell_form;
+mod snap;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -407,7 +408,8 @@ pub fn run() {
             shell_form::set_shell_bounds,
             shell_form::window_minimize,
             shell_form::window_toggle_maximize,
-            shell_form::window_close
+            shell_form::window_close,
+            snap::snap_maximize_rect
         ])
         .on_window_event(keep_card_window)
         .setup(|app| {
@@ -460,7 +462,8 @@ mod tests {
             super::shell_form::set_shell_bounds,
             super::shell_form::window_minimize,
             super::shell_form::window_toggle_maximize,
-            super::shell_form::window_close
+            super::shell_form::window_close,
+            super::snap::snap_maximize_rect
         ]);
     }
 

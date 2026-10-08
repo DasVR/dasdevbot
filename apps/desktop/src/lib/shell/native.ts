@@ -63,3 +63,35 @@ export function windowCommand(
 ): Promise<void> | null {
   return call(name, {});
 }
+
+/**
+ * Snap Layouts (CD ruling a): tell the Windows overlay where the drawn
+ * maximize button is, in CSS px, or null when the captions are not shown.
+ * The overlay answers HTMAXBUTTON there so the Win11 flyout appears.
+ */
+export function placeSnapOverlay(rect: NativeRect | null): Promise<void> | null {
+  return call("snap_maximize_rect", { rect });
+}
+
+export function isMaximized(): Promise<boolean> | null {
+  return call("plugin:window|is_maximized", { label: "main" });
+}
+
+/** What the pointer did on the Snap overlay, from src-tauri/src/snap.rs. */
+export const SNAP_EVENT = "dasdevbot:snap-maximize";
+export type SnapPointer = "hover" | "press" | "release" | "leave";
+
+/**
+ * Segoe Fluent Icons caption glyphs (Win11), with Segoe MDL2 Assets on
+ * Windows 10. Only on Windows: elsewhere the drawn SVG stands in.
+ */
+export const CAPTION_GLYPHS = {
+  minimize: "\uE921",
+  maximize: "\uE922",
+  restore: "\uE923",
+  close: "\uE8BB",
+} as const;
+
+export function onWindows(): boolean {
+  return typeof navigator !== "undefined" && /Windows/.test(navigator.userAgent);
+}
