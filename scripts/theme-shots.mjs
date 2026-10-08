@@ -93,7 +93,8 @@ await page.screenshot({ path: `${outDir}/hover.png` });
 console.log("wrote hover.png");
 
 await park();
-await page.getByRole("button", { name: "Simulate repo.push" }).click();
+// "Simulate repo.push" left the visible UI (CD ruling c); dev builds file it on Ctrl+Alt+Shift+P.
+await page.keyboard.press("Control+Alt+Shift+KeyP");
 await page.locator("article.card.glass").waitFor();
 await shot("waiting");
 await page.locator("article.card button.approve").click();

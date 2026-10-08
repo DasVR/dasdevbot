@@ -15,7 +15,7 @@ import {
   WINDOW_OUT_PORTION,
   placeComposer,
 } from "./geometry";
-import { inTauri, prepareForm, readMetrics, setBounds, type NativeRect } from "./native";
+import { inTauri, prepareForm, readMetrics, setBounds, type NativeRect, type NativeTarget } from "./native";
 
 const STOPPED = Symbol("stopped");
 /** UID 5: reduced-motion cross-fade, linear, inside the 120-140ms band. */
@@ -227,6 +227,39 @@ function applyRect(el: HTMLElement, rect: ShellRect): void {
   el.style.borderRadius = `${rect.r}px`;
 }
 
+/**
+ * UID 1 (native race): a composer pinned to the window's edges by insets, so
+ * it can be laid into whatever size the native window has on this frame.
+ */
+interface Insets {
+  l: number;
+  r: number;
+  b: number;
+  h: number;
+  rad: number;
+}
+
+function insetsOf(rect: ShellRect, box: { w: number; h: number }): Insets {
+  return { l: rect.x, r: box.w - rect.x - rect.w, b: box.h - rect.y - rect.h, h: rect.h, rad: rect.r };
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function lerpInsets(a: Insets, b: Insets, t: number): Insets {
+  return { l: lerp(a.l, b.l, t), r: lerp(a.r, b.r, t), b: lerp(a.b, b.b, t), h: lerp(a.h, b.h, t), rad: lerp(a.rad, b.rad, t) };
+}
+
+/** Lay insets into a box. Never leaves the box, so nothing is ever clipped. */
+export function placeIn(ins: Insets, box: { w: number; h: number }): ShellRect {
+  const x = Math.min(Math.max(0, ins.l), box.w);
+  const w = Math.max(0, box.w - x - Math.max(0, ins.r));
+  const h = Math.max(0, Math.min(ins.h, box.h));
+  const y = Math.max(0, box.h - Math.max(0, ins.b) - h);
+  return { x, y, w, h, r: ins.rad };
+}
+
 function rectFrames(rect: ShellRect): Keyframe {
   return {
     left: `${rect.x}px`,
@@ -274,6 +307,8 @@ export function createShellMotion(
     capture: boolean;
     reduced: () => boolean;
     onForm: (form: ShellForm) => void;
+    /** UID 2: Builder's roster row flips to "waiting on you" on the count bump. */
+    onBuilderAsks?: (asks: boolean) => void;
   },
 ): ShellMotion {
   const clock = new MotionClock(options.capture);
@@ -299,17 +334,27 @@ export function createShellMotion(
    * viewport, never scaled (G12). At 1280×800 the full window still sits at
    * 40,52 and runs past the edge, exactly as the mock does.
    */
-  function winRect(next: ShellForm): ShellRect {
+  function winRect(next: ShellForm, box = viewport()): ShellRect {
     if (!options.stage) {
-      const box = viewport();
       return { x: 0, y: 0, w: box.w, h: box.h, r: MOCK_FORMS[next].win.r };
     }
     return { ...MOCK_FORMS[next].win };
   }
 
-  function composerRect(next: ShellForm): ShellRect {
+  /**
+   * `box` is the window size the composer is laid out for. On the native
+   * window that is the form's target size, which can differ from the
+   * viewport until the OS resize lands; the composer is then pinned to the
+   * window edges by the target's insets, so it is never clipped (UID 1).
+   */
+  function composerRect(next: ShellForm, box = viewport()): ShellRect {
     if (!options.stage) {
-      return placeComposer(next, viewport(), winRect(next));
+      const rect = placeComposer(next, box, winRect(next, box));
+      const now = viewport();
+      if (now.w === box.w && now.h === box.h) {
+        return rect;
+      }
+      return placeIn(insetsOf(rect, box), now);
     }
     return { ...MOCK_FORMS[next].composer };
   }
@@ -343,19 +388,46 @@ export function createShellMotion(
     nodes.stream.style.padding = next === "companion" ? "18px 18px 76px" : "0";
   }
 
-  function reserveCardClearance(next: ShellForm): void {
-    const rect = composerRect(next);
-    const box = viewport();
+  function reserveCardClearance(next: ShellForm, target?: { w: number; h: number }): void {
+    const box = target ?? viewport();
+    const rect = options.stage ? composerRect(next) : placeComposer(next, box, winRect(next, box));
     const block = Math.max(0, box.h - rect.y);
     document.documentElement.style.setProperty("--composer-block", `${block}px`);
+  }
+
+  /** The native size the current form is heading for, while it has not landed. */
+  let nativeBox: { w: number; h: number } | null = null;
+
+  /**
+   * Lay the composer out for `box` until the OS resize lands (or a second
+   * passes, if the OS clamps the size), so a lagging resize never clips it.
+   */
+  function holdNative(box: { w: number; h: number } | null | undefined): void {
+    if (!box) {
+      return;
+    }
+    nativeBox = box;
+    window.setTimeout(() => {
+      if (nativeBox === box) {
+        nativeBox = null;
+        if (!tween && !animating) {
+          paint(form);
+        }
+      }
+    }, 1000);
   }
 
   function paint(next: ShellForm): void {
     nodes.win.dataset.shellForm = next;
     syncLay();
+    const now = viewport();
+    if (nativeBox && Math.abs(nativeBox.w - now.w) < 1 && Math.abs(nativeBox.h - now.h) < 1) {
+      nativeBox = null;
+    }
+    const box = nativeBox ?? now;
     applyRect(nodes.win, winRect(next));
-    applyRect(nodes.composer, composerRect(next));
-    reserveCardClearance(next);
+    applyRect(nodes.composer, composerRect(next, box));
+    reserveCardClearance(next, box);
     const pill = next === "pill";
     const full = next === "full";
     opacity(nodes.win, pill ? 0 : 1);
@@ -377,8 +449,8 @@ export function createShellMotion(
 
   /**
    * Only the current form's controls can be reached. Hidden composer layers
-   * and the collapsed roster (with its Simulate buttons) are inert, so a
-   * hidden "1 waiting" or Simulate button is never tabbable.
+   * and the collapsed roster are inert, so a hidden "1 waiting" is never
+   * tabbable.
    */
   function hits(next: ShellForm): void {
     nodes.layerFull.style.pointerEvents = next === "full" ? "auto" : "none";
@@ -485,17 +557,47 @@ export function createShellMotion(
     );
   }
 
-  async function tweenNative(next: ShellForm, ms: number): Promise<void> {
+  interface NativePlan {
+    target: NativeTarget;
+    from: NativeRect;
+  }
+
+  /** UID 1: the form's native target, read before any tween target is chosen. */
+  async function planNative(next: ShellForm): Promise<NativePlan | null> {
     if (!native) {
-      return;
+      return null;
     }
     const prepared = prepareForm(next);
     const current = readMetrics();
     if (!prepared || !current) {
+      return null;
+    }
+    const [target, from] = await Promise.all([prepared, current]);
+    return { target, from };
+  }
+
+  /**
+   * The in-flight native morph: composer insets and window radius at both
+   * ends, and the eased progress. Every frame (and every resize the OS
+   * delivers) lays them into the window's current size.
+   */
+  let tween: { from: Insets; to: Insets; fromR: number; toR: number; e: number } | null = null;
+
+  function placeTween(): void {
+    if (!tween) {
       return;
     }
-    const target = await prepared;
-    const from = await current;
+    const box = viewport();
+    applyRect(nodes.composer, placeIn(lerpInsets(tween.from, tween.to, tween.e), box));
+    applyRect(nodes.win, { x: 0, y: 0, w: box.w, h: box.h, r: lerp(tween.fromR, tween.toR, tween.e) });
+  }
+
+  async function tweenNative(next: ShellForm, ms: number, plan?: NativePlan | null): Promise<void> {
+    const ready = plan === undefined ? await planNative(next) : plan;
+    if (!ready) {
+      return;
+    }
+    const { target, from } = ready;
     if (options.reduced() || ms <= 0) {
       await setBounds(next, target);
       return;
@@ -513,6 +615,10 @@ export function createShellMotion(
           height: from.height + (target.height - from.height) * e,
         };
         void setBounds(next, rect);
+        if (tween) {
+          tween.e = e;
+          placeTween();
+        }
         if (p < 1) {
           window.requestAnimationFrame(frame);
         } else {
@@ -529,18 +635,23 @@ export function createShellMotion(
       return;
     }
     animating = true;
+    try {
+    // UID 1: on the native window, wait for the form's target size before
+    // choosing any tween target, so nothing is laid out for a stale viewport.
+    const plan = await planNative(next);
+    const targetBox = plan ? { w: plan.target.width, h: plan.target.height } : undefined;
     nodes.win.dataset.shellForm = next;
     syncLay();
-    reserveCardClearance(next);
-    try {
+    reserveCardClearance(next, targetBox);
     if (options.reduced()) {
       clock.cancelAll();
       // UID 5: geometry snaps; the layers cross-fade linearly instead of popping.
       const layers = fadeLayers();
       const before = layers.map((el) => readOpacity(el));
+      holdNative(targetBox);
       paint(next);
       const fades = crossFade(layers, before, next);
-      await tweenNative(next, 0);
+      await tweenNative(next, 0, plan);
       if (native && form === next) {
         paint(next);
       }
@@ -557,9 +668,9 @@ export function createShellMotion(
     const stageMs = tokenMs("--dur-stage", 520);
     const outEase = easeCss("--ease-out");
     const fromWin = winRect(from);
-    const toWin = winRect(next);
+    const toWin = winRect(next, targetBox);
     const fromCmp = composerRect(from);
-    const toCmp = composerRect(next);
+    const toCmp = composerRect(next, targetBox);
 
     if (from === "full" && next === "companion") {
       void fade(nodes.roster, 0, fast);
@@ -610,19 +721,33 @@ export function createShellMotion(
 
     form = next;
     options.onForm(next);
-    const motion = [
-      clock.play(nodes.win, [rectFrames(fromWin), rectFrames(toWin)], stageMs, outEase),
-      clock.play(nodes.composer, [rectFrames(fromCmp), rectFrames(toCmp)], stageMs, outEase),
-      tweenNative(next, stageMs),
-    ];
-    await Promise.all(motion);
-    if (native && form === next) {
-      // The native window resizes while the tween runs, and commitStyles locked
-      // the pre-resize rects in. Repaint against the settled viewport.
-      paint(next);
+    if (plan && targetBox) {
+      // UID 1: the composer and window follow the native window's real rect
+      // every frame instead of a WAAPI tween whose targets were fixed up front.
+      const startBox = viewport();
+      tween = {
+        from: insetsOf(fromCmp, startBox),
+        to: insetsOf(toCmp, targetBox),
+        fromR: fromWin.r,
+        toR: toWin.r,
+        e: 0,
+      };
+      placeTween();
+      holdNative(targetBox);
+      await tweenNative(next, stageMs, plan);
+      tween = null;
+      if (form === next) {
+        paint(next);
+      }
+    } else {
+      await Promise.all([
+        clock.play(nodes.win, [rectFrames(fromWin), rectFrames(toWin)], stageMs, outEase),
+        clock.play(nodes.composer, [rectFrames(fromCmp), rectFrames(toCmp)], stageMs, outEase),
+      ]);
     }
     } finally {
       animating = false;
+      tween = null;
       concealStream(form === "pill");
     }
   }
@@ -809,8 +934,11 @@ export function createShellMotion(
       await morph("pill");
       await sleep(700, gen);
       roll("2");
+      // UID 2: same tick as the bump, as the mock does (4a:1324).
+      options.onBuilderAsks?.(true);
       await sleep(1300, gen);
-      const waitAt = center(nodes.count);
+      // UID 3: aim at the whole "N waiting" pill, as the mock's centerOf(.wt).
+      const waitAt = center(nodes.count.closest<HTMLElement>(".wt") ?? nodes.count);
       await moveCursor(waitAt.x, waitAt.y, 620, gen);
       await sleep(220, gen);
       await press(nodes.composer, 120, gen);
@@ -848,15 +976,27 @@ export function createShellMotion(
       clock.cancelAll();
       paint(next);
       if (native) {
-        void tweenNative(next, 0).then(() => {
-          if (form === next) {
-            paint(next);
+        void planNative(next).then((plan) => {
+          if (!plan || form !== next) {
+            return;
           }
+          holdNative({ w: plan.target.width, h: plan.target.height });
+          paint(next);
+          return tweenNative(next, 0, plan).then(() => {
+            if (form === next) {
+              paint(next);
+            }
+          });
         });
       }
     },
     morph: (next) => morph(next),
     layout: () => {
+      if (tween) {
+        // A resize landed mid-morph: lay the in-flight frame into the new size.
+        placeTween();
+        return;
+      }
       if (running) {
         return;
       }
@@ -867,6 +1007,7 @@ export function createShellMotion(
       clock.cancelAll();
       paint("full");
       nodes.count.textContent = "1";
+      options.onBuilderAsks?.(false);
       if (nodes.cursor) {
         nodes.cursor.style.opacity = "0";
       }

@@ -146,8 +146,17 @@ try {
   await page.locator(".wordmark").waitFor();
   const stage = await page.evaluate(surface);
   assertClean("stage", stage);
-  if (!stage.includes("2m14s · 208 / 8000 tok") || stage.includes("running · 2m14s")) {
+  const flat = stage.replace(/\s+/g, " ");
+  if (!flat.includes("2m14s · 208 / 8000 tok") || flat.includes("running · 2m14s")) {
     throw new Error("stage roster dropped Builder's running state");
+  }
+  // CD ruling b: the video's two-line shape, "2m14s · 208 /" then "8000 tok".
+  const lines = await page.evaluate(() => {
+    const sub = [...document.querySelectorAll(".roster .rrow .sub")].find((el) => /tok/.test(el.textContent ?? ""));
+    return sub ? sub.innerText.split("\n").map((line) => line.trim()) : [];
+  });
+  if (lines.length !== 2 || lines[0] !== "2m14s · 208 /" || lines[1] !== "8000 tok") {
+    throw new Error(`Builder sub is not the video's two lines: ${JSON.stringify(lines)}`);
   }
 
   await page.route("**/v1/snapshot", (route) =>

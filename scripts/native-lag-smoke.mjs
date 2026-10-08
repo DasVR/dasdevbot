@@ -5,6 +5,10 @@
  * companion), and the native composer must use the opaque fallback fill,
  * since a transparent window with no acrylic gives the blur nothing to sample.
  * The Tauri IPC is a stub; set_shell_bounds resizes the page after `lag` ms.
+ *
+ * UID 1 (8b98fae): the composer must also stay inside the window on every
+ * frame of every morph, not just once it settles. A rAF sampler records the
+ * worst overflow while each morph runs (it was 948 / 738 / 30 px).
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -119,6 +123,23 @@ async function run(browser, lag) {
     },
     { snapshot, lag },
   );
+  await page.addInitScript(() => {
+    window.__clip = 0;
+    const sample = () => {
+      const el = document.querySelector(".composer");
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          const over = Math.max(0, -r.left, -r.top, r.right - innerWidth, r.bottom - innerHeight);
+          window.__clip = Math.max(window.__clip, over);
+        }
+      }
+      requestAnimationFrame(sample);
+    };
+    // rAF only: resize events run before rAF in a frame, so this sees what
+    // is painted after the app has re-laid the composer.
+    requestAnimationFrame(sample);
+  });
   await page.goto(origin, { waitUntil: "networkidle" });
   const settle = async () => {
     await page.waitForTimeout(200);
@@ -157,13 +178,28 @@ async function run(browser, lag) {
       throw new Error(`lag ${lag}: native composer is not the opaque fallback (${m.bg}, ${m.filter})`);
     }
   };
+  const clips = {};
+  const step = async (name, act, form) => {
+    await page.evaluate(() => {
+      window.__clip = 0;
+    });
+    await act();
+    await settle();
+    check(await measure(), form);
+    clips[name] = Math.round(await page.evaluate(() => window.__clip));
+  };
   check(await measure(), "full");
-  await page.locator('button[aria-label="Companion window"]').click();
-  await settle();
-  check(await measure(), "companion");
-  await page.locator('button[aria-label="Float as a pill"]').click();
-  await settle();
-  check(await measure(), "pill");
+  await step("full>companion", () => page.locator('button[aria-label="Companion window"]').click(), "companion");
+  await step("companion>pill", () => page.locator('button[aria-label="Float as a pill"]').click(), "pill");
+  await step("pill>companion", () => page.keyboard.press("Escape"), "companion");
+  await step("companion>full", () => page.keyboard.press("Escape"), "full");
+  await step("full>pill", () => page.locator('button[aria-label="Float as a pill"]').click(), "pill");
+  await step("pill>full", () => page.keyboard.press("Escape"), "full");
+  console.log(`native-lag-smoke: lag ${lag} mid-morph composer clip px ${JSON.stringify(clips)}`);
+  const worst = Object.entries(clips).filter(([, px]) => px > 1);
+  if (worst.length) {
+    throw new Error(`lag ${lag}: composer clipped mid-morph ${JSON.stringify(Object.fromEntries(worst))}`);
+  }
   await context.close();
 }
 

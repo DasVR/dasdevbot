@@ -1,5 +1,5 @@
 /**
- * The Ctrl+Alt+Shift+F C1 trigger is dev-only (CD ruling c, UX 2): it sits
+ * The Ctrl+Alt+Shift+F C1 and Ctrl+Alt+Shift+P repo.push triggers are dev-only (CD ruling c, UX 2): they sit
  * behind `import.meta.env.DEV`. Run after `vite build`: the release bundle in
  * apps/desktop/dist must not carry the hotkey or the forced `repo.force_push`
  * emit. A development build (NODE_ENV=development, DEV true) into a scratch directory must
@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../apps/desktop");
-const MARKERS = [/"KeyF"/, /repo\.force_push/, /forced:\s*(?:!0|true)/];
+const MARKERS = [/"KeyF"/, /"KeyP"/, /repo\.force_push/, /forced:\s*(?:!0|true)/];
 
 function scripts(dir) {
   const assets = path.join(dir, "assets");

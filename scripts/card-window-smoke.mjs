@@ -10,7 +10,8 @@
  * - a cancelled Hello prompt returns to the waiting card with no error;
  * - Escape: deny reason -> Back with focus on the card, card -> the window (UX 3);
  * - a destructive approval is the flat ink row only (C1, UX 8).
- * Main window (label "main"): no Approve control exists in any form, the
+ * Main window (label "main"): Alt+Down focuses the waiting step (UID 5);
+ * no Approve control exists in any form, the
  * waiting step only calls open_card_window, and nothing calls sign_decision
  * or undo_decision (UX 2).
  * The Tauri IPC is a stub that records every invoke.
@@ -441,6 +442,18 @@ try {
   await main.locator("[data-waiting='ap_card']").waitFor();
   if ((await main.locator("button.approve, article.card[tabindex]").count()) !== 0) {
     throw new Error("the main window drew a decision control");
+  }
+  // UID 5: Alt+Down in the main window focuses the oldest waiting step.
+  await main.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+  });
+  await main.keyboard.press("Alt+ArrowDown");
+  await main.waitForTimeout(200);
+  if (!(await main.evaluate(() => document.activeElement?.matches("[data-waiting='ap_card']") ?? false))) {
+    const at = await main.evaluate(() => document.activeElement?.outerHTML.slice(0, 80) ?? "none");
+    throw new Error(`main: Alt+Down did not focus the waiting step (focus on ${at})`);
   }
   await main.locator("[data-waiting='ap_card']").focus();
   await holdChord(main);

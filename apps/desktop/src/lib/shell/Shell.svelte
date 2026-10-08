@@ -18,6 +18,7 @@
     COMPANION_PATH,
     ICON_STROKE,
     MAXIMIZE_PATH,
+    RESTORE_PATH,
     MIC_ARC,
     MIC_RECT,
     MINIMIZE_PATH,
@@ -26,6 +27,7 @@
   } from "./icons";
   import { type ShellCapApi, type ShellStageApi } from "./globals";
   import { createShellMotion, type ShellMotion } from "./motion";
+  import stageBgThread from "./stage-bg-thread.webp";
   import {
     CAPTION_GLYPHS,
     SNAP_EVENT,
@@ -39,6 +41,7 @@
   import {
     liveRoster,
     stageRoster,
+    videoWrap,
     type LiveAgent,
     type ReviewerChrome,
     type RosterRow,
@@ -56,10 +59,8 @@
     phase: string;
     reviewer: ReviewerChrome | null;
     pending: ReviewItem[];
-    busy: boolean;
     stage: boolean;
     capture: boolean;
-    onSimulate?: () => void;
     /** A waiting step was opened and the full form is showing it. Tauri opens the card window here. */
     onwaiting?: (id: string) => void;
     children: Snippet;
@@ -71,10 +72,8 @@
     phase,
     reviewer,
     pending,
-    busy,
     stage,
     capture,
-    onSimulate,
     onwaiting,
     children,
   }: Props = $props();
@@ -106,6 +105,23 @@
   /** The Snap overlay owns the pointer over maximize: it reports hover and press. */
   let snapHover = $state(false);
   let snapPress = $state(false);
+  /** Win11 dims caption glyphs while the window is inactive. */
+  let windowActive = $state(typeof document === "undefined" ? true : document.hasFocus());
+
+  $effect(() => {
+    const on = () => {
+      windowActive = true;
+    };
+    const off = () => {
+      windowActive = false;
+    };
+    window.addEventListener("focus", on);
+    window.addEventListener("blur", off);
+    return () => {
+      window.removeEventListener("focus", on);
+      window.removeEventListener("blur", off);
+    };
+  });
 
   /**
    * CD ruling a: Snap Layouts. Keep the native overlay exactly over the drawn
@@ -155,7 +171,9 @@
   });
 
   const waitingShown = $derived(stage && pending.length === 0 ? 1 : pending.length);
-  const rows = $derived(stage ? stageRoster() : liveRoster(agents, reviewer, "reviewer"));
+  /** UID 2: the scripted sequence's count bump, when Builder asks too (mock 4a:1324). */
+  let builderAsks = $state(false);
+  const rows = $derived(stage ? stageRoster(builderAsks) : liveRoster(agents, reviewer, "reviewer"));
 
   function reduced(): boolean {
     return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -218,8 +236,41 @@
   }
 
   /** Escape walks out one level: companion to full, pill to the form before it, thread item to the thread. */
+  /**
+   * UID 5: Alt+Down in the main window focuses the oldest waiting step, the
+   * main window's counterpart of the card's Alt+Down (INTERACTIONS.md keys).
+   * The pill opens out to the full form first, as "N waiting" does.
+   */
+  function onAltDown(event: KeyboardEvent): boolean {
+    if (event.key !== "ArrowDown" || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+      return false;
+    }
+    event.preventDefault();
+    if (event.repeat) {
+      return true;
+    }
+    if (form === "pill") {
+      if (waitingShown > 0) {
+        void openWaiting();
+      }
+      return true;
+    }
+    const step = waitingStep();
+    if (step) {
+      step.scrollIntoView({ block: "nearest", behavior: reduced() ? "auto" : "smooth" });
+      step.focus({ preventScroll: true });
+    }
+    return true;
+  }
+
   function onShellKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Escape" || event.defaultPrevented || event.repeat) {
+    if (event.defaultPrevented) {
+      return;
+    }
+    if (onAltDown(event)) {
+      return;
+    }
+    if (event.key !== "Escape" || event.repeat) {
       return;
     }
     if (form === "companion") {
@@ -304,6 +355,9 @@
         onForm: (next) => {
           form = next;
         },
+        onBuilderAsks: (asks) => {
+          builderAsks = asks;
+        },
       },
     );
     motion = created;
@@ -377,6 +431,8 @@
     </div>
     <div class="other" aria-hidden="true">
       <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <!-- UID 4: the mock's background window shows the real thread (thread.html?capture, mock 4a:1238) under a frost. -->
+      <img class="bgthread" src={stageBgThread} alt="" draggable="false" />
       <div class="frost"></div>
     </div>
   {/if}
@@ -415,7 +471,7 @@
       </div>
       {#if native}
         <!-- CD ruling a: drawn Windows caption buttons at native metrics (Segoe Fluent Icons, Win11 fills, no hover transition), Snap Layouts via the HTMAXBUTTON overlay (src-tauri/src/snap.rs). Declared deviation: OS chrome, Windows-only Phase 1. -->
-        <div class={["captions", fluent && "fluent"]}>
+        <div class={["captions", fluent && "fluent", !windowActive && "inactive"]}>
           <button type="button" aria-label="Minimize" onclick={() => void windowCommand("window_minimize")}>
             {#if fluent}
               <span class="glyph" aria-hidden="true">{CAPTION_GLYPHS.minimize}</span>
@@ -433,7 +489,7 @@
             {#if fluent}
               <span class="glyph" aria-hidden="true">{maximized ? CAPTION_GLYPHS.restore : CAPTION_GLYPHS.maximize}</span>
             {:else}
-              <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MAXIMIZE_PATH} /></svg>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d={maximized ? RESTORE_PATH : MAXIMIZE_PATH} /></svg>
             {/if}
           </button>
           <button type="button" aria-label="Close" onclick={() => void windowCommand("window_close")}>
@@ -456,7 +512,13 @@
           <span class="nm">
             <b>{row.name}</b>
             {#if row.line}
-              <span class="sub">{row.line}</span>
+              {@const wrap = videoWrap(row.line)}
+              {#if wrap}
+                <!-- CD ruling b: the video's two-line shape, "… 208 /" then "8000 tok". -->
+                <span class="sub">{wrap[0]} <br />{wrap[1]}</span>
+              {:else}
+                <span class="sub">{row.line}</span>
+              {/if}
             {/if}
           </span>
           {#if row.kind === "waiting"}
@@ -464,14 +526,6 @@
           {/if}
         </div>
       {/each}
-      {#if onSimulate}
-        <div class="sim">
-          <button type="button" disabled={busy} onclick={() => onSimulate?.()}>
-            {busy ? "Waking Reviewer" : "Simulate repo.push"}
-          </button>
-          <p>Reviewer is a stored row. It runs only when this event wakes it.</p>
-        </div>
-      {/if}
     </aside>
     </div>
 
@@ -605,10 +659,32 @@
     border-radius: 12px;
   }
 
+  .other .dots {
+    position: absolute;
+    left: 16px;
+    top: 16px;
+  }
+
+  /* The mock's iframe: 1100×864 under the 36px window bar, not scaled. */
+  .other .bgthread {
+    position: absolute;
+    left: 0;
+    top: 36px;
+    width: 100%;
+    height: calc(100% - 36px);
+    object-fit: cover;
+    object-position: left top;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  /* Mock 4a:331: the inactive window's own material, rgb(246 242 235 / .5) with blur(3px) saturate(.9). */
   .other .frost {
     position: absolute;
     inset: 36px 0 0;
-    background: color-mix(in oklab, var(--paper-base) 50%, transparent);
+    background: color-mix(in srgb, var(--paper-base) 50%, transparent);
+    -webkit-backdrop-filter: blur(3px) saturate(0.9);
+    backdrop-filter: blur(3px) saturate(0.9);
   }
 
   .win {
@@ -664,16 +740,18 @@
     z-index: 1;
   }
 
-  /* Windows 11 caption metrics: 46px wide, full titlebar height, square.
-     Fills are Win11 light SubtleFillColorSecondary/Tertiary; close hover is
-     #C42B1C with a white glyph. No transition: Windows swaps them at once. */
+  /* Windows 11 caption metrics: 46px wide, the video's 46px titlebar height
+     (not the OS 32px), square. Rest glyph is Win11 light TextFillColorPrimary;
+     fills are SubtleFillColorSecondary/Tertiary; close hover is #C42B1C with
+     a white glyph. No transition in either motion mode: Windows swaps them
+     at once (the reduced-motion block adds none). */
   .captions button {
     width: 46px;
     height: var(--titlebar-height);
     border: 0;
     border-radius: 0;
     background: transparent;
-    color: var(--ink-1);
+    color: rgb(0 0 0 / 0.8956);
     display: grid;
     place-items: center;
     cursor: default;
@@ -689,6 +767,12 @@
   .captions button.os-press {
     background: rgb(0 0 0 / 0.0241);
     color: rgb(0 0 0 / 0.6063);
+  }
+
+  /* Inactive window: Win11 TextFillColorDisabled glyphs at rest; hover and
+     press bring the primary glyph back. */
+  .captions.inactive button:not(:hover, :active, .os-hover, .os-press) {
+    color: rgb(0 0 0 / 0.3614);
   }
 
   .captions button[aria-label="Close"]:hover {
@@ -772,12 +856,6 @@
   .dim {
     color: var(--ink-3);
     font-weight: var(--w-regular);
-  }
-
-  .sim button:active:not(:disabled) {
-    transform: none;
-    transition: none;
-    background: var(--paper-sunken);
   }
 
   .ctl {
@@ -908,35 +986,6 @@
     flex: none;
     border-radius: var(--r-pill);
     background: var(--risk-external);
-  }
-
-  .sim {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s-2);
-    margin: var(--s-4) 10px 0;
-  }
-
-  .sim button {
-    height: 40px;
-    border-radius: var(--r-md);
-    border: 1.5px solid var(--ink-1);
-    background: var(--paper-raised);
-    color: var(--ink-1);
-    font-size: var(--t-meta);
-    font-weight: var(--w-semibold);
-    cursor: pointer;
-  }
-
-  .sim button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .sim p {
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-    line-height: var(--lh-meta);
   }
 
   .stream-slot {

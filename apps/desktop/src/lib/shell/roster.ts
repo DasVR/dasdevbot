@@ -15,6 +15,18 @@ export function runningLine(elapsed: string | null, spent?: number | null, cap?:
   return parts.length > 0 ? parts.join(" · ") : "running";
 }
 
+/**
+ * CD ruling b: the video wraps Builder's sub as "lease bld_02 · 2m14s · 208 /"
+ * then "8000 tok". Without the lease segment the line would fit on one line,
+ * so the break is placed where the video has it: before the cap. Returns the
+ * two lines, or null when the line has no "spent / cap tok" part.
+ * textContent stays "2m14s · 208 / 8000 tok".
+ */
+export function videoWrap(line: string): [string, string] | null {
+  const match = /^(.* \/) (\d+ tok)$/.exec(line);
+  return match ? [match[1], match[2]] : null;
+}
+
 /** Elapsed time in the mock's `2m14s` shape. */
 export function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -23,7 +35,8 @@ export function formatElapsed(ms: number): string {
   return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
 
-export type RosterKind = "quiet" | "waiting" | "running" | "note";
+/** "asking": waiting on you, without the dot (the mock keeps the dot on the selected row). */
+export type RosterKind = "quiet" | "waiting" | "asking" | "running" | "note";
 
 export interface RosterRow {
   id: string;
@@ -50,8 +63,13 @@ export interface ReviewerChrome {
   working: boolean;
 }
 
-/** The three teammates on the shell mock. Builder's mock lease label is replaced by its state. */
-export function stageRoster(): RosterRow[] {
+/**
+ * The three teammates on the shell mock. Builder's mock lease label is
+ * replaced by its state. When the scripted count bumps to 2, Builder asks too:
+ * its sub becomes "waiting on you" on one line, on the same tick (mock
+ * 4a:1324, video frame 282). The dot stays on the selected teammate only.
+ */
+export function stageRoster(builderAsks = false): RosterRow[] {
   return [
     {
       id: "reviewer",
@@ -65,8 +83,8 @@ export function stageRoster(): RosterRow[] {
       id: "builder",
       name: "Builder",
       monogram: "B",
-      kind: "running",
-      line: runningLine("2m14s", 208, 8000),
+      kind: builderAsks ? "asking" : "running",
+      line: builderAsks ? "waiting on you" : runningLine("2m14s", 208, 8000),
       selected: false,
     },
     {

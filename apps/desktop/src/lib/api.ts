@@ -417,7 +417,7 @@ export async function emitDeniedForcePush(): Promise<void> {
   }
 }
 
-/** Demo `repo.push`. The demo never asks for a destructive force-push. */
+/** Dev-only demo `repo.push` (Ctrl+Alt+Shift+P in App.svelte; no visible control, CD ruling c). */
 export async function emitPush(): Promise<void> {
   if (tauriInternals()) {
     await tauriInvoke()("daemon_emit_demo", { forced: false });

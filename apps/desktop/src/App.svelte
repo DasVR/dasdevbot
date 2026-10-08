@@ -40,7 +40,6 @@
   let snapshot = $state<Snapshot | null>(null);
   let settingsOpen = $state(false);
   let error = $state<string | null>(null);
-  let busy = $state(false);
   /** When this window first saw each teammate running. The snapshot has no start time. */
   let runningSince = $state<Record<string, number>>({});
   let primed = $state(false);
@@ -175,18 +174,6 @@
       }
     } catch (err) {
       error = err instanceof Error ? err.message : "The daemon is not reachable.";
-    }
-  }
-
-  async function simulate(): Promise<void> {
-    busy = true;
-    try {
-      await emitPush();
-      await refresh();
-    } catch (err) {
-      error = err instanceof Error ? err.message : "The event was not accepted.";
-    } finally {
-      busy = false;
     }
   }
 
@@ -354,18 +341,24 @@
     const onHash = () => syncSettings();
     globalThis.addEventListener("hashchange", onHash);
     const stopPolling = startPolling(refresh, 1000);
-    // CD ruling c / UX 2: C1 has no visible control. In dev builds only
-    // (`vite`, import.meta.env.DEV), Ctrl+Alt+Shift+F files a force-push the
-    // daemon denies, so the flat ink row can be shown on cue. `vite build`
-    // compiles this block out; scripts/demo-trigger-gate.mjs checks dist.
+    // CD ruling c / UX 2: no demo trigger is a visible control ("Simulate
+    // repo.push" is gone from the UI). In dev builds only (`vite`,
+    // import.meta.env.DEV), Ctrl+Alt+Shift+P files a repo.push that wakes
+    // Reviewer, and Ctrl+Alt+Shift+F files a force-push the daemon denies, so
+    // the flat ink C1 row can be shown on cue. `vite build` compiles this
+    // block out; scripts/demo-trigger-gate.mjs checks dist.
     let onC1Key: ((event: KeyboardEvent) => void) | null = null;
     if (import.meta.env.DEV) {
       onC1Key = (event: KeyboardEvent) => {
-        if (shell.stage || !event.ctrlKey || !event.altKey || !event.shiftKey || event.code !== "KeyF") {
+        if (shell.stage || !event.ctrlKey || !event.altKey || !event.shiftKey) {
+          return;
+        }
+        const emit = event.code === "KeyF" ? emitDeniedForcePush : event.code === "KeyP" ? emitPush : null;
+        if (!emit) {
           return;
         }
         event.preventDefault();
-        void emitDeniedForcePush()
+        void emit()
           .then(() => refresh())
           .catch((err: unknown) => {
             error = err instanceof Error ? err.message : "The event was not accepted.";
@@ -409,10 +402,8 @@
   phase={PHASE}
   reviewer={reviewerChrome}
   pending={openReviews}
-  {busy}
   stage={shell.stage}
   capture={shell.capture}
-  onSimulate={shell.stage ? undefined : () => void simulate()}
   onwaiting={() => void reviewCard()}
 >
   {#if shell.stage && snapshot == null}
