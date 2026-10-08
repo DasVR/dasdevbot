@@ -205,6 +205,6 @@ mod tests {
         assert_eq!(min_size(ShellForm::Full, 520.0, 600.0), None);
         assert_eq!(min_size(ShellForm::Companion, 400.0, 790.0), None);
         assert_eq!(min_size(ShellForm::Pill, 400.0, 52.0), None);
-        assert!(FULL_MIN_WIDTH >= 700.0);
+        const { assert!(FULL_MIN_WIDTH >= 700.0) };
     }
 }
