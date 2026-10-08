@@ -61,13 +61,13 @@ A gap is counted on every head that still has it.
 | Mock | App surface | Where it lives |
 | --- | --- | --- |
 | `mocks/1a-voice-talk.html` | Push-to-talk mic lane | No head |
-| `mocks/1b-voice-approve.html` | Voice approve | Waived. Not a build target |
+| `mocks/1b-voice-approve.html` | Voice approve | DEVIATION. Not built: security rule C6, voice never approves (`DASDEVBOT-LOOK.md:325`) |
 | `mocks/1c-voice-destructive.html` | Flat destructive row | #22 and #26. Clay card on main, #21, #24, #27 |
 | `mocks/2a-approval-hold.html`, `approval-card.html` | Waiting card, hold, receipt | main, #21, #22, #26 |
 | `mocks/3a-modes.html` | Here / Focus / Away | Radios on #24. Return sheet missing |
 | `mocks/4a-shell-morph.html` | Full, companion, pill | #24 |
 | `mocks/5a-notify-review.html` | OS notification | In-app toast only, on #26 |
-| `mocks/6a-live.html` | Island, menu flyout, tray | Island waived. Tray numeral on #26, not frame-matched |
+| `mocks/6a-live.html` | Island, menu flyout, tray | Island and menu flyout: DEVIATION, Phase 1 is Windows only (`DASDEVBOT-LOOK.md:328`). Tray numeral on #26, not frame-matched |
 | `mocks/7a-characters.html` | Mascot study | Curl is the mascot. Other characters are not a build target |
 | `mocks/7b-greeting.html` | Daily greeting | #27 |
 | `mocks/7c-first-run.html` | First-run steps | #27 |
@@ -76,7 +76,7 @@ A gap is counted on every head that still has it.
 
 ## Parity scores
 
-Matched properties over the 27-property set. A waived pen-stroke miss (mock computed 2.33px, CD ruling 1.75px) still counts as a raw miss.
+Matched properties over the 27-property set. The pen-stroke miss (mock computed 2.33px; the app is 1.75px) is a DEVIATION under the one-pen rule (`DASDEVBOT-LOOK.md:58`) and still counts as a raw miss.
 
 | Surface | Viewport | Matched | Total | Rate |
 | --- | --- | --- | --- | --- |
@@ -99,7 +99,7 @@ Mock card-rise frames reach opacity 1 and `transform: none` by about frame 44 (5
 
 Hover, normal motion: mock and app both lift about 1px (`translateY` near −0.7px). Press sampled at 30ms is mid-transition (scale about 0.994) toward 0.97 × 0.955. Source durations match.
 
-Reduced motion: the app rise is a 160ms fade with no transform, and the press transform is `none`. `2a` under `?rm` still hover-translates and press-scales. That is the mock's bug and is waived. #21's reduced-motion press background measured `rgb(30, 27, 24)` (`#1E1B18`). The other heads stay `rgb(43, 39, 35)`.
+Reduced motion: the app rise is a 160ms fade with no transform, and the press transform is `none`. `2a` under `?rm` still hover-translates and press-scales. The app is a DEVIATION from those frames under the reduced-motion rule, no transforms anywhere (`DASDEVBOT-LOOK.md:320`). #21's reduced-motion press background measured `rgb(30, 27, 24)` (`#1E1B18`). The other heads stay `rgb(43, 39, 35)`.
 
 ## Unimplemented
 
@@ -108,25 +108,25 @@ Reduced motion: the app rise is a 160ms fade with no transform, and the press tr
 | `mocks/1a-voice-talk.html` | Push-to-talk mic lane. Phase 1 also lists voice as out of scope. |
 | `mocks/5a-notify-review.html` | OS notification whose only action is Review. #26 has an in-app toast with Review. |
 | `mocks/3a-modes.html` | Welcome-back review sheet when returning from Away. #24 draws the three modes and does not run the return sheet. |
-| `mocks/6a-live.html` | Dynamic Island and the macOS menu flyout. Waived for Windows-only Phase 1. The tray numeral on #26 was not frame-matched. |
+| `mocks/6a-live.html` | Dynamic Island and the macOS menu flyout: DEVIATION, Phase 1 is Windows only, so the island and the menu bar are out of scope (`DASDEVBOT-LOOK.md:328`). The tray numeral on #26 was not frame-matched. |
 | `interactions.html` | Roster drag, the only spring in the spec. |
 
-## Waived by rule
+## Classified by rule
 
-These are not gaps.
+These are not gaps. Each row is PARITY or DEVIATION and cites the rule it follows.
 
-| Rule | Cite |
-| --- | --- |
-| C6. Voice never approves. `1b` is not a build target. The reply is "Approve on screen." | `DASDEVBOT-LOOK.md:325` |
-| C1. Destructive is denied. `1c` still plays a 1200ms voice hold. That is the mock's bug. #22 and #26 show the flat ink row. | `DASDEVBOT-LOOK.md:326` |
-| Reduced motion has no transforms. `2a` under `?rm` still translates on hover and scales the button to 0.97, 0.955. The app rise is a 160ms fade and the press transform is none. | `DASDEVBOT-LOOK.md:320` |
-| The receipt is 60px. The mock row is `min-height: 58px`. The filed article on main measured 60px tall. | `mocks/2a-approval-hold.html:193` |
-| The stamp is `HH:MM:SS EDT`. The filed mock stamp read "4:31:08 PM". The app stamp read "11:14:07 EDT". | `DASDEVBOT-LOOK.md:127` |
-| Pens are 1.75. The mock approve stroke computed at 2.33px. The app pen is 1.75px. Line icons on the app are 1.5. | `DASDEVBOT-LOOK.md:58` |
-| The mascot is Curl. `7a` is a character study. The other characters are not a build target. | `SCREENS.md:197` |
-| Windows only. The island and the menu bar in `6a` are out. The tray stays. | `SCREENS.md:172` |
-| During the 6s undo the card stays glass. A glass card in that window follows the ruling. | `DASDEVBOT-LOOK.md:321` |
-| The queue is oldest-first and does not auto-advance. #26 rendered Reviewer 11:14, then the expiring row in place ("expires 1:30"), then Builder 11:52. Header count was 3. | `SCREENS.md:160` |
+| Class | Rule | Cite |
+| --- | --- | --- |
+| DEVIATION | Security rule C6. Voice never approves. `1b` is not a build target. The reply is "Approve on screen." | `DASDEVBOT-LOOK.md:325` |
+| DEVIATION | Security rule C1. Destructive is denied, never asked. `1c` still plays a 1200ms voice hold, which the rule removes. The app shows the flat ink row (#22, #26, and #24 from 38ded72). | `DASDEVBOT-LOOK.md:326` |
+| DEVIATION | Reduced motion has no transforms. `2a` under `?rm` still translates on hover and scales the button to 0.97, 0.955. The app rise is a 160ms fade and the press transform is none. | `DASDEVBOT-LOOK.md:320` |
+| PARITY | The receipt is 60px. The mock row is `min-height: 58px`. The filed article on main measured 60px tall, which meets that min-height. | `mocks/2a-approval-hold.html:193` |
+| DEVIATION | The stamp is `HH:MM:SS EDT`. The filed mock stamp read "4:31:08 PM". The app stamp read "11:14:07 EDT". | `DASDEVBOT-LOOK.md:127` |
+| DEVIATION | Pens are 1.75. The mock approve stroke computed at 2.33px. The app pen is 1.75px. Line icons on the app are 1.5. | `DASDEVBOT-LOOK.md:58` |
+| DEVIATION | The mascot is Curl. `7a` is a character study. The other characters are not a build target. | `SCREENS.md:197` |
+| DEVIATION | Windows only. The island and the menu bar in `6a` are out. The tray stays. | `SCREENS.md:172` |
+| PARITY | During the 6s undo the card stays glass. A glass card in that window follows the ruling. | `DASDEVBOT-LOOK.md:321` |
+| PARITY | The queue is oldest-first and does not auto-advance. #26 rendered Reviewer 11:14, then the expiring row in place ("expires 1:30"), then Builder 11:52. Header count was 3. | `SCREENS.md:160` |
 
 Hidden cards cannot be approved: the seen lock is an `IntersectionObserver` plus `seenArmed` (`SEEN_LOCK_MS` 800) before approve. This audit did not run a separate offscreen approve attempt.
 
