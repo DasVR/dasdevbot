@@ -3,9 +3,9 @@
  * The stage roster and a live snapshot that carries a lease token and an epoch
  * must not put the word "lease", a job id, the token or the epoch into text, a
  * tooltip, a title, or an aria label.
- * A running teammate shows the mock's sub with the lease label replaced by its
- * state: "running · 2m14s · 208 / 8000 tok" on the stage, live elapsed and
- * spent / cap tokens on a snapshot (CD ruling 2, Oct 1 8:38 PM).
+ * A running teammate shows the video's sub without the lease segment:
+ * "2m14s · 208 / 8000 tok" on the stage, live elapsed and spent / cap tokens
+ * on a snapshot (DE ruling 2 and CD ruling b, Oct 8).
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -146,7 +146,7 @@ try {
   await page.locator(".wordmark").waitFor();
   const stage = await page.evaluate(surface);
   assertClean("stage", stage);
-  if (!stage.includes("running · 2m14s · 208 / 8000 tok")) {
+  if (!stage.includes("2m14s · 208 / 8000 tok") || stage.includes("running · 2m14s")) {
     throw new Error("stage roster dropped Builder's running state");
   }
 
@@ -161,7 +161,7 @@ try {
   await page.locator(".wordmark").waitFor();
   await page.waitForFunction(
     ({ spent, cap }) =>
-      new RegExp(`^running · \\d+m\\d\\ds · ${spent} / ${cap} tok$`).test(document.querySelector(".roster .sub")?.textContent ?? ""),
+      new RegExp(`^\\d+m\\d\\ds · ${spent} / ${cap} tok$`).test(document.querySelector(".roster .sub")?.textContent ?? ""),
     { spent: SPENT, cap: CAP },
     { timeout: 10000 },
   );

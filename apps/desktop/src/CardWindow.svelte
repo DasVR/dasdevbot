@@ -4,7 +4,7 @@
   // undone. The main window can only ask to show it.
   import { onMount } from "svelte";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
-  import { decide, getSnapshot, isHelloCancel, undo, type Approval, type Decision } from "./lib/api";
+  import { decide, getSnapshot, isHelloCancel, undo, waitsOnHuman, type Approval, type Decision } from "./lib/api";
   import { startPolling } from "./lib/poll";
 
   let approvals = $state<Approval[]>([]);
@@ -15,7 +15,7 @@
 
   // The open card, or the one whose undo window is still running.
   const current = $derived(
-    approvals.find((approval) => approval.status === "pending") ??
+    approvals.find(waitsOnHuman) ??
       approvals.find(
         (approval) =>
           !approval.committed &&
@@ -87,6 +87,7 @@
         approval={current}
         busy={deciding}
         shortcutTarget={current.status === "pending"}
+        focusOnShow
         ondecide={(decision, reason) => ondecide(current.id, decision, reason)}
         onundo={() => onundo(current.id)}
         onescape={() => mainEl?.focus()}

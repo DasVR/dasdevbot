@@ -347,6 +347,28 @@ export async function getSnapshot(): Promise<Snapshot> {
 }
 
 /**
+ * A card that waits on a person. Destructive work is denied by policy and is
+ * only ever the flat C1 row: it never takes the waiting dot, the pill count or
+ * the card window (UX re-walk nit), even if a row ever arrives as pending.
+ */
+export function waitsOnHuman(approval: Approval): boolean {
+  return approval.status === "pending" && approval.effect_class !== "destructive";
+}
+
+/**
+ * The stream event a filed approval sits under: the request for a card that
+ * was asked, the gate denial for destructive work (the daemon writes only
+ * `gate-denied:<id>` for those, never `approval-requested:<id>`).
+ */
+export function receiptKeys(approval: Approval): string[] {
+  const keys = [`approval-requested:${approval.id}`];
+  if (approval.effect_class === "destructive") {
+    keys.push(`gate-denied:${approval.id}`);
+  }
+  return keys;
+}
+
+/**
  * C1 copy for a denied destructive action (DASDEVBOT-LOOK Phase 1 overrides):
  * "Builder wanted to delete spike/lease-v0." plus the mono command.
  */
@@ -371,7 +393,7 @@ export function destructiveCopy(approval: Pick<Approval, "agent_name" | "action"
 }
 
 /**
- * Dev-only C1 trigger (CD ruling 3): files a `repo.force_push`, which the
+ * Dev-only C1 trigger (CD ruling c, UX 2): files a `repo.force_push`, which the
  * daemon denies by policy and the shell shows only as the flat ink row. No
  * visible control calls this; the hidden hotkey in App.svelte does.
  */

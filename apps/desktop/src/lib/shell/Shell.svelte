@@ -320,7 +320,7 @@
   {/if}
 
   <div class="win" {@attach keepWin} role="application" aria-label="dasdevbot">
-    <header class="tbar" data-tauri-drag-region>
+    <header class={["tbar", native && "native"]} data-tauri-drag-region>
       {#if !native}
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
       {/if}
@@ -671,6 +671,15 @@
 
   .title-comp {
     opacity: 0;
+  }
+
+  /* Native companion (400px): the shell buttons and the 3x46 Windows captions
+     take the right 208px, so a centred "Reviewer" ran under them (UX nit).
+     With no traffic-light dots the left is free: the title sits there, at the
+     .tbar inset, the way Windows titles do. Full form stays centred. */
+  .tbar.native .title-comp {
+    justify-self: start;
+    padding-left: 16px;
   }
 
   .dim {

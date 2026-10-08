@@ -21,8 +21,10 @@
     getSnapshot,
     hlcMillis,
     openCardWindow,
+    receiptKeys,
     shortEventId,
     tauriWindowLabel,
+    waitsOnHuman,
     type Approval,
     type Snapshot,
   } from "./lib/api";
@@ -47,7 +49,7 @@
   const STREAM_ROWS = 40;
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const pending = $derived.by(() => {
-    const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
+    const rows = snapshot?.approvals.filter(waitsOnHuman) ?? [];
     return rows.reduce<Approval | null>((oldest, approval) => {
       if (!oldest || approval.created_at < oldest.created_at) {
         return approval;
@@ -61,7 +63,9 @@
       if (approval.status === "pending") {
         continue;
       }
-      map[`approval-requested:${approval.id}`] = approval;
+      for (const key of receiptKeys(approval)) {
+        map[key] = approval;
+      }
     }
     return map;
   });
@@ -93,7 +97,7 @@
   // Pending is waiting on a human. A decided, uncommitted approval is filing: ink-3, no dot.
   const waitingOnHuman = $derived(
     (snapshot?.approvals ?? []).some(
-      (approval) => approval.agent_id === reviewer?.id && approval.status === "pending",
+      (approval) => approval.agent_id === reviewer?.id && waitsOnHuman(approval),
     ),
   );
   const filingUndo = $derived.by(() => {
@@ -146,7 +150,7 @@
   );
   const openReviews = $derived(
     (snapshot?.approvals ?? [])
-      .filter((approval) => approval.status === "pending")
+      .filter(waitsOnHuman)
       .map((approval) => ({
         id: approval.id,
         agent: approval.agent_name,
@@ -350,26 +354,33 @@
     const onHash = () => syncSettings();
     globalThis.addEventListener("hashchange", onHash);
     const stopPolling = startPolling(refresh, 1000);
-    // CD ruling 3: C1 has no visible control. Ctrl+Alt+Shift+F files a
-    // force-push the daemon denies, so the flat ink row can be shown on cue.
-    const onC1Key = (event: KeyboardEvent) => {
-      if (shell.stage || !event.ctrlKey || !event.altKey || !event.shiftKey || event.code !== "KeyF") {
-        return;
-      }
-      event.preventDefault();
-      void emitDeniedForcePush()
-        .then(() => refresh())
-        .catch((err: unknown) => {
-          error = err instanceof Error ? err.message : "The event was not accepted.";
-        });
-    };
-    globalThis.addEventListener("keydown", onC1Key);
+    // CD ruling c / UX 2: C1 has no visible control. In dev builds only
+    // (`vite`, import.meta.env.DEV), Ctrl+Alt+Shift+F files a force-push the
+    // daemon denies, so the flat ink row can be shown on cue. `vite build`
+    // compiles this block out; scripts/demo-trigger-gate.mjs checks dist.
+    let onC1Key: ((event: KeyboardEvent) => void) | null = null;
+    if (import.meta.env.DEV) {
+      onC1Key = (event: KeyboardEvent) => {
+        if (shell.stage || !event.ctrlKey || !event.altKey || !event.shiftKey || event.code !== "KeyF") {
+          return;
+        }
+        event.preventDefault();
+        void emitDeniedForcePush()
+          .then(() => refresh())
+          .catch((err: unknown) => {
+            error = err instanceof Error ? err.message : "The event was not accepted.";
+          });
+      };
+      globalThis.addEventListener("keydown", onC1Key);
+    }
     const clock = setInterval(() => {
       now = Date.now();
     }, 200);
     return () => {
       globalThis.removeEventListener("hashchange", onHash);
-      globalThis.removeEventListener("keydown", onC1Key);
+      if (onC1Key) {
+        globalThis.removeEventListener("keydown", onC1Key);
+      }
       clearInterval(clock);
       stopPolling();
     };

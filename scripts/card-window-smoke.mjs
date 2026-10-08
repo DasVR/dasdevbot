@@ -80,14 +80,54 @@ const card = {
   undo_until: null,
 };
 
+// The real daemon shape (store.rs record_gate_denial): destructive work is
+// recorded denied and committed at once, and the only stream event is
+// `gate-denied:<id>`. There is never an `approval-requested:<id>` or a pending
+// destructive row.
 const destructive = {
   ...card,
   id: "ap_force",
+  job_id: "job_force",
+  thread_id: "thread_force",
   effect_class: "destructive",
   action: "force_push",
+  // The mock demo routes the scripted force-push to Builder (CD ruling c).
+  agent_id: "builder",
+  agent_name: "Builder",
   purpose: "Force-push phase0. This rewrites the remote branch.",
   draft: "git push --force origin phase0",
+  evidence: { repo: "DasVR/NIL", ref: "phase0", event_id: "ev_force1", kind: "repo.force_push" },
+  provider: "none",
+  model: "",
+  usage_kind: "none",
+  input_tokens: 0,
+  output_tokens: 0,
+  status: "denied",
+  decided_at: now,
+  committed: true,
+  undo_until: null,
 };
+
+const forceEvents = [
+  {
+    id: "ev_force2",
+    version: 1,
+    hlc: `${now + 1}:0:card-smoke`,
+    source: "runtime",
+    kind: "gate.denied",
+    thread_id: "thread_force",
+    idempotency_key: "gate-denied:ap_force",
+  },
+  {
+    id: "ev_force1",
+    version: 1,
+    hlc: `${now}:0:card-smoke`,
+    source: "demo",
+    kind: "repo.force_push",
+    thread_id: "thread_force",
+    idempotency_key: "ui-force",
+  },
+];
 
 const snapshot = {
   protocol: 1,
@@ -195,8 +235,58 @@ const browser = await launchBrowser();
 try {
   await waitForHttp(origin);
 
+  // UX 3: opened with a pending card, the card element itself has focus.
+  // UX 4: the 800ms seen-lock dwell starts when the 520ms rise lands.
+  {
+    const timed = await browser.newPage({ viewport: { width: 560, height: 760 } });
+    await timed.addInitScript(() => {
+      window.__cardTimes = { inserted: null, armed: null };
+      new MutationObserver(() => {
+        const times = window.__cardTimes;
+        if (times.inserted == null && document.querySelector("article.card")) {
+          times.inserted = performance.now();
+        }
+        if (times.armed == null && document.querySelector("article.card .hold-hint.armed")) {
+          times.armed = performance.now();
+        }
+      }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ["class"] });
+    });
+    await timed.addInitScript(...stub({ label: "card", snapshot }));
+    await timed.goto(origin, { waitUntil: "networkidle" });
+    await timed.getByRole("button", { name: "Approve draft" }).waitFor();
+    await timed.waitForFunction(() => document.activeElement?.matches("article.card") ?? false, null, { timeout: 3000 }).catch(() => {});
+    const focused = await timed.evaluate(() => ({
+      card: document.activeElement?.matches("article.card") ?? false,
+      what: document.activeElement?.tagName + "." + (document.activeElement?.className ?? ""),
+    }));
+    if (!focused.card) {
+      throw new Error(`the card window opened with focus on ${focused.what}, not the card`);
+    }
+    await timed.waitForFunction(() => window.__cardTimes.armed != null, null, { timeout: 8000 });
+    const times = await timed.evaluate(() => window.__cardTimes);
+    const dwell = times.armed - times.inserted;
+    // 520 rise + 800 dwell; a little slack for frame timing.
+    if (dwell < 1260) {
+      throw new Error(`the seen lock armed ${Math.round(dwell)}ms after insertion; the dwell must start when the rise lands`);
+    }
+    // UX 6: Enter or Space on Approve with a modifier held never approves.
+    await timed.locator("article.card button.approve").focus();
+    for (const chord of ["Control+Enter", "Meta+Enter", "Alt+Enter", "Shift+Enter", "Control+Space", "Shift+Space"]) {
+      await timed.keyboard.press(chord);
+    }
+    await timed.waitForTimeout(700);
+    if ((await signs(timed)) !== 0) {
+      throw new Error("a modified Enter/Space on Approve signed (bypassing the C4 hold)");
+    }
+    await timed.close();
+  }
+
   // Blind input, reserved hint row, native sight, then Hello in flight.
   const page = await openCard(browser, { snapshot, helloMs: 700 });
+  // Measure once the 520ms rise has landed (the dwell runs 800ms after that).
+  await page.waitForFunction(() => document.querySelector("article.card")?.getAnimations().length === 0, null, {
+    timeout: 3000,
+  });
   const before = await page.locator("article.card .actions").boundingBox();
   await page.locator("article.card button.approve").click();
   await page.locator("article.card button.approve").press("Enter");
@@ -233,9 +323,15 @@ try {
   const hello = await page.evaluate(() => ({
     buttons: document.querySelectorAll("article.card .quiet button").length,
     hint: Boolean(document.querySelector("article.card .hold-hint")),
+    approvedFace: document.querySelectorAll("article.card button.approve .face-done.show").length,
+    idleFace: document.querySelectorAll("article.card button.approve .face-idle:not(.gone)").length,
   }));
   if (hello.buttons !== 0 || hello.hint) {
     throw new Error(`Hello pending drew controls ${JSON.stringify(hello)}`);
+  }
+  // UX 5: during Hello Approve still reads "Approve draft"; "Approved" only after success.
+  if (hello.approvedFace !== 0 || hello.idleFace === 0) {
+    throw new Error(`Approve said Approved during Hello ${JSON.stringify(hello)}`);
   }
   if ((await signs(page)) !== 1) {
     throw new Error("Enter on the armed Approve did not sign exactly once");
@@ -273,10 +369,14 @@ try {
   }
   await cancelled.close();
 
-  // C1: destructive renders only as the flat row, in both windows.
-  for (const label of ["card", "main"]) {
+  // C1 from the real daemon shape: the main window renders the denied,
+  // committed destructive approval as the flat row under its gate-denied event;
+  // it takes no waiting dot and no pill count; the card window shows no card.
+  {
     const flat = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    await flat.addInitScript(...stub({ label, snapshot: { ...snapshot, approvals: [destructive] } }));
+    await flat.addInitScript(
+      ...stub({ label: "main", snapshot: { ...snapshot, approvals: [destructive], events: forceEvents } }),
+    );
     await flat.goto(origin, { waitUntil: "networkidle" });
     await flat.locator("article.card.flat").first().waitFor();
     const row = await flat.evaluate(() => {
@@ -286,19 +386,52 @@ try {
         buttons: card?.querySelectorAll("button").length ?? -1,
         tab: card?.getAttribute("tabindex"),
         approve: document.querySelectorAll("button.approve, [data-waiting]").length,
+        nothingWaiting: document.body.textContent?.includes("Nothing is waiting.") ?? false,
+        gateRowShown: [...document.querySelectorAll(".event .who")].some((who) => /gate\.denied/.test(who.textContent ?? "")),
       };
     });
-    // CD ruling 3: "<Agent> wanted to force-push <ref>. Destructive actions are off in this build." + the mono command.
+    // CD ruling c: "Builder wanted to force-push <ref>. Destructive actions are off in this build." + the mono command.
+    // The name comes from the approval, not the copy: the stub says Builder, so the row must.
     if (
-      !/\b\w+ wanted to force-push phase0\. Destructive actions are off in this build\./.test(row.text) ||
+      !/\bBuilder wanted to force-push phase0\. Destructive actions are off in this build\./.test(row.text) ||
       !row.text.includes("git push --force origin phase0")
     ) {
-      throw new Error(`${label}: destructive row copy ${JSON.stringify(row)}`);
+      throw new Error(`main: destructive row copy ${JSON.stringify(row)}`);
     }
     if (row.buttons !== 0 || row.tab != null || row.approve !== 0) {
-      throw new Error(`${label}: destructive row has controls ${JSON.stringify(row)}`);
+      throw new Error(`main: destructive row has controls ${JSON.stringify(row)}`);
+    }
+    if (row.nothingWaiting) {
+      throw new Error(`main: the C1 row did not replace the quiet line ${JSON.stringify(row)}`);
+    }
+    if (row.gateRowShown) {
+      throw new Error(`main: the gate.denied event shows as a bare row ${JSON.stringify(row)}`);
+    }
+    // Destructive stays out of the waiting dot and the pill count.
+    const waiting = await flat.evaluate(() => ({
+      dot: document.querySelectorAll(".roster .wdot").length,
+      count: document.querySelector(".cl.pill .n")?.textContent?.trim() ?? null,
+      waitingLine: [...document.querySelectorAll(".roster .sub")].some((el) => el.textContent?.includes("waiting on you")),
+    }));
+    if (waiting.dot !== 0 || waiting.waitingLine || waiting.count !== "0") {
+      throw new Error(`main: destructive took the waiting dot or the pill count ${JSON.stringify(waiting)}`);
     }
     await flat.close();
+
+    const cardPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await cardPage.addInitScript(
+      ...stub({ label: "card", snapshot: { ...snapshot, approvals: [destructive], events: forceEvents } }),
+    );
+    await cardPage.goto(origin, { waitUntil: "networkidle" });
+    await cardPage.waitForTimeout(1500);
+    const inCard = await cardPage.evaluate(() => ({
+      cards: document.querySelectorAll("article.card:not(.flat)").length,
+      approve: document.querySelectorAll("button.approve").length,
+    }));
+    if (inCard.cards !== 0 || inCard.approve !== 0) {
+      throw new Error(`card: a destructive approval opened a deciding card ${JSON.stringify(inCard)}`);
+    }
+    await cardPage.close();
   }
 
   // Main window: no decision control in any form.

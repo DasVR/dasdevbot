@@ -68,8 +68,24 @@ fn snapshot_blocking() -> Result<serde_json::Value, String> {
     response.into_json().map_err(|err| err.to_string())
 }
 
+/// The scripted force-push (the C1 row's cue) is dev-only for now (CD ruling
+/// c, UX 2). This is the one gate: widen it here, e.g. to
+/// `cfg!(any(debug_assertions, feature = "demo-daemon"))` for the demo NSIS.
+pub(crate) const FORCED_DEMO_ALLOWED: bool = cfg!(debug_assertions);
+
+const FORCED_REFUSED: &str = "the scripted force-push exists only in dev builds";
+
+/// Refuse `forced: true` unless the gate allows it, before any HTTP call.
+pub(crate) fn check_forced(forced: bool, allowed: bool) -> Result<(), String> {
+    if forced && !allowed {
+        return Err(FORCED_REFUSED.into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn daemon_emit_demo(forced: bool) -> Result<(), String> {
+    check_forced(forced, FORCED_DEMO_ALLOWED)?;
     off_main(move || emit_blocking(forced)).await
 }
 
@@ -105,5 +121,23 @@ mod tests {
         assert!(super::DAEMON.starts_with("http://127.0.0.1:"));
         assert_eq!(super::demo_kind(false), "repo.push");
         assert_eq!(super::demo_kind(true), "repo.force_push");
+    }
+
+    #[test]
+    fn the_forced_push_is_refused_unless_the_gate_allows_it() {
+        assert_eq!(super::check_forced(false, false), Ok(()));
+        assert_eq!(super::check_forced(true, true), Ok(()));
+        assert_eq!(
+            super::check_forced(true, false),
+            Err(super::FORCED_REFUSED.to_string())
+        );
+    }
+
+    /// `cargo test --release`: a release build refuses before any HTTP call.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_release_build_refuses_the_scripted_force_push() {
+        let refused = tauri::async_runtime::block_on(super::daemon_emit_demo(true));
+        assert_eq!(refused, Err(super::FORCED_REFUSED.to_string()));
     }
 }

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "font-proof": "vite build && node ../../scripts/font-proof.mjs",
+    "font-proof": "vite build && node ../../scripts/demo-trigger-gate.mjs && node ../../scripts/font-proof.mjs",
     "pill-smoke": "vite build && node ../../scripts/pill-approval-smoke.mjs",
     "lease-dom": "vite build && node ../../scripts/lease-dom-smoke.mjs",
     "card-window": "vite build && node ../../scripts/card-window-smoke.mjs",

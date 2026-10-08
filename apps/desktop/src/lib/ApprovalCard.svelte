@@ -60,6 +60,11 @@
     onescape?: () => void;
     /** A receipt shown outside the card window: no Undo control, nothing to decide. */
     readonly?: boolean;
+    /**
+     * The card window: when it opens or is shown with this card pending, focus
+     * goes to the card element itself, never Approve or the body (UX 3).
+     */
+    focusOnShow?: boolean;
   }
 
   let {
@@ -71,6 +76,7 @@
     onundo,
     onescape,
     readonly = false,
+    focusOnShow = false,
   }: Props = $props();
 
   const reducedMotion = new MediaQuery("(prefers-reduced-motion: reduce)");
@@ -86,6 +92,11 @@
   let cardEl = $state<HTMLElement | null>(null);
   let playRise = $state(false);
   let riseNoted = false;
+  /**
+   * The 520ms rise has landed (or there was none). The 800ms seen-lock dwell
+   * starts only then, so the card is armed 800ms after it lands (UX re-walk 4).
+   */
+  let risen = $state(false);
   let arrow = $state<ArrowMark | null>(null);
   let seenArmed = $state(false);
   let cardFocused = $state(false);
@@ -98,6 +109,11 @@
   const inkProgress = $derived(committing === "approve" ? 1 : Math.min(1, Math.max(0, 1 - checkOffset)));
   /** The OS Windows Hello prompt is open (the signed decision is in flight). */
   let helloOpen = $state(false);
+  /**
+   * The signed approve succeeded. Until then (through the hold and Hello)
+   * Approve keeps "Approve draft"; after it, "Approved" with one check (UX 5).
+   */
+  let approvedShown = $state(false);
   let nowMs = $state(Date.now());
 
   type HoldKind = "approve" | "deny";
@@ -184,13 +200,31 @@
     }
   });
 
+  /** The card's own rise (full motion) or fade (reduced) ended: start the dwell. */
+  function onRiseEnd(event: AnimationEvent): void {
+    if (event.target !== event.currentTarget || risen) {
+      return;
+    }
+    if (!/(?:^|-)(?:rise|fade)$/.test(event.animationName)) {
+      return;
+    }
+    risen = true;
+    // The card is in place: it takes focus now (UX 3). A blur while it rose
+    // (loseSight while it was still transparent) does not leave focus on body.
+    focusCard(true);
+    syncSight();
+  }
+
   function bindCard(node: HTMLElement): () => void {
     cardEl = node;
     window.addEventListener(NATIVE_SIGHT_EVENT, onNativeSight);
     if (!riseNoted) {
       riseNoted = true;
       playRise = pending;
+      risen = !playRise;
     }
+    // Opened with this card pending: the card itself takes focus.
+    queueMicrotask(() => focusCard(true));
     return () => {
       window.removeEventListener(NATIVE_SIGHT_EVENT, onNativeSight);
       window.clearTimeout(morphTimer);
@@ -308,7 +342,7 @@
       loseSight();
       return;
     }
-    if (seenArmed || dwelling) {
+    if (seenArmed || dwelling || !risen) {
       return;
     }
     dwelling = true;
@@ -428,8 +462,23 @@
     syncSight();
   }
 
+  /** Focus the card itself (UX 3). `always` on open/show; else only from outside the card. */
+  function focusCard(always: boolean): void {
+    if (!focusOnShow || readonly || destructive || !pending || cardEl == null) {
+      return;
+    }
+    const active = document.activeElement;
+    if (!always && active instanceof HTMLElement && cardEl.contains(active)) {
+      return;
+    }
+    if (active !== cardEl) {
+      cardEl.focus({ preventScroll: true });
+    }
+  }
+
   function onWindowFocus(): void {
     sightCut = false;
+    focusCard(false);
     syncSight();
   }
 
@@ -445,6 +494,9 @@
   function onNativeSight(event: Event): void {
     const visible = event instanceof CustomEvent && (event.detail as { visible?: unknown } | null)?.visible === true;
     sightCut = !visible;
+    if (visible) {
+      focusCard(true);
+    }
     syncSight();
   }
 
@@ -621,6 +673,7 @@
     }
     if (!ok) {
       // Cancelled or refused at the Hello prompt: back to waiting, no error tone.
+      approvedShown = false;
       committing = null;
       checkOffset = 1;
       strike = 0;
@@ -628,6 +681,7 @@
       clearMorph();
       return;
     }
+    approvedShown = decision === "approve";
     await tick();
     if (!cardEl) {
       return;
@@ -841,13 +895,19 @@
 
   /**
    * Enter or Space on the focused Approve button approves once the seen lock
-   * is armed (screen readers). Before that it does nothing.
+   * is armed (screen readers). Before that it does nothing. With Ctrl, Meta,
+   * Alt or Shift held it does nothing either: Ctrl+Enter is the C4 hold on the
+   * card, and must never become a 300ms approve from the button (UX 6).
    */
   function onApproveKeydown(event: KeyboardEvent): void {
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
+    // Always: the button's own Enter/Space activation would click it.
     event.preventDefault();
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) {
+      return;
+    }
     if (event.repeat || !seenArmed) {
       return;
     }
@@ -902,6 +962,8 @@
   aria-label={destructive ? `${deniedLine.wanted} Destructive actions are off in this build.` : pending ? undefined : word}
   aria-keyshortcuts={pending && !destructive && !readonly ? "Control+Enter Control+Backspace" : undefined}
   onkeydown={onCardKeydown}
+  onanimationend={onRiseEnd}
+  onanimationcancel={onRiseEnd}
   onfocusin={syncFocus}
   onfocusout={() => {
     queueMicrotask(() => {
@@ -1039,8 +1101,8 @@
           >
             {#snippet approveFace()}
               <span class="face">
-                <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
-                <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
+                <span class={["face-idle", approvedShown && "gone"]} aria-hidden={approvedShown}>Approve draft</span>
+                <span class={["face-done", approvedShown && "show"]} aria-hidden={!approvedShown}>
                   <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
                     <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
                   </svg>
@@ -1056,7 +1118,7 @@
               style:clip-path={reducedMotion.current ? "none" : `inset(0px ${((1 - inkProgress) * 100).toFixed(3)}% 0px 0px)`}
               style:opacity={reducedMotion.current ? String(inkProgress) : "1"}
             >
-              {#if holdKind === "approve" || checkOffset < 1}
+              {#if (holdKind === "approve" || checkOffset < 1) && !approvedShown}
                 <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
                   <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
                 </svg>

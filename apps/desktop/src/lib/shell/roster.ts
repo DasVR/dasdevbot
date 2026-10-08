@@ -1,17 +1,18 @@
 /**
- * A running teammate's sub, in the mock's two-line shape
- * ("… · 2m14s · 208 / 8000 tok", CD ruling 2). The mock's lease label is
- * replaced by the state word: no lease id, token or fencing epoch reaches the DOM.
+ * A running teammate's sub: the video's "lease bld_02 · 2m14s · 208 / 8000 tok"
+ * without the lease segment, so "2m14s · 208 / 8000 tok" (DE ruling 2, CD
+ * ruling b). Lease identifiers never reach the DOM (UID #24 item 7); that is a
+ * declared deviation from the video frame. With no live values it says "running".
  */
 export function runningLine(elapsed: string | null, spent?: number | null, cap?: number | null): string {
-  const parts = ["running"];
+  const parts: string[] = [];
   if (elapsed) {
     parts.push(elapsed);
   }
   if (spent != null && cap != null && cap > 0) {
     parts.push(`${spent} / ${cap} tok`);
   }
-  return parts.join(" · ");
+  return parts.length > 0 ? parts.join(" · ") : "running";
 }
 
 /** Elapsed time in the mock's `2m14s` shape. */

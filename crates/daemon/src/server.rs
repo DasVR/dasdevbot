@@ -295,10 +295,16 @@ fn referenced_events(
         if let Some(id) = row.decision_event_id.as_deref() {
             remember(store, &mut seen, &mut extra, id)?;
         }
-        let key = format!("approval-requested:{}", row.id);
-        if let Some(event) = store.event_by_key(&key)? {
-            if seen.insert(event.id.clone()) {
-                extra.push(event);
+        // A card was asked for; destructive work was denied at the gate and
+        // has only the denial event. The shell keys its rows to these.
+        for key in [
+            format!("approval-requested:{}", row.id),
+            format!("gate-denied:{}", row.id),
+        ] {
+            if let Some(event) = store.event_by_key(&key)? {
+                if seen.insert(event.id.clone()) {
+                    extra.push(event);
+                }
             }
         }
     }
