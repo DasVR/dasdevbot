@@ -23,7 +23,7 @@ struct ShellState {
 }
 
 #[tauri::command]
-fn sign_decision(
+async fn sign_decision(
     window: tauri::Window,
     state: tauri::State<'_, ShellState>,
     id: String,
@@ -31,52 +31,64 @@ fn sign_decision(
     reason: Option<String>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    finish_signed(
-        &state.data,
-        &label,
-        json!({
-            "op": "decide",
-            "approval_id": id,
-            "decision": decision,
-            "reason": reason,
-        }),
-    )
+    let data = state.data.clone();
+    daemon_http::off_main(move || {
+        finish_signed(
+            &data,
+            &label,
+            json!({
+                "op": "decide",
+                "approval_id": id,
+                "decision": decision,
+                "reason": reason,
+            }),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-fn undo_decision(
+async fn undo_decision(
     window: tauri::Window,
     state: tauri::State<'_, ShellState>,
     id: String,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    finish_signed(
-        &state.data,
-        &label,
-        json!({
-            "op": "undo",
-            "approval_id": id,
-        }),
-    )
+    let data = state.data.clone();
+    daemon_http::off_main(move || {
+        finish_signed(
+            &data,
+            &label,
+            json!({
+                "op": "undo",
+                "approval_id": id,
+            }),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_secret(
+async fn set_secret(
     window: tauri::Window,
     state: tauri::State<'_, ShellState>,
     handle: String,
     value: String,
 ) -> Result<SecretStored, String> {
     let label = window.label().to_string();
-    let response = signed_body(
-        &state.data,
-        &label,
-        json!({
-            "op": "secret",
-            "name": handle,
-            "value": value,
-        }),
-    )?;
+    let data = state.data.clone();
+    let response = daemon_http::off_main(move || {
+        signed_body(
+            &data,
+            &label,
+            json!({
+                "op": "secret",
+                "name": handle,
+                "value": value,
+            }),
+        )
+    })
+    .await?;
     let last4 = response["result"]["last4"]
         .as_str()
         .unwrap_or_default()
@@ -227,8 +239,8 @@ fn open_shell() -> ShellState {
 
 /// Session bearer for the webview. The daemon never embeds this in HTML.
 #[tauri::command]
-fn session_token() -> Result<String, String> {
-    read_session_token()
+async fn session_token() -> Result<String, String> {
+    daemon_http::off_main(read_session_token).await
 }
 
 pub(crate) fn read_session_token() -> Result<String, String> {
@@ -496,6 +508,46 @@ mod tests {
         );
         for banned in ["--allow-remote", "--web", "--dev-env-secrets", "--token"] {
             assert!(!args.iter().any(|arg| arg == banned), "{banned}");
+        }
+    }
+
+    /// A sync `#[tauri::command]` runs on the main thread in Tauri 2. Every
+    /// command that touches the daemon (HTTP, the shell socket, Windows Hello)
+    /// or the disk must be async and run its blocking work off the main thread.
+    #[test]
+    fn daemon_commands_never_block_the_main_thread() {
+        let dir = format!("{}/src", env!("CARGO_MANIFEST_DIR"));
+        let mut source = String::new();
+        for file in ["lib.rs", "daemon_http.rs"] {
+            source.push_str(&std::fs::read_to_string(format!("{dir}/{file}")).unwrap());
+        }
+        for name in [
+            "daemon_snapshot",
+            "daemon_emit_demo",
+            "sign_decision",
+            "undo_decision",
+            "set_secret",
+            "session_token",
+        ] {
+            let sync = [format!("fn {name}("), format!("pub(crate) fn {name}(")];
+            let lines: Vec<&str> = source.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                if sync
+                    .iter()
+                    .any(|needle| trimmed.starts_with(needle.as_str()))
+                {
+                    let above = lines[..index].iter().rev().find(|l| !l.trim().is_empty());
+                    assert!(
+                        above.is_none_or(|l| !l.contains("#[tauri::command]")),
+                        "{name} is a sync tauri command and would block the main thread"
+                    );
+                }
+            }
+            assert!(
+                source.contains(&format!("async fn {name}(")),
+                "{name} must be an async command"
+            );
         }
     }
 
