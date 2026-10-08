@@ -19,7 +19,7 @@
     "27": { "P0": 2, "P1": 2, "P2": 1 }
   },
   "scores": [
-    { "surface": "approval card chrome, main vs 2a", "viewport": "1280x800", "matched": 123, "total": 133, "note": "Page x/y and content height excluded. Pen stroke 2.33 vs 1.75 is a waived CD ruling, still counted as a raw miss." },
+    { "surface": "approval card chrome, main vs 2a", "viewport": "1280x800", "matched": 123, "total": 133, "note": "Page x/y and content height excluded. Pen stroke 2.33 vs 1.75 is a DEVIATION by rule (DASDEVBOT-LOOK.md:58), still counted as a raw miss." },
     { "surface": "approval card chrome, #21 vs 2a", "viewport": "1280x800", "matched": 123, "total": 133, "note": "Same chrome misses as main. #21 adds --ink-press, which this resting sample does not include." },
     { "surface": "approval card chrome, #26 vs 2a", "viewport": "1280x800", "matched": 123, "total": 133, "note": "Same resting chrome as main." },
     { "surface": "thread composer, #22 shot=composer vs thread.html", "viewport": "1280x800", "matched": 92, "total": 108, "note": "Glass matches on the lit shot. The approval shot's composer is paper until hover." },
@@ -28,23 +28,23 @@
     { "surface": "first-run GitHub step, #27 vs 7c", "viewport": "1280x800", "matched": 101, "total": 108, "note": "Title, count, and 48px slot match on type. Primary button shadow does not." }
   ],
   "unimplemented": [
-    { "mock": "mocks/1a-voice-talk.html", "surface": "Push-to-talk mic lane", "note": "No voice surface in any head. Phase 1 brief also lists voice as out of scope. 1b is waived separately." },
+    { "mock": "mocks/1a-voice-talk.html", "surface": "Push-to-talk mic lane", "note": "No voice surface in any head. Phase 1 brief also lists voice as out of scope. 1b is a DEVIATION by security rule C6 (DASDEVBOT-LOOK.md:325)." },
     { "mock": "mocks/5a-notify-review.html", "surface": "OS notification whose only action is Review", "note": "#26 has an in-app toast with a Review button. No OS notification." },
     { "mock": "mocks/3a-modes.html", "surface": "Welcome-back review sheet when returning from Away", "note": "#24 draws Here / Focus / Away. It does not run the return sheet." },
-    { "mock": "mocks/6a-live.html", "surface": "Dynamic Island and macOS menu flyout", "note": "Waived for Windows-only Phase 1. The tray numeral on #26 is the remaining live surface and was not frame-matched." },
+    { "mock": "mocks/6a-live.html", "surface": "Dynamic Island and macOS menu flyout", "note": "DEVIATION by rule: Windows-only Phase 1 (SCREENS.md:172). The tray numeral on #26 is the remaining live surface and was not frame-matched." },
     { "mock": "interactions.html", "surface": "Roster drag, the only spring", "note": "No teammate drag. Shell morph uses ease-out, not --spring-soft." }
   ],
-  "waived": [
-    { "rule": "C6 voice never approves. 1b is not a build target. The reply is \"Approve on screen.\"", "cite": "DASDEVBOT-LOOK.md:325" },
-    { "rule": "C1 destructive is denied. 1c still plays a 1200ms voice hold. That is the mock's bug. #22 and #26 show the flat ink row.", "cite": "DASDEVBOT-LOOK.md:326" },
-    { "rule": "Reduced motion has no transforms. 2a under ?rm still translates on hover and scales the button to 0.97, 0.955. The app rise is a 160ms fade and the press transform is none.", "cite": "DASDEVBOT-LOOK.md:320" },
-    { "rule": "The receipt is 60px. The mock row is min-height 58px. The filed article on main measured 60px.", "cite": "mocks/2a-approval-hold.html:193" },
-    { "rule": "The stamp is HH:MM:SS EDT. The filed mock stamp was \"4:31:08 PM\". The app stamp was \"11:14:07 EDT\".", "cite": "DASDEVBOT-LOOK.md:127" },
-    { "rule": "Pens are 1.75. The mock approve stroke computed at 2.33px. The app pen is 1.75px. Line icons on the app are 1.5.", "cite": "DASDEVBOT-LOOK.md:58" },
-    { "rule": "The mascot is Curl. 7a is a character study that includes Curl. The other characters are not a build target.", "cite": "SCREENS.md:197" },
-    { "rule": "Windows only. The island and the menu bar in 6a are out. The tray stays.", "cite": "SCREENS.md:172" },
-    { "rule": "During the 6s undo the card stays glass. A glass card in that window is the ruling, not a miss against a paper mock frame.", "cite": "DASDEVBOT-LOOK.md:321" },
-    { "rule": "The queue is oldest-first and does not auto-advance. #26 rendered Reviewer 11:14, then the expiring row in place (\"expires 1:30\"), then Builder 11:52. The header count was 3.", "cite": "SCREENS.md:160" }
+  "classified": [
+    { "class": "DEVIATION", "rule": "Security rule C6. Voice never approves. 1b is not a build target. The reply is \"Approve on screen.\"", "cite": "DASDEVBOT-LOOK.md:325" },
+    { "class": "DEVIATION", "rule": "Security rule C1. Destructive is denied, never asked. 1c still plays a 1200ms voice hold, which the rule removes. #22 and #26 show the flat ink row.", "cite": "DASDEVBOT-LOOK.md:326" },
+    { "class": "DEVIATION", "rule": "Reduced motion has no transforms. 2a under ?rm still translates on hover and scales the button to 0.97, 0.955. The app rise is a 160ms fade and the press transform is none.", "cite": "DASDEVBOT-LOOK.md:320" },
+    { "class": "PARITY", "rule": "The receipt is 60px. The mock row is min-height 58px. The filed article on main measured 60px, which meets that min-height.", "cite": "mocks/2a-approval-hold.html:193" },
+    { "class": "DEVIATION", "rule": "The stamp is HH:MM:SS EDT. The filed mock stamp was \"4:31:08 PM\". The app stamp was \"11:14:07 EDT\".", "cite": "DASDEVBOT-LOOK.md:127" },
+    { "class": "DEVIATION", "rule": "Pens are 1.75. The mock approve stroke computed at 2.33px. The app pen is 1.75px. Line icons on the app are 1.5.", "cite": "DASDEVBOT-LOOK.md:58" },
+    { "class": "DEVIATION", "rule": "The mascot is Curl. 7a is a character study that includes Curl. The other characters are not a build target.", "cite": "SCREENS.md:197" },
+    { "class": "DEVIATION", "rule": "Windows only. The island and the menu bar in 6a are out. The tray stays.", "cite": "SCREENS.md:172" },
+    { "class": "PARITY", "rule": "During the 6s undo the card stays glass. A glass card in that window follows the ruling.", "cite": "DASDEVBOT-LOOK.md:321" },
+    { "class": "PARITY", "rule": "The queue is oldest-first and does not auto-advance. #26 rendered Reviewer 11:14, then the expiring row in place (\"expires 1:30\"), then Builder 11:52. The header count was 3.", "cite": "SCREENS.md:160" }
   ],
   "needsCdRuling": [
     {

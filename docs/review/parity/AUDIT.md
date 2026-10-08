@@ -127,6 +127,8 @@ These are not gaps. Each row is PARITY or DEVIATION and cites the rule it follow
 | DEVIATION | Windows only. The island and the menu bar in `6a` are out. The tray stays. | `SCREENS.md:172` |
 | PARITY | During the 6s undo the card stays glass. A glass card in that window follows the ruling. | `DASDEVBOT-LOOK.md:321` |
 | PARITY | The queue is oldest-first and does not auto-advance. #26 rendered Reviewer 11:14, then the expiring row in place ("expires 1:30"), then Builder 11:52. Header count was 3. | `SCREENS.md:160` |
+| DEVIATION | Builder's sub drops the video's `lease bld_02` segment: lease identifiers never reach the DOM (DE ruling 2, CD ruling b, UI Designer #24 item 7). The line keeps the video's two-line shape, "2m14s · 208 /" then "8000 tok" (`lease-dom-smoke`). | `apps/desktop/src/lib/shell/roster.ts:1-5` |
+| DEVIATION | Drawn Windows caption buttons at native metrics, OS chrome, Windows-only Phase 1 (CD ruling a). The mock's traffic-light dots are macOS chrome; the app draws 46px Win11 caption buttons with Snap Layouts on maximize. | `DASDEVBOT-LOOK.md:328` |
 
 Hidden cards cannot be approved: the seen lock is an `IntersectionObserver` plus `seenArmed` (`SEEN_LOCK_MS` 800) before approve. This audit did not run a separate offscreen approve attempt.
 
