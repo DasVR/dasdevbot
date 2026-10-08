@@ -11,6 +11,7 @@
 
 mod daemon_http;
 mod geometry;
+mod native_sight;
 mod shell_form;
 
 use std::io::{BufRead, BufReader, Write};
@@ -298,8 +299,10 @@ fn open_card_window(app: tauri::AppHandle) -> Result<(), String> {
     card.set_focus().map_err(|err| err.to_string())
 }
 
-/// The card window hides instead of closing, so it can be shown again.
+/// Forwards sight changes to the page, and the card window hides instead of
+/// closing, so it can be shown again.
 fn keep_card_window(window: &tauri::Window, event: &tauri::WindowEvent) {
+    native_sight::forward(window, event);
     if window.label() != CARD_WINDOW {
         return;
     }
@@ -594,5 +597,14 @@ mod tests {
             .map(|w| w["label"].as_str().unwrap())
             .collect();
         assert_eq!(labels, ["main", "card", "settings", "voice"]);
+        let main = &conf["app"]["windows"][0];
+        assert_eq!(
+            main["minWidth"].as_f64(),
+            Some(crate::shell_form::FULL_MIN_WIDTH)
+        );
+        assert_eq!(
+            main["minHeight"].as_f64(),
+            Some(crate::shell_form::FULL_MIN_HEIGHT)
+        );
     }
 }

@@ -45,6 +45,8 @@
   const PEN_STROKE = "1.75px";
   /** Action area and evidence must be fully in the viewport before the dwell can start. */
   const ACTION_SEEN_RATIO = 0.99;
+  /** Sent by the Tauri shell (`src-tauri/src/native_sight.rs`). */
+  const NATIVE_SIGHT_EVENT = "dasdevbot:native-sight";
 
   interface Props {
     approval: Approval;
@@ -53,6 +55,10 @@
     shortcutTarget?: boolean;
     ondecide?: (decision: Decision, reason?: string) => Promise<boolean>;
     onundo?: () => Promise<boolean>;
+    /** Escape on the card itself. The host moves focus to its container. */
+    onescape?: () => void;
+    /** A receipt shown outside the card window: no Undo control, nothing to decide. */
+    readonly?: boolean;
   }
 
   let {
@@ -62,6 +68,8 @@
     shortcutTarget = false,
     ondecide,
     onundo,
+    onescape,
+    readonly = false,
   }: Props = $props();
 
   const reducedMotion = new MediaQuery("(prefers-reduced-motion: reduce)");
@@ -85,6 +93,8 @@
   let strike = $state(0);
   let checkOffset = $state(1);
   let committing = $state<Decision | null>(null);
+  /** The OS Windows Hello prompt is open (the signed decision is in flight). */
+  let helloOpen = $state(false);
   let nowMs = $state(Date.now());
 
   type HoldKind = "approve" | "deny";
@@ -99,7 +109,9 @@
   let dwelling = false;
   let sightCut = false;
 
-  const locked = $derived(busy || committing !== null);
+  const locked = $derived(busy || committing !== null || helloOpen);
+  /** C1: destructive is denied by policy. It renders only as the flat ink row. */
+  const destructive = $derived(effect === "destructive");
   const duration = $derived(holdDurationMs(effect, holdMs));
   const showUndo = $derived(
     !pending &&
@@ -169,11 +181,13 @@
 
   function bindCard(node: HTMLElement): () => void {
     cardEl = node;
+    window.addEventListener(NATIVE_SIGHT_EVENT, onNativeSight);
     if (!riseNoted) {
       riseNoted = true;
       playRise = pending;
     }
     return () => {
+      window.removeEventListener(NATIVE_SIGHT_EVENT, onNativeSight);
       window.clearTimeout(morphTimer);
       cancelAnimationFrame(holdFrame);
       if (cardEl === node) {
@@ -418,6 +432,17 @@
     syncSight();
   }
 
+  /**
+   * The Tauri shell forwards minimize and focus changes, because WebView2 is
+   * not guaranteed to fire blur or visibilitychange for them. Not visible acts
+   * like a window blur. Coming back starts the dwell from zero.
+   */
+  function onNativeSight(event: Event): void {
+    const visible = event instanceof CustomEvent && (event.detail as { visible?: unknown } | null)?.visible === true;
+    sightCut = !visible;
+    syncSight();
+  }
+
   function wait(ms: number): Promise<void> {
     return new Promise((resolve) => {
       window.setTimeout(resolve, ms);
@@ -582,10 +607,19 @@
       return;
     }
     lockHeight();
-    const ok = await runDecide(decision, note);
+    helloOpen = true;
+    let ok = false;
+    try {
+      ok = await runDecide(decision, note);
+    } finally {
+      helloOpen = false;
+    }
     if (!ok) {
+      // Cancelled or refused at the Hello prompt: back to waiting, no error tone.
       committing = null;
       checkOffset = 1;
+      strike = 0;
+      holdSealed = false;
       clearMorph();
       return;
     }
@@ -756,6 +790,21 @@
   }
 
   function onCardKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape" && !event.repeat) {
+      if (denyOpen && !locked) {
+        event.preventDefault();
+        event.stopPropagation();
+        back();
+        return;
+      }
+      if (document.activeElement === cardEl && onescape) {
+        event.preventDefault();
+        event.stopPropagation();
+        cancelHold();
+        onescape();
+        return;
+      }
+    }
     if (event.repeat || isTextEntry(event.target) || document.activeElement !== cardEl) {
       return;
     }
@@ -785,10 +834,19 @@
     cancelHold();
   }
 
+  /**
+   * Enter or Space on the focused Approve button approves once the seen lock
+   * is armed (screen readers). Before that it does nothing.
+   */
   function onApproveKeydown(event: KeyboardEvent): void {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
     }
+    event.preventDefault();
+    if (event.repeat || !seenArmed) {
+      return;
+    }
+    void onApproveClick();
   }
 
   async function onUndoClick(): Promise<void> {
@@ -825,7 +883,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <article
   {@attach bindCard}
-  class={["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
+  class={destructive ? ["card", "flat"] : ["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
   style:--arrow-delay={ARROW_DELAY}
   style:--arrow-head-draw={ARROW_HEAD_DRAW}
   style:--reduced-fade={REDUCED_FADE_EASE}
@@ -834,10 +892,10 @@
   style:--icon-stroke={ICON_STROKE}
   style:--pen-stroke={PEN_STROKE}
   data-risk={risk}
-  tabindex={pending || showUndo ? 0 : undefined}
-  aria-labelledby={pending ? titleId : undefined}
-  aria-label={pending ? undefined : word}
-  aria-keyshortcuts={pending ? "Control+Enter Control+Backspace" : undefined}
+  tabindex={!readonly && !destructive && (pending || showUndo) ? 0 : undefined}
+  aria-labelledby={pending && !destructive ? titleId : undefined}
+  aria-label={destructive ? "Destructive actions are off in this build." : pending ? undefined : word}
+  aria-keyshortcuts={pending && !destructive && !readonly ? "Control+Enter Control+Backspace" : undefined}
   onkeydown={onCardKeydown}
   onfocusin={syncFocus}
   onfocusout={() => {
@@ -853,7 +911,15 @@
     });
   }}
 >
-  {#if pending}
+  {#if destructive}
+    <div class="flat-denied">
+      <svg class="dash" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" /></svg>
+      <div>
+        <p>Destructive actions are off in this build.</p>
+        <p class="cmd">{approval.draft || approval.action}</p>
+      </div>
+    </div>
+  {:else if pending}
     {#if effect === "read"}
       <p class="risk-read">Read</p>
     {:else if effect}
@@ -986,8 +1052,10 @@
       </div>
 
       <div class="quiet">
-        <p>Records your decision. Nothing is posted in this demo.</p>
-        {#if cardFocused && !denyOpen}
+        <p>Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.</p>
+        {#if helloOpen}
+          <p class="hello">Confirm with Windows Hello</p>
+        {:else}
           {#snippet modifier()}
             <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
           {/snippet}
@@ -1001,7 +1069,11 @@
               <path d={DELETE_KEY_PATH} />
             </svg>
           {/snippet}
-          <p class={["hold-hint", seenArmed && "armed"]}>
+          <!-- The row is always reserved, so the buttons never jump when it appears. -->
+          <p
+            class={["hold-hint", seenArmed && "armed", !(cardFocused && !denyOpen) && "reserved"]}
+            aria-hidden={!(cardFocused && !denyOpen)}
+          >
             {#if seenArmed}
               hold {@render modifier()} {@render enterKey()} approve · hold {@render modifier()} {@render deleteKey()} deny
             {:else}
@@ -1038,7 +1110,7 @@
       {#if stamp || decisionShort}
         <p class="stamp">{stamp}{#if stamp && decisionShort}<br />{/if}{decisionShort}</p>
       {/if}
-      {#if showUndo}
+      {#if showUndo && !readonly}
         <button class="undo" type="button" onclick={() => void onUndoClick()}>
           <span class="u">Undo</span><span class="t" aria-hidden="true">{undoSeconds}s</span>
         </button>
@@ -1072,6 +1144,13 @@
     padding: 10px 14px 10px 12px;
     border: 1px solid var(--hairline);
     min-height: 52px;
+  }
+
+  .card.flat {
+    padding: var(--s-2) 0;
+    background: none;
+    box-shadow: none;
+    border-radius: 0;
   }
 
   .card.paper {
@@ -1542,6 +1621,48 @@
     from {
       opacity: 0;
     }
+  }
+
+  .hold-hint.reserved {
+    visibility: hidden;
+    animation: none;
+  }
+
+  .quiet .hello {
+    flex-basis: 100%;
+    color: var(--ink-2);
+  }
+
+  .quiet .hold-hint {
+    flex-basis: 100%;
+  }
+
+  /* C1 (LOOK §326): flat ink row, dash mark, no dot, no card chrome, no hold. */
+  .flat-denied {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    color: var(--ink-1);
+    font-size: var(--t-meta);
+    line-height: var(--lh-meta);
+  }
+
+  .flat-denied .dash {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    margin-top: 2px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: var(--icon-stroke);
+    stroke-linecap: round;
+  }
+
+  .flat-denied .cmd {
+    font-family: var(--font-machine);
+    font-size: var(--t-micro);
+    line-height: var(--lh-micro);
+    color: var(--ink-3);
   }
 
   .reason {

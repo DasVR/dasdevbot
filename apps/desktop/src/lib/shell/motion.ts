@@ -13,9 +13,7 @@ import {
   TITLE_SWAP_DELAY_MS,
   WINDOW_IN_PORTION,
   WINDOW_OUT_PORTION,
-  isMockStage,
   placeComposer,
-  placeWin,
 } from "./geometry";
 import { inTauri, prepareForm, readMetrics, setBounds, type NativeRect } from "./native";
 
@@ -259,6 +257,8 @@ export interface ShellMotion {
   morph: (form: ShellForm) => Promise<void>;
   layout: () => void;
   startSequence: () => void;
+  /** The capture clock in ms (virtual under ?shellCapture). */
+  now: () => number;
   step: (dt: number) => Promise<void>;
   get running(): boolean;
   get pending(): number;
@@ -292,32 +292,24 @@ export function createShellMotion(
     return 1;
   }
 
-  function exactStage(): boolean {
-    if (!options.stage) {
-      return false;
-    }
-    const box = viewport();
-    return isMockStage(box.w, box.h);
-  }
-
+  /**
+   * The browser stage paints the mock's SH rects in CSS pixels at every
+   * viewport, never scaled (G12). At 1280×800 the full window still sits at
+   * 40,52 and runs past the edge, exactly as the mock does.
+   */
   function winRect(next: ShellForm): ShellRect {
-    const box = viewport();
     if (!options.stage) {
+      const box = viewport();
       return { x: 0, y: 0, w: box.w, h: box.h, r: MOCK_FORMS[next].win.r };
     }
-    if (exactStage()) {
-      return { ...MOCK_FORMS[next].win };
-    }
-    return placeWin(next, box);
+    return { ...MOCK_FORMS[next].win };
   }
 
   function composerRect(next: ShellForm): ShellRect {
-    const box = viewport();
-    const win = winRect(next);
-    if (exactStage()) {
-      return { ...MOCK_FORMS[next].composer };
+    if (!options.stage) {
+      return placeComposer(next, viewport(), winRect(next));
     }
-    return placeComposer(next, box, win);
+    return { ...MOCK_FORMS[next].composer };
   }
 
   function opacity(el: HTMLElement, value: number): void {
@@ -374,19 +366,33 @@ export function createShellMotion(
     opacity(nodes.layerComp, next === "companion" ? 1 : 0);
     opacity(nodes.layerPill, pill ? 1 : 0);
     hits(next);
-    concealStream(next !== "full");
+    concealStream(pill);
     opacity(nodes.stream, pill ? 0 : 1);
     streamLayout(next);
     form = next;
     options.onForm(next);
   }
 
+  /**
+   * Only the current form's controls can be reached. Hidden composer layers
+   * and the collapsed roster (with its Simulate buttons) are inert, so a
+   * hidden "1 waiting" or Simulate button is never tabbable.
+   */
   function hits(next: ShellForm): void {
     nodes.layerFull.style.pointerEvents = next === "full" ? "auto" : "none";
     nodes.layerComp.style.pointerEvents = next === "companion" ? "auto" : "none";
     nodes.layerPill.style.pointerEvents = next === "pill" ? "auto" : "none";
+    nodes.layerFull.inert = next !== "full";
+    nodes.layerComp.inert = next !== "companion";
+    nodes.layerPill.inert = next !== "pill";
+    nodes.roster.inert = next !== "full";
   }
 
+  /**
+   * The thread is inert while it is folded into the pill. The companion keeps
+   * its own reflowed thread live: its only control is the waiting step, and
+   * the main window holds no decision control in any form.
+   */
   function concealStream(collapsed: boolean): void {
     nodes.stream.inert = collapsed;
   }
@@ -492,7 +498,7 @@ export function createShellMotion(
       return;
     }
     hits(next);
-    if (next !== "full") {
+    if (next === "pill") {
       concealStream(true);
     }
     const fast = tokenMs("--dur-fast", 140);
@@ -567,7 +573,7 @@ export function createShellMotion(
     }
     } finally {
       animating = false;
-      concealStream(form !== "full");
+      concealStream(form === "pill");
     }
   }
 
@@ -789,6 +795,7 @@ export function createShellMotion(
       void sequence(generation);
     },
     step: (dt) => clock.step(dt),
+    now: () => clock.now(),
     get running() {
       return running;
     },

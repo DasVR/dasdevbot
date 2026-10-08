@@ -4,13 +4,14 @@
   // undone. The main window can only ask to show it.
   import { onMount } from "svelte";
   import ApprovalCard from "./lib/ApprovalCard.svelte";
-  import { decide, getSnapshot, undo, type Approval, type Decision } from "./lib/api";
+  import { decide, getSnapshot, isHelloCancel, undo, type Approval, type Decision } from "./lib/api";
   import { startPolling } from "./lib/poll";
 
   let approvals = $state<Approval[]>([]);
   let error = $state<string | null>(null);
   let deciding = $state(false);
   let now = $state(Date.now());
+  let mainEl = $state<HTMLElement | null>(null);
 
   // The open card, or the one whose undo window is still running.
   const current = $derived(
@@ -41,7 +42,9 @@
       await refresh();
       return true;
     } catch (err) {
-      error = err instanceof Error ? err.message : "The decision was not recorded.";
+      const message = err instanceof Error ? err.message : "The decision was not recorded.";
+      // Cancelling the Hello prompt returns to the waiting card with no error.
+      error = isHelloCancel(message) ? null : message;
       return false;
     } finally {
       deciding = false;
@@ -74,7 +77,7 @@
   });
 </script>
 
-<main class="card-window">
+<main class="card-window" tabindex="-1" bind:this={mainEl}>
   {#if error}
     <p class="note" role="status">{error}</p>
   {/if}
@@ -86,6 +89,7 @@
         shortcutTarget={current.status === "pending"}
         ondecide={(decision, reason) => ondecide(current.id, decision, reason)}
         onundo={() => onundo(current.id)}
+        onescape={() => mainEl?.focus()}
       />
     {/key}
   {:else}
@@ -103,6 +107,7 @@
     align-items: center;
     gap: var(--s-3);
     background: var(--paper-base);
+    outline: none;
   }
 
   .note {

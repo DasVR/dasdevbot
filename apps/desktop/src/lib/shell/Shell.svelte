@@ -4,11 +4,13 @@
     CHROME_DOT,
     DESK_WASH,
     PAPER_GRAIN,
+    OPEN_WAITING_EVENT,
     ROSTER_WIDTH,
     SEND_REST_OPACITY,
     TITLEBAR_HEIGHT,
     TITLE_BUTTON_RADIUS,
     WINDOW_SHADOW,
+    formForWidth,
     type ShellForm,
   } from "./geometry";
   import {
@@ -49,6 +51,8 @@
     stage: boolean;
     capture: boolean;
     onSimulate?: () => void;
+    /** A waiting step was opened and the full form is showing it. Tauri opens the card window here. */
+    onwaiting?: (id: string) => void;
     children: Snippet;
   }
 
@@ -62,10 +66,14 @@
     stage,
     capture,
     onSimulate,
+    onwaiting,
     children,
   }: Props = $props();
 
   let motion = $state<ShellMotion | null>(null);
+  let form = $state<ShellForm>("full");
+  /** The form the pill returns to on Escape. */
+  let beforePill: ShellForm = "full";
 
   let deskEl = $state<HTMLElement | null>(null);
   let winEl = $state<HTMLElement | null>(null);
@@ -91,12 +99,82 @@
     return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
 
-  function go(next: ShellForm): void {
-    const active = document.activeElement;
-    if (active instanceof HTMLElement && active.closest(".composer")) {
-      active.blur();
+  function visible(el: Element): el is HTMLElement {
+    if (!(el instanceof HTMLElement) || el.closest("[inert]")) {
+      return false;
     }
-    void motion?.morph(next);
+    return el.checkVisibility({ visibilityProperty: true, opacityProperty: false });
+  }
+
+  function waitingStep(id?: string): HTMLElement | null {
+    const steps = [...(streamEl?.querySelectorAll("[data-waiting]") ?? [])];
+    const wanted = id == null ? steps : steps.filter((el) => el.getAttribute("data-waiting") === id);
+    return (wanted.find(visible) ?? steps.find(visible) ?? null) as HTMLElement | null;
+  }
+
+  /** Focus the new form's primary control. Focus never lands on body. */
+  function focusPrimary(next: ShellForm): void {
+    let target: HTMLElement | null = null;
+    if (next === "pill") {
+      const count = layerPillEl?.querySelector("button.wt");
+      target = count instanceof HTMLElement && !count.hidden ? count : layerPillEl;
+    } else {
+      target = waitingStep() ?? (next === "companion" ? toCompEl : streamEl);
+    }
+    target?.focus({ preventScroll: next === "pill" });
+  }
+
+  async function go(next: ShellForm): Promise<void> {
+    if (!motion) {
+      return;
+    }
+    if (next === "pill" && form !== "pill") {
+      beforePill = form;
+    }
+    await motion.morph(next);
+    focusPrimary(motion.form());
+  }
+
+  /** "N waiting" and every waiting step: show the full form with the step focused. */
+  async function openWaiting(id?: string): Promise<void> {
+    if (form !== "full") {
+      await go("full");
+    }
+    const step = waitingStep(id);
+    if (step) {
+      step.scrollIntoView({ block: "center", behavior: reduced() ? "auto" : "smooth" });
+      step.focus({ preventScroll: true });
+    } else {
+      streamEl?.focus();
+    }
+    onwaiting?.(step?.getAttribute("data-waiting") ?? id ?? "");
+  }
+
+  function onOpenWaiting(event: Event): void {
+    const detail = event instanceof CustomEvent ? (event.detail as { id?: unknown } | null) : null;
+    void openWaiting(typeof detail?.id === "string" ? detail.id : undefined);
+  }
+
+  /** Escape walks out one level: companion to full, pill to the form before it, thread item to the thread. */
+  function onShellKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Escape" || event.defaultPrevented || event.repeat) {
+      return;
+    }
+    if (form === "companion") {
+      event.preventDefault();
+      void go("full");
+      return;
+    }
+    if (form === "pill") {
+      event.preventDefault();
+      void go(beforePill === "pill" ? "full" : beforePill);
+      return;
+    }
+    const active = document.activeElement;
+    if (streamEl && active instanceof HTMLElement && active !== streamEl && streamEl.contains(active)) {
+      event.preventDefault();
+      streamEl.focus();
+    }
   }
 
   function rowClass(row: RosterRow): string {
@@ -161,7 +239,9 @@
         stage,
         capture,
         reduced,
-        onForm: () => {},
+        onForm: (next) => {
+          form = next;
+        },
       },
     );
     motion = created;
@@ -170,6 +250,7 @@
       morph: (next: ShellForm) => created.morph(next),
       start: () => created.startSequence(),
       form: () => created.form(),
+      go: (next: ShellForm) => go(next),
     };
     if (stage) {
       window.__shellStage = stageApi;
@@ -180,21 +261,34 @@
         step: (dt: number) => created.step(dt),
         pending: () => created.pending,
         running: () => created.running,
+        now: () => created.now(),
       };
       window.__shellCap = cap;
     }
     const onResize = () => {
       created.layout();
+      // A native full window narrower than FULL_MIN_WIDTH becomes the companion,
+      // so the Approve row never clips.
+      if (native && !stage) {
+        const fit = formForWidth(created.form(), window.innerWidth);
+        if (fit !== created.form()) {
+          void go(fit);
+        }
+      }
     };
     window.addEventListener("resize", onResize);
+    deskEl?.addEventListener(OPEN_WAITING_EVENT, onOpenWaiting);
     return () => {
       window.removeEventListener("resize", onResize);
+      deskEl?.removeEventListener(OPEN_WAITING_EVENT, onOpenWaiting);
       created.destroy();
       delete window.__shellStage;
       delete window.__shellCap;
     };
   });
 </script>
+
+<svelte:window onkeydown={onShellKeydown} />
 
   <div
     {@attach keepDesk}
@@ -258,16 +352,16 @@
         <button
           class="shb"
           type="button"
-          aria-label="Companion window"
+          aria-label={form === "companion" ? "Full window" : "Companion window"}
           {@attach keepToComp}
-          onclick={() => go("companion")}
+          onclick={() => void go(form === "companion" ? "full" : "companion")}
         >
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <rect x="2" y="3" width="12" height="10" rx="2" />
             <path d={COMPANION_PATH} />
           </svg>
         </button>
-        <button class="shb" type="button" aria-label="Float as a pill" {@attach keepToPill} onclick={() => go("pill")}>
+        <button class="shb" type="button" aria-label="Float as a pill" {@attach keepToPill} onclick={() => void go("pill")}>
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <rect x="1.8" y="6" width="12.4" height="5" rx="2.5" />
           </svg>
@@ -303,7 +397,7 @@
     </aside>
     </div>
 
-    <div class="stream-slot" {@attach keepStream}>
+    <div class="stream-slot" tabindex="-1" aria-label="Thread" {@attach keepStream}>
       {@render children()}
     </div>
 
@@ -336,13 +430,13 @@
           <svg viewBox="0 0 18 18"><rect {...MIC_RECT} /><path d={MIC_ARC} /></svg>
         </span>
       </div>
-      <div class="cl pill" {@attach keepLayerPill}>
+      <div class="cl pill" tabindex="-1" {@attach keepLayerPill}>
         <span class="mic-glyph" aria-hidden="true">
           <svg viewBox="0 0 18 18"><rect {...MIC_RECT} /><path d={MIC_ARC} /></svg>
         </span>
         <span class="ph">Ask Reviewer…</span>
-        <span class="div"></span>
-        <button type="button" class="wt" onclick={() => go("full")}>
+        <span class="div" hidden={waitingShown === 0}></span>
+        <button type="button" class="wt" hidden={waitingShown === 0} onclick={() => void openWaiting()}>
           <span class="n" {@attach keepCount}>{waitingShown}</span> waiting
         </button>
       </div>
@@ -665,7 +759,8 @@
 
   .sub {
     display: block;
-    white-space: nowrap;
+    /* The mock's Builder sub wraps to two lines inside the name column. */
+    white-space: normal;
     overflow: visible;
     font-family: var(--font-machine);
     font-size: var(--t-micro);
@@ -720,12 +815,23 @@
     overflow: auto;
   }
 
+  .stream-slot:focus,
+  .cl.pill:focus {
+    outline: none;
+  }
+
+  .stream-slot:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
   .composer {
     position: fixed;
     z-index: 8;
     display: grid;
     margin: 0;
-    padding: 0;
+    /* Mock `.composer` row padding (G25). The layers sit at inset 0, like the mock's `.cz`. */
+    padding: 0 10px;
     border: 0;
     overflow: hidden;
     color: var(--ink-1);
@@ -784,10 +890,10 @@
   }
 
   .layers {
-    position: relative;
+    position: absolute;
+    inset: 0;
     z-index: 1;
     display: grid;
-    height: 100%;
   }
 
   .cl {

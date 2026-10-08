@@ -385,6 +385,11 @@ function tauriInvoke(): NonNullable<TauriInternals["invoke"]> {
   return internals.invoke.bind(internals);
 }
 
+/** The OS Hello prompt was cancelled or refused. The card goes back to waiting quietly. */
+export function isHelloCancel(message: string): boolean {
+  return /hello consent was denied|cancel/i.test(message);
+}
+
 export async function decide(id: string, decision: Decision, reason?: string): Promise<void> {
   const trimmed = reason?.trim();
   await tauriInvoke()("sign_decision", {

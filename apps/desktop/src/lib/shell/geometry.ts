@@ -1,7 +1,3 @@
-/** Stage the shell mock was drawn on. The review clip is 1440×900. */
-export const STAGE_WIDTH = 1440;
-export const STAGE_HEIGHT = 900;
-
 /** Roster column. The mock's `.roster` width. Not a space token. */
 export const ROSTER_WIDTH = 272;
 
@@ -55,15 +51,6 @@ export const SEND_REST_OPACITY = "0.45";
 /** Mock cursor fade. Not a duration token. */
 export const CURSOR_FADE_MS = 160;
 
-/** Mock companion inset from the right (1440 − 1000 − 400). */
-export const COMPANION_RIGHT = 40;
-
-/** Mock companion inset from the top of the stage. */
-export const COMPANION_TOP = 72;
-
-/** Mock pill inset from the bottom (900 − 800 − 52). */
-export const PILL_BOTTOM = 48;
-
 /**
  * Companion composer inset. Mock: x is 12px inside the window (1012 − 1000)
  * and the composer sits 12px above the window's bottom edge.
@@ -87,6 +74,21 @@ export const WINDOW_OUT_PORTION = 0.45;
 export const WINDOW_IN_PORTION = 0.6;
 
 export type ShellForm = "full" | "companion" | "pill";
+
+/** A waiting step asks the shell to open it (see WaitingStep.svelte). */
+export const OPEN_WAITING_EVENT = "dasdevbot:open-waiting";
+
+/**
+ * The full form's narrowest native width. Below it the Approve row would
+ * clip, so the native window switches to the companion instead.
+ * `tauri.conf.json` and `shell_form.rs` use the same number.
+ */
+export const FULL_MIN_WIDTH = 700;
+
+/** The form a native window should be in at this width. */
+export function formForWidth(form: ShellForm, width: number): ShellForm {
+  return form === "full" && width < FULL_MIN_WIDTH ? "companion" : form;
+}
 
 export interface ShellRect {
   x: number;
@@ -119,50 +121,10 @@ export const MOCK_FORMS: Record<ShellForm, { win: ShellRect; composer: ShellRect
 /** Background window on the mock desk. Scenery only. */
 export const MOCK_OTHER = { x: 170, y: 120, w: 1100, h: 900 };
 
-/** The review clip's stage. Only this box uses the mock's absolute SH coordinates. */
-export function isMockStage(width: number, height: number): boolean {
-  return width === STAGE_WIDTH && height === STAGE_HEIGHT;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
 /**
- * Unscaled mock sizes. Radii stay 14, 30, and 26.
- * Full fills the viewport. Companion is 400×790, 40px off the right, top 72.
- * The pill is 400×52, centered, 48px off the bottom. A viewport smaller than
- * the form fills that viewport instead of scaling.
+ * Composer inside the native Tauri window, which fills its own viewport.
+ * Radius is the mock's, never scaled. The browser stage uses MOCK_FORMS.
  */
-export function placeWin(form: ShellForm, box: { w: number; h: number }): ShellRect {
-  const mock = MOCK_FORMS[form].win;
-  if (form === "full") {
-    return { x: 0, y: 0, w: box.w, h: box.h, r: mock.r };
-  }
-  const w = Math.min(mock.w, box.w);
-  const h = Math.min(mock.h, box.h);
-  if (form === "companion") {
-    return {
-      x: clamp(box.w - w - COMPANION_RIGHT, 0, Math.max(0, box.w - w)),
-      y: clamp(COMPANION_TOP, 0, Math.max(0, box.h - h)),
-      w,
-      h,
-      r: mock.r,
-    };
-  }
-  if (form === "pill") {
-    return {
-      x: clamp((box.w - w) / 2, 0, Math.max(0, box.w - w)),
-      y: clamp(box.h - h - PILL_BOTTOM, 0, Math.max(0, box.h - h)),
-      w,
-      h,
-      r: mock.r,
-    };
-  }
-  return assertForm(form);
-}
-
-/** Composer that belongs to a placed window. Radius is the mock's, never scaled. */
 export function placeComposer(
   form: ShellForm,
   box: { w: number; h: number },

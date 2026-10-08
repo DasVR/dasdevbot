@@ -1,22 +1,28 @@
-/** Short non-secret job id plus elapsed time. Lease tokens and epochs are never rendered. */
-export function leaseLine(id: string, elapsed: string): string {
-  return `lease ${id} · ${elapsed}`;
+/**
+ * A running teammate's sub, in the mock's two-line shape
+ * ("… · 2m14s · 208 / 8000 tok", CD ruling 2). The mock's lease label is
+ * replaced by the state word: no lease id, token or fencing epoch reaches the DOM.
+ */
+export function runningLine(elapsed: string | null, spent?: number | null, cap?: number | null): string {
+  const parts = ["running"];
+  if (elapsed) {
+    parts.push(elapsed);
+  }
+  if (spent != null && cap != null && cap > 0) {
+    parts.push(`${spent} / ${cap} tok`);
+  }
+  return parts.join(" · ");
 }
 
-/** Reviewer's job id. The roster-width example is `lease rev_01 · 2m14s`. */
-export const REVIEWER_LEASE_ID = "rev_01";
-
-const LEASE_IDS: Record<string, string> = {
-  reviewer: REVIEWER_LEASE_ID,
-  builder: "bld_02",
-  deployer: "dep_03",
-};
-
-export function leaseIdFor(agentId: string): string {
-  return LEASE_IDS[agentId] ?? agentId;
+/** Elapsed time in the mock's `2m14s` shape. */
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
 
-export type RosterKind = "quiet" | "waiting" | "lease" | "note";
+export type RosterKind = "quiet" | "waiting" | "running" | "note";
 
 export interface RosterRow {
   id: string;
@@ -31,6 +37,10 @@ export interface LiveAgent {
   id: string;
   name: string;
   status: string;
+  /** How long this window has seen the teammate running, or null. It ticks with the app clock. */
+  runningMs?: number | null;
+  tokensSpent?: number | null;
+  tokenCap?: number | null;
 }
 
 export interface ReviewerChrome {
@@ -39,7 +49,7 @@ export interface ReviewerChrome {
   working: boolean;
 }
 
-/** The three teammates on the shell mock. The status line is a job id, not a lease token. */
+/** The three teammates on the shell mock. Builder's mock lease label is replaced by its state. */
 export function stageRoster(): RosterRow[] {
   return [
     {
@@ -54,8 +64,8 @@ export function stageRoster(): RosterRow[] {
       id: "builder",
       name: "Builder",
       monogram: "B",
-      kind: "lease",
-      line: leaseLine("bld_02", "2m14s"),
+      kind: "running",
+      line: runningLine("2m14s", 208, 8000),
       selected: false,
     },
     {
@@ -87,8 +97,12 @@ export function liveRoster(
     if (agent.status === "working" || (agent.id === "reviewer" && reviewer?.working)) {
       return {
         ...base,
-        kind: "lease" as const,
-        line: leaseLine(leaseIdFor(agent.id), "0m00s"),
+        kind: "running" as const,
+        line: runningLine(
+          agent.runningMs == null ? null : formatElapsed(agent.runningMs),
+          agent.tokensSpent,
+          agent.tokenCap,
+        ),
       };
     }
     return { ...base, kind: "quiet" as const, line: "" };

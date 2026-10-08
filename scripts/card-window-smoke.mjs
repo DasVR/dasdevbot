@@ -1,9 +1,18 @@
 /**
- * Only the card window decides.
- * - Tauri label "card": the card window renders the waiting card, and a hold
- *   after the seen lock calls sign_decision once.
- * - Tauri label "main": the same hold only calls open_card_window. The main
- *   window never calls sign_decision or undo_decision.
+ * One decision point: the card window.
+ * Card window (Tauri label "card"):
+ * - a blind click or Enter before the seen lock does nothing;
+ * - the hint row is reserved, so the buttons do not move when it appears (UX 6);
+ * - the native sight signal disarms the seen lock and a fresh dwell re-arms it;
+ * - Enter on the focused, armed Approve approves (UX 7);
+ * - while sign_decision is in flight the card shows a plain
+ *   "Confirm with Windows Hello" line and no button (C4, UX 10);
+ * - a cancelled Hello prompt returns to the waiting card with no error;
+ * - Escape: deny reason -> Back with focus on the card, card -> the window (UX 3);
+ * - a destructive approval is the flat ink row only (C1, UX 8).
+ * Main window (label "main"): no Approve control exists in any form, the
+ * waiting step only calls open_card_window, and nothing calls sign_decision
+ * or undo_decision (UX 2).
  * The Tauri IPC is a stub that records every invoke.
  */
 import { createRequire } from "node:module";
@@ -71,6 +80,15 @@ const card = {
   undo_until: null,
 };
 
+const destructive = {
+  ...card,
+  id: "ap_force",
+  effect_class: "destructive",
+  action: "force_push",
+  purpose: "Force-push phase0. This rewrites the remote branch.",
+  draft: "git push --force origin phase0",
+};
+
 const snapshot = {
   protocol: 1,
   role: "executor",
@@ -116,9 +134,9 @@ async function waitForHttp(url) {
   throw new Error(`preview did not respond at ${url}`);
 }
 
-async function holdApprove(page, label) {
-  await page.addInitScript(
-    ({ label, snapshot }) => {
+function stub({ label, snapshot, helloMs = 0, cancel = false }) {
+  return [
+    ({ label, snapshot, helloMs, cancel }) => {
       window.__invokes = [];
       window.__TAURI_INTERNALS__ = {
         metadata: { currentWindow: { label } },
@@ -127,48 +145,179 @@ async function holdApprove(page, label) {
           if (command === "daemon_snapshot") {
             return Promise.resolve(snapshot);
           }
-          if (command === "session_token") {
-            return Promise.resolve("");
+          if (command === "prepare_shell_form") {
+            return Promise.resolve({ x: 0, y: 0, width: 1280, height: 800, radius: 14, glass: false, alwaysOnTop: false, resizable: true });
+          }
+          if (command === "shell_metrics") {
+            return Promise.resolve({ x: 0, y: 0, width: 1280, height: 800 });
+          }
+          if (command === "sign_decision") {
+            return new Promise((resolve, reject) =>
+              setTimeout(() => (cancel ? reject(new Error("Windows Hello consent was denied")) : resolve(null)), helloMs),
+            );
           }
           return Promise.resolve(null);
         },
       };
     },
-    { label, snapshot },
-  );
-  await page.goto(origin, { waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "Approve draft" }).waitFor();
-  await page.evaluate(() => {
-    document.querySelector("article.card button.approve")?.click();
-  });
-  await page.keyboard.press("Alt+ArrowDown");
-  await page.waitForFunction(() => Boolean(document.querySelector("article.card .hold-hint.armed")), null, {
-    timeout: 6000,
-  });
+    { label, snapshot, helloMs, cancel },
+  ];
+}
+
+function signs(page) {
+  return page.evaluate(() => window.__invokes.filter((entry) => entry.command === "sign_decision").length);
+}
+
+async function holdChord(page) {
   await page.keyboard.down("Control");
   await page.keyboard.down("Enter");
   await page.waitForTimeout(900);
   await page.keyboard.up("Enter");
   await page.keyboard.up("Control");
-  await page.waitForTimeout(400);
-  return page.evaluate(() => window.__invokes.map((entry) => entry.command).filter((c) => c !== "daemon_snapshot"));
+}
+
+async function openCard(browser, options) {
+  const page = await browser.newPage({ viewport: { width: 560, height: 760 } });
+  await page.addInitScript(...stub({ label: "card", ...options }));
+  await page.goto(origin, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Approve draft" }).waitFor();
+  return page;
+}
+
+async function arm(page) {
+  await page.locator("article.card").focus();
+  await page.waitForFunction(() => Boolean(document.querySelector("article.card .hold-hint.armed")), null, {
+    timeout: 6000,
+  });
 }
 
 const browser = await launchBrowser();
 try {
   await waitForHttp(origin);
-  const cardPage = await browser.newPage({ viewport: { width: 560, height: 760 } });
-  const fromCard = await holdApprove(cardPage, "card");
-  if (fromCard.filter((c) => c === "sign_decision").length !== 1 || fromCard.includes("open_card_window")) {
-    throw new Error(`card window did not sign once: ${JSON.stringify(fromCard)}`);
+
+  // Blind input, reserved hint row, native sight, then Hello in flight.
+  const page = await openCard(browser, { snapshot, helloMs: 700 });
+  const before = await page.locator("article.card .actions").boundingBox();
+  await page.locator("article.card button.approve").click();
+  await page.locator("article.card button.approve").press("Enter");
+  if ((await signs(page)) !== 0) {
+    throw new Error("a click or Enter before the seen lock signed");
   }
-  const mainPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-  const fromMain = await holdApprove(mainPage, "main");
+  await arm(page);
+  const after = await page.locator("article.card .actions").boundingBox();
+  if (!before || !after || Math.abs(before.y - after.y) > 0.5) {
+    throw new Error(`the buttons moved when the hint appeared ${before?.y} -> ${after?.y}`);
+  }
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent("dasdevbot:native-sight", { detail: { visible: false } })),
+  );
+  await page.waitForFunction(() => !document.querySelector("article.card .hold-hint.armed"), null, { timeout: 2000 });
+  await page.locator("article.card").focus();
+  await holdChord(page);
+  if ((await signs(page)) !== 0) {
+    throw new Error("a hold signed while the native window was not visible");
+  }
+  const t0 = Date.now();
+  await page.evaluate(() =>
+    window.dispatchEvent(new CustomEvent("dasdevbot:native-sight", { detail: { visible: true } })),
+  );
+  await arm(page);
+  if (Date.now() - t0 < 700) {
+    throw new Error("seen lock re-armed without a fresh dwell");
+  }
+  await page.locator("article.card button.approve").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector("article.card .quiet .hello")?.textContent === "Confirm with Windows Hello", null, {
+    timeout: 2000,
+  });
+  const hello = await page.evaluate(() => ({
+    buttons: document.querySelectorAll("article.card .quiet button").length,
+    hint: Boolean(document.querySelector("article.card .hold-hint")),
+  }));
+  if (hello.buttons !== 0 || hello.hint) {
+    throw new Error(`Hello pending drew controls ${JSON.stringify(hello)}`);
+  }
+  if ((await signs(page)) !== 1) {
+    throw new Error("Enter on the armed Approve did not sign exactly once");
+  }
+  await page.waitForFunction(() => !document.querySelector("article.card .quiet .hello"), null, { timeout: 3000 });
+  await page.close();
+
+  // Hello cancelled: back to waiting, no error.
+  const cancelled = await openCard(browser, { snapshot, helloMs: 200, cancel: true });
+  await arm(cancelled);
+  await holdChord(cancelled);
+  await cancelled.waitForFunction(() => !document.querySelector("article.card .quiet .hello"), null, { timeout: 3000 });
+  const back = await cancelled.evaluate(() => ({
+    approve: Boolean(document.querySelector("article.card button.approve")),
+    note: document.querySelector(".card-window .note")?.textContent ?? "",
+  }));
+  if (!back.approve || back.note) {
+    throw new Error(`a cancelled Hello did not return quietly to waiting ${JSON.stringify(back)}`);
+  }
+
+  // Escape: deny reason -> Back on the card, card -> window.
+  await cancelled.locator("article.card button.deny").click();
+  await cancelled.locator("article.card .reason input").waitFor();
+  await cancelled.keyboard.press("Escape");
+  const escaped = await cancelled.evaluate(() => ({
+    reason: Boolean(document.querySelector("article.card .reason")),
+    focus: document.activeElement?.matches("article.card") ?? false,
+  }));
+  if (escaped.reason || !escaped.focus) {
+    throw new Error(`Escape did not go Back to the card ${JSON.stringify(escaped)}`);
+  }
+  await cancelled.keyboard.press("Escape");
+  if (!(await cancelled.evaluate(() => document.activeElement?.matches("main.card-window") ?? false))) {
+    throw new Error("Escape on the card did not move focus to the window");
+  }
+  await cancelled.close();
+
+  // C1: destructive renders only as the flat row, in both windows.
+  for (const label of ["card", "main"]) {
+    const flat = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await flat.addInitScript(...stub({ label, snapshot: { ...snapshot, approvals: [destructive] } }));
+    await flat.goto(origin, { waitUntil: "networkidle" });
+    await flat.locator("article.card.flat").first().waitFor();
+    const row = await flat.evaluate(() => {
+      const card = document.querySelector("article.card.flat");
+      return {
+        text: card?.textContent ?? "",
+        buttons: card?.querySelectorAll("button").length ?? -1,
+        tab: card?.getAttribute("tabindex"),
+        approve: document.querySelectorAll("button.approve, [data-waiting]").length,
+      };
+    });
+    if (!row.text.includes("Destructive actions are off in this build.") || !row.text.includes("git push --force origin phase0")) {
+      throw new Error(`${label}: destructive row copy ${JSON.stringify(row)}`);
+    }
+    if (row.buttons !== 0 || row.tab != null || row.approve !== 0) {
+      throw new Error(`${label}: destructive row has controls ${JSON.stringify(row)}`);
+    }
+    await flat.close();
+  }
+
+  // Main window: no decision control in any form.
+  const main = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await main.addInitScript(...stub({ label: "main", snapshot }));
+  await main.goto(origin, { waitUntil: "networkidle" });
+  await main.locator("[data-waiting='ap_card']").waitFor();
+  if ((await main.locator("button.approve, article.card[tabindex]").count()) !== 0) {
+    throw new Error("the main window drew a decision control");
+  }
+  await main.locator("[data-waiting='ap_card']").focus();
+  await holdChord(main);
+  await main.keyboard.press("Enter");
+  await main.waitForTimeout(400);
+  const fromMain = await main.evaluate(() => window.__invokes.map((entry) => entry.command));
   if (fromMain.includes("sign_decision") || fromMain.includes("undo_decision")) {
     throw new Error(`main window decided: ${JSON.stringify(fromMain)}`);
   }
   if (!fromMain.includes("open_card_window")) {
     throw new Error(`main window did not open the card window: ${JSON.stringify(fromMain)}`);
+  }
+  if (!(await main.evaluate(() => document.activeElement?.matches("[data-waiting='ap_card']") ?? false))) {
+    throw new Error("focus left the waiting step after opening the card window");
   }
   console.log("card-window-smoke: pass");
 } finally {

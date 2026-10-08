@@ -12,8 +12,8 @@
   import type { ReviewerChrome } from "./lib/shell/roster";
   import Shell from "./lib/shell/Shell.svelte";
   import StageThread from "./lib/shell/StageThread.svelte";
+  import WaitingStep from "./lib/shell/WaitingStep.svelte";
   import {
-    decide,
     emitPush,
     formatStreamTime,
     formatUsd,
@@ -22,9 +22,7 @@
     openCardWindow,
     shortEventId,
     tauriWindowLabel,
-    undo,
     type Approval,
-    type Decision,
     type Snapshot,
   } from "./lib/api";
 
@@ -40,7 +38,8 @@
   let settingsOpen = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
-  let deciding = $state(false);
+  /** When this window first saw each teammate running. The snapshot has no start time. */
+  let runningSince = $state<Record<string, number>>({});
   let primed = $state(false);
   let now = $state(Date.now());
 
@@ -139,6 +138,9 @@
       id: agent.id,
       name: agent.name,
       status: agent.status,
+      runningMs: runningSince[agent.id] == null ? null : Math.max(0, now - runningSince[agent.id]),
+      tokensSpent: agent.tokens_spent,
+      tokenCap: agent.token_cap,
     })),
   );
   const openReviews = $derived(
@@ -154,6 +156,13 @@
   async function refresh(): Promise<void> {
     try {
       snapshot = await getSnapshot();
+      const since: Record<string, number> = {};
+      for (const agent of snapshot.agents) {
+        if (agent.status === "working") {
+          since[agent.id] = runningSince[agent.id] ?? Date.now();
+        }
+      }
+      runningSince = since;
       error = null;
       if (!primed) {
         await tick();
@@ -176,50 +185,23 @@
     }
   }
 
-  // Inside Tauri the main window has no decision capability. A decision here
-  // only brings up the card window, which signs it over IPC.
-  const decidesElsewhere = tauriWindowLabel() !== null;
+  // One decision point: the card window. The main window never runs a seen
+  // lock or a hold. Its waiting step only brings up the card window (Tauri),
+  // or the card page in a second browser window in plain browser dev.
+  const inTauri = tauriWindowLabel() !== null;
 
-  async function showCardWindow(): Promise<boolean> {
+  async function reviewCard(): Promise<void> {
+    if (shell.stage) {
+      return;
+    }
     try {
-      await openCardWindow();
+      if (inTauri) {
+        await openCardWindow();
+      } else {
+        window.open("?window=card", "dasdevbot-card", "popup,width=560,height=760");
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : "The card window did not open.";
-    }
-    return false;
-  }
-
-  async function ondecide(id: string, decision: Decision, reason?: string): Promise<boolean> {
-    if (decidesElsewhere) {
-      return showCardWindow();
-    }
-    deciding = true;
-    try {
-      await decide(id, decision, reason);
-      await refresh();
-      return true;
-    } catch (err) {
-      error = err instanceof Error ? err.message : "The decision was not recorded.";
-      return false;
-    } finally {
-      deciding = false;
-    }
-  }
-
-  async function onundo(id: string): Promise<boolean> {
-    if (decidesElsewhere) {
-      return showCardWindow();
-    }
-    deciding = true;
-    try {
-      await undo(id);
-      await refresh();
-      return true;
-    } catch (err) {
-      error = err instanceof Error ? err.message : "The decision could not be undone.";
-      return false;
-    } finally {
-      deciding = false;
     }
   }
 
@@ -379,15 +361,17 @@
 </script>
 
 {#snippet approvalSlot(approval: Approval)}
-  <div class={["slot", approval.status === "pending" && "over"]} {@attach flipSlot}>
+  <div class="slot" {@attach flipSlot}>
     {#key approval.id}
-      <ApprovalCard
-        approval={approval}
-        busy={deciding}
-        shortcutTarget={approval.status === "pending"}
-        ondecide={(decision, reason) => ondecide(approval.id, decision, reason)}
-        onundo={() => onundo(approval.id)}
-      />
+      {#if approval.status === "pending" && approval.effect_class !== "destructive"}
+        <WaitingStep
+          id={approval.id}
+          say={approval.purpose || approval.action}
+          meta={`${shortEventId(approval.evidence.event_id)} · ${approval.effect_class}`}
+        />
+      {:else}
+        <ApprovalCard approval={approval} readonly />
+      {/if}
     {/key}
   </div>
 {/snippet}
@@ -402,6 +386,7 @@
   stage={shell.stage}
   capture={shell.capture}
   onSimulate={shell.stage ? undefined : () => void simulate()}
+  onwaiting={() => void reviewCard()}
 >
   {#if shell.stage && snapshot == null}
     <StageThread />
@@ -611,25 +596,6 @@
   .slot {
     margin-top: 14px;
     scroll-margin-bottom: 16px;
-  }
-
-  .slot.over {
-    position: fixed;
-    z-index: 4;
-    left: var(--overlay-left, 0px);
-    width: var(--overlay-width, 100%);
-    bottom: calc(var(--composer-block, 0px) + 16px);
-    display: flex;
-    justify-content: center;
-    margin-top: 0;
-    padding: 0 28px;
-    pointer-events: none;
-    box-sizing: border-box;
-  }
-
-  .slot.over :global(article.card) {
-    width: min(520px, 100%);
-    pointer-events: auto;
   }
 
   .quiet-empty {

@@ -10,12 +10,6 @@ export const SEND_PATH = "M8 13V3.5M3.8 7.4 8 3.2l4.2 4.2";
 /** Companion window: a side pane. */
 export const COMPANION_PATH = "M9.5 3v10";
 
-/** Here: a line ring, not a status dot. */
-export const HERE_PATH =
-  "M8 8m-3.25 0a3.25 3.25 0 1 0 6.5 0a3.25 3.25 0 1 0-6.5 0";
-
-/** Away: a line leaving. No status color. */
-export const AWAY_PATH = "M2.8 8h7.2M8.2 5.4 11.4 8 8.2 10.6";
 
 export const MINIMIZE_PATH = "M3 8h10";
 export const MAXIMIZE_PATH = "M3.5 3.5h9v9h-9z";

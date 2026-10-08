@@ -19,6 +19,30 @@ pub(crate) struct ShellTarget {
     resizable: bool,
 }
 
+/// The full form's narrowest native size. Below this width the Approve row
+/// would clip, so the page switches to the companion (`FULL_MIN_WIDTH` in
+/// geometry.ts). `tauri.conf.json` launches the full form with the same minimum.
+pub(crate) const FULL_MIN_WIDTH: f64 = 700.0;
+pub(crate) const FULL_MIN_HEIGHT: f64 = 480.0;
+
+/// The minimum size for one bounds update. Companion and pill have none. The
+/// full minimum applies only once the morph has reached it, so the tween from
+/// a smaller form is never snapped.
+pub(crate) fn min_size(form: ShellForm, width: f64, height: f64) -> Option<(f64, f64)> {
+    match form {
+        ShellForm::Full if width >= FULL_MIN_WIDTH && height >= FULL_MIN_HEIGHT => {
+            Some((FULL_MIN_WIDTH, FULL_MIN_HEIGHT))
+        }
+        _ => None,
+    }
+}
+
+fn apply_min(window: &WebviewWindow, min: Option<(f64, f64)>) -> Result<(), String> {
+    window
+        .set_min_size(min.map(|(width, height)| LogicalSize::new(width, height)))
+        .map_err(|err| err.to_string())
+}
+
 fn parse_form(value: &str) -> Result<ShellForm, String> {
     ShellForm::parse(value).ok_or_else(|| format!("unknown shell form {value}"))
 }
@@ -133,6 +157,7 @@ pub(crate) fn set_shell_bounds(
     let form = parse_form(&form)?;
     let spec = form_spec(form);
     apply_chrome(&window, &spec)?;
+    apply_min(&window, min_size(form, width, height))?;
     window
         .set_size(LogicalSize::new(width, height))
         .map_err(|err| err.to_string())?;
@@ -164,4 +189,22 @@ pub(crate) fn window_close(window: WebviewWindow) -> Result<(), String> {
 /// Main-window chrome at launch: the full form.
 pub(crate) fn apply_full_chrome(window: &WebviewWindow) {
     let _ = apply_chrome(window, &form_spec(ShellForm::Full));
+    let _ = apply_min(window, Some((FULL_MIN_WIDTH, FULL_MIN_HEIGHT)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_settled_full_form_has_a_minimum() {
+        assert_eq!(
+            min_size(ShellForm::Full, 1360.0, 828.0),
+            Some((FULL_MIN_WIDTH, FULL_MIN_HEIGHT))
+        );
+        assert_eq!(min_size(ShellForm::Full, 520.0, 600.0), None);
+        assert_eq!(min_size(ShellForm::Companion, 400.0, 790.0), None);
+        assert_eq!(min_size(ShellForm::Pill, 400.0, 52.0), None);
+        assert!(FULL_MIN_WIDTH >= 700.0);
+    }
 }

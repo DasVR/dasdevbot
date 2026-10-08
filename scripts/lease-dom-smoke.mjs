@@ -1,8 +1,11 @@
 /**
- * A lease token and a fencing epoch must never reach the DOM.
- * The stage roster shows a short job id. A live snapshot that carries a
- * lease token, an epoch, and budget counts must not copy any of them into
- * text, a tooltip, a title, or an aria label.
+ * No lease label reaches the DOM.
+ * The stage roster and a live snapshot that carries a lease token and an epoch
+ * must not put the word "lease", a job id, the token or the epoch into text, a
+ * tooltip, a title, or an aria label.
+ * A running teammate shows the mock's sub with the lease label replaced by its
+ * state: "running · 2m14s · 208 / 8000 tok" on the stage, live elapsed and
+ * spent / cap tokens on a snapshot (CD ruling 2, Oct 1 8:38 PM).
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -19,7 +22,29 @@ const LEASE_TOKEN = "lst_TEST_FIXTURE_NOT_A_LEASE";
 const EPOCH = "773341";
 const SPENT = "918273";
 const CAP = "645120";
-const FORBIDDEN = [LEASE_TOKEN, EPOCH, SPENT, CAP, "208 / 8000", "8000 tok", "tokens_spent", "token_cap"];
+const FORBIDDEN = [
+  LEASE_TOKEN,
+  EPOCH,
+  "tokens_spent",
+  "token_cap",
+  "bld_02",
+  "rev_01",
+  "dep_03",
+];
+/** The word itself, as a label. "release" does not match. */
+const LEASE_WORD = /\blease\b/i;
+
+function assertClean(where, dom) {
+  for (const secret of FORBIDDEN) {
+    if (dom.includes(secret)) {
+      throw new Error(`${where} DOM contains ${secret}`);
+    }
+  }
+  const word = dom.match(new RegExp(`.{0,40}${LEASE_WORD.source}.{0,40}`, "i"));
+  if (word) {
+    throw new Error(`${where} DOM has a lease label: ${word[0]}`);
+  }
+}
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -120,13 +145,9 @@ try {
   await page.goto(`${origin}/?shellStage=1`, { waitUntil: "networkidle" });
   await page.locator(".wordmark").waitFor();
   const stage = await page.evaluate(surface);
-  for (const secret of FORBIDDEN) {
-    if (stage.includes(secret)) {
-      throw new Error(`stage DOM contains ${secret}`);
-    }
-  }
-  if (!stage.includes("lease bld_02 · 2m14s")) {
-    throw new Error("stage roster dropped the job id");
+  assertClean("stage", stage);
+  if (!stage.includes("running · 2m14s · 208 / 8000 tok")) {
+    throw new Error("stage roster dropped Builder's running state");
   }
 
   await page.route("**/v1/snapshot", (route) =>
@@ -138,16 +159,19 @@ try {
   );
   await page.goto(`${origin}/`, { waitUntil: "networkidle" });
   await page.locator(".wordmark").waitFor();
-  await page.waitForFunction(() => (document.querySelector(".roster .sub")?.textContent ?? "").includes("lease bld_02"));
+  await page.waitForFunction(
+    ({ spent, cap }) =>
+      new RegExp(`^running · \\d+m\\d\\ds · ${spent} / ${cap} tok$`).test(document.querySelector(".roster .sub")?.textContent ?? ""),
+    { spent: SPENT, cap: CAP },
+    { timeout: 10000 },
+  );
+  const first = await page.locator(".roster .sub").first().textContent();
+  await page.waitForTimeout(2200);
+  if ((await page.locator(".roster .sub").first().textContent()) === first) {
+    throw new Error(`the running timer is frozen at ${first}`);
+  }
   const live = await page.evaluate(surface);
-  for (const secret of FORBIDDEN) {
-    if (live.includes(secret)) {
-      throw new Error(`live DOM contains ${secret}`);
-    }
-  }
-  if (!live.includes("lease bld_02 · 0m00s")) {
-    throw new Error(`live roster did not show the job id: ${live.slice(0, 400)}`);
-  }
+  assertClean("live", live);
   console.log("lease-dom-smoke: pass");
 } finally {
   await browser.close();

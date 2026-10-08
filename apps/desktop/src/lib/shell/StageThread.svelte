@@ -1,5 +1,6 @@
 <script lang="ts">
   import { CHEVRON_PATH } from "../pen";
+  import WaitingStep from "./WaitingStep.svelte";
 
   const replyLead = "Found one thing worth raising. If ";
   const replyMid = " rejects on a 401, the handoff lock is never released, so the next session can’t take it. I drafted one comment suggesting a ";
@@ -32,14 +33,7 @@
       </p>
     </div>
     <div class="tools wait">
-      <div class="step">
-        <div class="in">
-          <span class="mk"><span class="wd" aria-hidden="true"></span></span>
-          <span class="say">Posting the comment to DasVR/NIL #212</span>
-          <span class="el wait">waiting on you</span>
-          <div class="dt"><p>gh pr comment 212 · ev_3f9a2c · external</p></div>
-        </div>
-      </div>
+      <WaitingStep id="stage" say="Posting the comment to DasVR/NIL #212" meta="gh pr comment 212 · ev_3f9a2c · external" />
     </div>
   </section>
 {/snippet}
@@ -230,56 +224,6 @@
     color: var(--ink-3);
   }
 
-  .step {
-    position: relative;
-  }
-
-  .in {
-    display: grid;
-    grid-template-columns: 28px 1fr auto;
-    column-gap: 10px;
-    padding: 5px 0 6px;
-    align-items: start;
-  }
-
-  .mk {
-    position: relative;
-    width: 28px;
-    height: 20px;
-    display: grid;
-    place-items: center;
-  }
-
-  .wd {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--risk-external);
-  }
-
-  .say {
-    color: var(--ink-2);
-    line-height: 20px;
-  }
-
-  .el.wait {
-    font: var(--w-semibold) var(--t-meta) / 20px var(--font-ui);
-    color: var(--ink-1);
-  }
-
-  .dt {
-    grid-column: 2 / 4;
-  }
-
-  .dt p {
-    font: var(--t-micro) / var(--lh-micro) var(--font-machine);
-    color: var(--ink-3);
-    padding-top: 2px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   .cstream .bub-bot {
     margin-left: 0;
     max-width: none;
@@ -293,7 +237,7 @@
     width: auto;
   }
 
-  .cstream .dt p {
-    max-width: 300px;
+  .cstream .tools.wait {
+    max-width: 364px;
   }
 </style>
