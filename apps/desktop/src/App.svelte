@@ -14,6 +14,7 @@
   import StageThread from "./lib/shell/StageThread.svelte";
   import WaitingStep from "./lib/shell/WaitingStep.svelte";
   import {
+    emitDeniedForcePush,
     emitPush,
     formatStreamTime,
     formatUsd,
@@ -349,11 +350,26 @@
     const onHash = () => syncSettings();
     globalThis.addEventListener("hashchange", onHash);
     const stopPolling = startPolling(refresh, 1000);
+    // CD ruling 3: C1 has no visible control. Ctrl+Alt+Shift+F files a
+    // force-push the daemon denies, so the flat ink row can be shown on cue.
+    const onC1Key = (event: KeyboardEvent) => {
+      if (shell.stage || !event.ctrlKey || !event.altKey || !event.shiftKey || event.code !== "KeyF") {
+        return;
+      }
+      event.preventDefault();
+      void emitDeniedForcePush()
+        .then(() => refresh())
+        .catch((err: unknown) => {
+          error = err instanceof Error ? err.message : "The event was not accepted.";
+        });
+    };
+    globalThis.addEventListener("keydown", onC1Key);
     const clock = setInterval(() => {
       now = Date.now();
     }, 200);
     return () => {
       globalThis.removeEventListener("hashchange", onHash);
+      globalThis.removeEventListener("keydown", onC1Key);
       clearInterval(clock);
       stopPolling();
     };

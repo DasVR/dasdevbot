@@ -321,23 +321,7 @@
 
   <div class="win" {@attach keepWin} role="application" aria-label="dasdevbot">
     <header class="tbar" data-tauri-drag-region>
-      {#if native}
-        <div class="captions">
-          <button type="button" aria-label="Minimize" onclick={() => void windowCommand("window_minimize")}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MINIMIZE_PATH} /></svg>
-          </button>
-          <button
-            type="button"
-            aria-label="Maximize"
-            onclick={() => void windowCommand("window_toggle_maximize")}
-          >
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MAXIMIZE_PATH} /></svg>
-          </button>
-          <button type="button" aria-label="Close" onclick={() => void windowCommand("window_close")}>
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={CLOSE_PATH} /></svg>
-          </button>
-        </div>
-      {:else}
+      {#if !native}
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
       {/if}
 
@@ -367,6 +351,24 @@
           </svg>
         </button>
       </div>
+      {#if native}
+        <!-- CD ruling 1: Windows caption buttons at the right edge, 46x46, OS hover and close red. Declared deviation: OS chrome, Windows-only Phase 1. -->
+        <div class="captions">
+          <button type="button" aria-label="Minimize" onclick={() => void windowCommand("window_minimize")}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MINIMIZE_PATH} /></svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Maximize"
+            onclick={() => void windowCommand("window_toggle_maximize")}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={MAXIMIZE_PATH} /></svg>
+          </button>
+          <button type="button" aria-label="Close" onclick={() => void windowCommand("window_close")}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={CLOSE_PATH} /></svg>
+          </button>
+        </div>
+      {/if}
     </header>
 
     <div class="lay full">
@@ -579,23 +581,58 @@
 
   .captions {
     display: flex;
-    margin-left: -8px;
+    align-self: stretch;
+    margin-right: -14px; /* flush with the window edge past .tbar padding */
+    margin-left: 8px;
+    position: relative;
+    z-index: 1;
   }
 
+  /* Windows 11 caption metrics: 46px wide, full titlebar height, square,
+     the OS hover wash and a red close. The fade is the OS's quick fade. */
   .captions button {
     width: 46px;
     height: var(--titlebar-height);
     border: 0;
-    background: none;
-    color: var(--ink-2);
+    border-radius: 0;
+    background: transparent;
+    color: var(--ink-1);
     display: grid;
     place-items: center;
-    cursor: pointer;
+    cursor: default;
+    transition:
+      background-color 83ms linear,
+      color 83ms linear;
   }
 
   .captions button:hover {
-    background: rgb(var(--shade) / 0.06);
-    color: var(--ink-1);
+    background: rgb(0 0 0 / 0.0373);
+  }
+
+  .captions button:active {
+    background: rgb(0 0 0 / 0.0241);
+    color: var(--ink-2);
+  }
+
+  .captions button[aria-label="Close"]:hover {
+    background: #c42b1c;
+    color: #fff;
+  }
+
+  .captions button[aria-label="Close"]:active {
+    background: rgb(196 43 28 / 0.9);
+    color: rgb(255 255 255 / 0.7);
+  }
+
+  /* 16px box: the glyphs come out at Segoe's 10px caption size. */
+  .captions button svg {
+    stroke-width: 1px;
+    stroke-linecap: butt;
+    stroke-linejoin: miter;
+  }
+
+  .captions button svg > * {
+    vector-effect: non-scaling-stroke;
   }
 
   .captions svg,
@@ -988,6 +1025,11 @@
     /* Mock `.mic svg` is 17px on an 18 viewBox, stroke 1.5. */
     width: 17px;
     height: 17px;
+  }
+
+  /* UID 9: the 17/18 scale thinned the stroke to 1.417. Keep it 1.5 on screen. */
+  .cbtn.mic svg > * {
+    vector-effect: non-scaling-stroke;
   }
 
   .mic-glyph svg {

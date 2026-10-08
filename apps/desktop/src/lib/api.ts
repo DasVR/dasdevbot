@@ -346,6 +346,55 @@ export async function getSnapshot(): Promise<Snapshot> {
   return (await response.json()) as Snapshot;
 }
 
+/**
+ * C1 copy for a denied destructive action (DASDEVBOT-LOOK Phase 1 overrides):
+ * "Builder wanted to delete spike/lease-v0." plus the mono command.
+ */
+export function destructiveCopy(approval: Pick<Approval, "agent_name" | "action" | "evidence" | "draft">): {
+  wanted: string;
+  command: string;
+} {
+  const who = approval.agent_name || "An agent";
+  const target = approval.evidence?.ref ?? "";
+  if (approval.action === "force_push") {
+    const remote = approval.evidence?.repo ? `origin` : "";
+    return {
+      wanted: `${who} wanted to force-push ${target || "a branch"}.`,
+      command: ["git push --force", remote, target].filter(Boolean).join(" "),
+    };
+  }
+  const verb = approval.action.replace(/_/g, "-") || "run a destructive action";
+  return {
+    wanted: `${who} wanted to ${verb}${target ? ` ${target}` : ""}.`,
+    command: approval.draft || approval.action,
+  };
+}
+
+/**
+ * Dev-only C1 trigger (CD ruling 3): files a `repo.force_push`, which the
+ * daemon denies by policy and the shell shows only as the flat ink row. No
+ * visible control calls this; the hidden hotkey in App.svelte does.
+ */
+export async function emitDeniedForcePush(): Promise<void> {
+  if (tauriInternals()) {
+    await tauriInvoke()("daemon_emit_demo", { forced: true });
+    return;
+  }
+  const response = await fetch("/v1/events", {
+    method: "POST",
+    headers: await jsonHeaders(),
+    body: JSON.stringify({
+      source: "demo",
+      kind: "repo.force_push",
+      payload: { repo: "DasVR/NIL", ref: "phase0", subject: "simulated force-push" },
+      idempotency_key: `ui-${crypto.randomUUID()}`,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+}
+
 /** Demo `repo.push`. The demo never asks for a destructive force-push. */
 export async function emitPush(): Promise<void> {
   if (tauriInternals()) {

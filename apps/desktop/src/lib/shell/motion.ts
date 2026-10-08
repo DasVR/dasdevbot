@@ -18,6 +18,8 @@ import {
 import { inTauri, prepareForm, readMetrics, setBounds, type NativeRect } from "./native";
 
 const STOPPED = Symbol("stopped");
+/** UID 5: reduced-motion cross-fade, linear, inside the 120-140ms band. */
+const REDUCED_FADE_MS = 130;
 
 interface Tracked {
   anim: Animation;
@@ -397,6 +399,49 @@ export function createShellMotion(
     nodes.stream.inert = collapsed;
   }
 
+  /** Layers whose opacity a morph changes. */
+  function fadeLayers(): HTMLElement[] {
+    return [
+      nodes.win,
+      nodes.roster,
+      nodes.titleFull,
+      nodes.titleComp,
+      nodes.layerFull,
+      nodes.layerComp,
+      nodes.layerPill,
+      nodes.stream,
+    ];
+  }
+
+  function readOpacity(el: HTMLElement): number {
+    const value = Number.parseFloat(getComputedStyle(el).opacity);
+    return Number.isFinite(value) ? value : 1;
+  }
+
+  /**
+   * Reduced motion: after paint() has snapped the geometry and set the target
+   * opacities, fade every changed layer linearly from where it was. A window
+   * folding into the pill stays visible until its fade ends.
+   */
+  function crossFade(layers: HTMLElement[], before: number[], next: ShellForm): Promise<void> {
+    const runs: Promise<void>[] = [];
+    layers.forEach((el, i) => {
+      const to = readOpacity(el);
+      if (Math.abs(to - before[i]) < 0.001) {
+        return;
+      }
+      if (el === nodes.win && next === "pill") {
+        nodes.win.style.visibility = "";
+      }
+      runs.push(clock.play(el, [{ opacity: before[i] }, { opacity: to }], REDUCED_FADE_MS, "linear", 0, "both"));
+    });
+    return Promise.all(runs).then(() => {
+      if (form === "pill" && next === "pill") {
+        concealWindow(true);
+      }
+    });
+  }
+
   function fade(el: HTMLElement, to: number, ms: number, delay = 0): Promise<void> {
     const from = Number.parseFloat(getComputedStyle(el).opacity);
     const start = Number.isFinite(from) ? from : 1;
@@ -413,8 +458,8 @@ export function createShellMotion(
 
   function swapTitle(outEl: HTMLElement, inEl: HTMLElement, fast: number, base: number): void {
     if (options.reduced()) {
-      void clock.play(outEl, [{ opacity: 1 }, { opacity: 0 }], 120, "linear", 0, "both");
-      void clock.play(inEl, [{ opacity: 0 }, { opacity: 1 }], 120, "linear", 0, "both");
+      void clock.play(outEl, [{ opacity: 1 }, { opacity: 0 }], REDUCED_FADE_MS, "linear", 0, "both");
+      void clock.play(inEl, [{ opacity: 0 }, { opacity: 1 }], REDUCED_FADE_MS, "linear", 0, "both");
       return;
     }
     const lift = TITLE_LIFT_PX;
@@ -490,11 +535,16 @@ export function createShellMotion(
     try {
     if (options.reduced()) {
       clock.cancelAll();
+      // UID 5: geometry snaps; the layers cross-fade linearly instead of popping.
+      const layers = fadeLayers();
+      const before = layers.map((el) => readOpacity(el));
       paint(next);
+      const fades = crossFade(layers, before, next);
       await tweenNative(next, 0);
       if (native && form === next) {
         paint(next);
       }
+      await fades;
       return;
     }
     hits(next);
@@ -673,7 +723,15 @@ export function createShellMotion(
 
   function roll(value: string): void {
     if (options.reduced()) {
-      nodes.count.textContent = value;
+      // UID 5: the digit swaps at the same instant as the full-motion roll
+      // (ROLL_OUT_MS), as a linear cross-fade centred on that instant.
+      const half = REDUCED_FADE_MS / 2;
+      void clock
+        .play(nodes.count, [{ opacity: 1 }, { opacity: 0 }], half, "linear", ROLL_OUT_MS - half, "none")
+        .then(() => {
+          nodes.count.textContent = value;
+          return clock.play(nodes.count, [{ opacity: 0 }, { opacity: 1 }], half, "linear", 0, "none");
+        });
       return;
     }
     void clock

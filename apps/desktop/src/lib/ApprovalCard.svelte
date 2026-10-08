@@ -4,6 +4,7 @@
   import {
     SEEN_LOCK_MS,
     actionTitle,
+    destructiveCopy,
     effectAsk,
     effectLabel,
     effectWhy,
@@ -93,6 +94,8 @@
   let strike = $state(0);
   let checkOffset = $state(1);
   let committing = $state<Decision | null>(null);
+  /** Approve's ink layer: 0 at rest, the hold's progress while held, 1 once committed. */
+  const inkProgress = $derived(committing === "approve" ? 1 : Math.min(1, Math.max(0, 1 - checkOffset)));
   /** The OS Windows Hello prompt is open (the signed decision is in flight). */
   let helloOpen = $state(false);
   let nowMs = $state(Date.now());
@@ -112,6 +115,8 @@
   const locked = $derived(busy || committing !== null || helloOpen);
   /** C1: destructive is denied by policy. It renders only as the flat ink row. */
   const destructive = $derived(effect === "destructive");
+  /** C1 copy: "<Agent> wanted to <verb> <target>." with the mono command under it. */
+  const deniedLine = $derived(destructiveCopy(approval));
   const duration = $derived(holdDurationMs(effect, holdMs));
   const showUndo = $derived(
     !pending &&
@@ -894,7 +899,7 @@
   data-risk={risk}
   tabindex={!readonly && !destructive && (pending || showUndo) ? 0 : undefined}
   aria-labelledby={pending && !destructive ? titleId : undefined}
-  aria-label={destructive ? "Destructive actions are off in this build." : pending ? undefined : word}
+  aria-label={destructive ? `${deniedLine.wanted} Destructive actions are off in this build.` : pending ? undefined : word}
   aria-keyshortcuts={pending && !destructive && !readonly ? "Control+Enter Control+Backspace" : undefined}
   onkeydown={onCardKeydown}
   onfocusin={syncFocus}
@@ -915,8 +920,8 @@
     <div class="flat-denied">
       <svg class="dash" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" /></svg>
       <div>
-        <p>Destructive actions are off in this build.</p>
-        <p class="cmd">{approval.draft || approval.action}</p>
+        <p>{deniedLine.wanted} Destructive actions are off in this build.</p>
+        <p class="cmd">{deniedLine.command}</p>
       </div>
     </div>
   {:else if pending}
@@ -1032,19 +1037,31 @@
             onkeydown={onApproveKeydown}
             onclick={() => void onApproveClick()}
           >
-            {#if holdKind === "approve" || checkOffset < 1}
-              <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
-                <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
-              </svg>
-            {/if}
-            <span class="face">
-              <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
-              <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
-                <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
-                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
-                </svg>
-                Approved
+            {#snippet approveFace()}
+              <span class="face">
+                <span class={["face-idle", committing === "approve" && "gone"]} aria-hidden={committing === "approve"}>Approve draft</span>
+                <span class={["face-done", committing === "approve" && "show"]} aria-hidden={committing !== "approve"}>
+                  <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
+                    <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
+                  </svg>
+                  Approved
+                </span>
               </span>
+            {/snippet}
+            {@render approveFace()}
+            <!-- UID 3: paper at rest; the hold fills an ink layer clipped to its progress (4a .btn.approve > .ink). -->
+            <span
+              class={["ink", reducedMotion.current && "rm", holdKind === "approve" && "holding"]}
+              aria-hidden="true"
+              style:clip-path={reducedMotion.current ? "none" : `inset(0px ${((1 - inkProgress) * 100).toFixed(3)}% 0px 0px)`}
+              style:opacity={reducedMotion.current ? String(inkProgress) : "1"}
+            >
+              {#if holdKind === "approve" || checkOffset < 1}
+                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
+                </svg>
+              {/if}
+              {@render approveFace()}
             </span>
           </button>
           <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
@@ -1495,11 +1512,31 @@
       border-color var(--dur-fast) var(--ease-out);
   }
 
+  /* CD fix 1 / UID 3: Approve and Deny carry equal weight at rest (both paper,
+     same border). The hold fills Approve's ink layer. */
   .approve {
-    background: var(--ink-1);
-    color: var(--paper-raised);
+    background: var(--convex), var(--paper-raised);
+    color: var(--ink-1);
     border: 1.5px solid var(--ink-1);
     box-shadow: var(--highlight-top), var(--shadow-puff);
+  }
+
+  .approve > .ink {
+    position: absolute;
+    inset: -1.5px;
+    border-radius: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0)), var(--ink-1);
+    color: var(--paper-raised);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.16);
+  }
+
+  /* Reduced motion: the ink fades with the hold, and a release fades out linearly. */
+  .approve > .ink.rm:not(.holding) {
+    transition: opacity 120ms linear;
   }
 
   .deny {
@@ -1515,7 +1552,8 @@
   }
 
   .approve:hover:not(:disabled) {
-    box-shadow: var(--highlight-top), var(--shadow-float);
+    border-color: var(--ink-1);
+    box-shadow: var(--highlight-top), var(--shadow-puff);
   }
 
   .deny:hover:not(:disabled) {
@@ -1523,9 +1561,15 @@
     box-shadow: var(--highlight-top), var(--shadow-puff);
   }
 
+  /* UID 4: a press sinks paper to --paper-sunken and ink to --ink-press. */
   .approve:active:not(:disabled),
   .deny:active:not(:disabled) {
+    background: var(--paper-sunken);
     box-shadow: var(--shadow-press);
+  }
+
+  .approve:active:not(:disabled) > .ink {
+    background: var(--ink-press);
   }
 
   button:active:not(:disabled) {
@@ -1545,7 +1589,7 @@
     outline-offset: 2px;
   }
 
-  .approve .pen {
+  .approve > .ink .pen {
     stroke: var(--paper-raised);
   }
 
@@ -1841,13 +1885,11 @@
       transform: none;
     }
 
+    /* Reduced motion: a press is an instant fill swap with no shadow change. */
     .approve:active:not(:disabled),
     .deny:active:not(:disabled) {
       transition: none;
-    }
-
-    .deny:active:not(:disabled) {
-      background: color-mix(in oklab, var(--ink-1) 14%, var(--paper-raised));
+      box-shadow: var(--highlight-top), var(--shadow-puff);
     }
 
     .face-idle,

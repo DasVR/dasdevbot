@@ -183,6 +183,7 @@
   }
 
   .bub-bot code {
+    font-family: var(--font-machine);
     font-size: 12.5px;
     background: var(--paper-sunken);
     border-radius: var(--r-xs);

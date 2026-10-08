@@ -288,7 +288,11 @@ try {
         approve: document.querySelectorAll("button.approve, [data-waiting]").length,
       };
     });
-    if (!row.text.includes("Destructive actions are off in this build.") || !row.text.includes("git push --force origin phase0")) {
+    // CD ruling 3: "<Agent> wanted to force-push <ref>. Destructive actions are off in this build." + the mono command.
+    if (
+      !/\b\w+ wanted to force-push phase0\. Destructive actions are off in this build\./.test(row.text) ||
+      !row.text.includes("git push --force origin phase0")
+    ) {
       throw new Error(`${label}: destructive row copy ${JSON.stringify(row)}`);
     }
     if (row.buttons !== 0 || row.tab != null || row.approve !== 0) {
