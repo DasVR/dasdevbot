@@ -48,8 +48,6 @@
   const ACTION_SEEN_RATIO = 0.99;
   /** Sent by the Tauri shell (`src-tauri/src/native_sight.rs`). */
   const NATIVE_SIGHT_EVENT = "dasdevbot:native-sight";
-  /** Fully shown decided face before the fold: 18 frames at 60fps (video: 16). */
-  const FACE_HOLD_MS = 300;
 
   interface Props {
     approval: Approval;
@@ -60,12 +58,6 @@
     onundo?: () => Promise<boolean>;
     /** Escape on the card itself. The host moves focus to its container. */
     onescape?: () => void;
-    /**
-     * Fires once the decided face has been shown and the fold into the receipt
-     * has played. The card window holds its snapshot refresh until then, so the
-     * face is not cut away the instant the decision lands.
-     */
-    onsettled?: () => Promise<void>;
     /** A receipt shown outside the card window: no Undo control, nothing to decide. */
     readonly?: boolean;
     /**
@@ -83,7 +75,6 @@
     ondecide,
     onundo,
     onescape,
-    onsettled,
     readonly = false,
     focusOnShow = false,
   }: Props = $props();
@@ -123,6 +114,16 @@
    * Approve keeps "Approve draft"; after it, "Approved" with one check (UX 5).
    */
   let approvedShown = $state(false);
+  /**
+   * CD (LOOK 8.3 rows 125-128, INTERACTIONS S5 70-73): after Hello resolves
+   * the card stays glass with the drawn check ("Approved") for the whole 6s
+   * undo window, the card video's span. Deny's slot counts the undo down.
+   * Only when the window closes does the glass set to paper and fold into the
+   * receipt, which has no Undo. True from the signed decision until the fold.
+   */
+  let faceHeld = $state(false);
+  /** The window closed: glass is setting to paper, then the fold runs. */
+  let filing = $state(false);
   let nowMs = $state(Date.now());
 
   type HoldKind = "approve" | "deny";
@@ -150,7 +151,9 @@
       approval.undo_until != null &&
       approval.undo_until > nowMs,
   );
-  const floating = $derived(pending || showUndo);
+  const floating = $derived(pending || (showUndo && !filing));
+  /** Approve's decided face: "Approved" with the check, or "Denied" (no check). */
+  const doneShown = $derived(approvedShown || (faceHeld && approval.status === "denied"));
   const undoSeconds = $derived(
     approval.undo_until == null ? 0 : Math.max(0, Math.ceil((approval.undo_until - nowMs) / 1000)),
   );
@@ -231,6 +234,18 @@
       riseNoted = true;
       playRise = pending;
       risen = !playRise;
+      if (!readonly && !destructive && showUndo) {
+        // Opened (or re-shown) inside the undo window: the decided face.
+        faceHeld = true;
+        if (approval.status === "approved") {
+          approvedShown = true;
+          committing = "approve";
+          checkOffset = 0;
+        } else {
+          committing = "deny";
+          strike = 1;
+        }
+      }
     }
     // Opened with this card pending: the card itself takes focus.
     queueMicrotask(() => focusCard(true));
@@ -453,7 +468,15 @@
         window.clearInterval(timer);
       }
     }, 200);
-    return () => window.clearInterval(timer);
+    // The window closes on time, not on the next 200ms tick: the fold starts
+    // when undo_until passes (CD: the card video governs the 6s span).
+    const close = window.setTimeout(() => {
+      nowMs = Math.max(Date.now(), until);
+    }, until - nowMs);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(close);
+    };
   }
 
   function focusReason(node: HTMLInputElement): () => void {
@@ -473,7 +496,7 @@
 
   /** Focus the card itself (UX 3). `always` on open/show; else only from outside the card. */
   function focusCard(always: boolean): void {
-    if (!focusOnShow || readonly || destructive || !pending || cardEl == null) {
+    if (!focusOnShow || readonly || destructive || !(pending || faceHeld) || cardEl == null) {
       return;
     }
     const active = document.activeElement;
@@ -636,7 +659,7 @@
     }
     node.style.overflow = "hidden";
     node.style.transition =
-      "height var(--dur-soft) var(--ease-out), background-color var(--dur-soft) var(--ease-in-out), box-shadow var(--dur-soft) var(--ease-in-out), border-radius var(--dur-soft) var(--ease-in-out), backdrop-filter var(--dur-soft) var(--ease-in-out)";
+      "height var(--dur-stage) var(--ease-out), background-color var(--dur-soft) var(--ease-in-out), box-shadow var(--dur-soft) var(--ease-in-out), border-radius var(--dur-soft) var(--ease-in-out), backdrop-filter var(--dur-soft) var(--ease-in-out)";
     node.style.height = `${to}px`;
     const done = (event: TransitionEvent) => {
       if (event.target !== node || event.propertyName !== "height") {
@@ -650,7 +673,7 @@
     morphTimer = window.setTimeout(() => {
       node.removeEventListener("transitionend", done);
       finishMorph(to);
-    }, 480);
+    }, tokenMs("--dur-stage", 520) + 120);
   }
 
   async function runDecide(decision: Decision, note?: string): Promise<boolean> {
@@ -690,28 +713,45 @@
       clearMorph();
       return;
     }
+    // CD: the card stays glass with the drawn check for the 6s undo window.
+    // Nothing folds now; fileCard() runs when the window closes.
     approvedShown = decision === "approve";
+    faceHeld = true;
+    denyOpen = false;
+    reason = "";
+    clearMorph();
+  }
+
+  /**
+   * The undo window closed: the glass sets to paper under the words (the
+   * .card transition, --dur-soft), then the card folds to the receipt's
+   * height (--dur-stage). Reduced motion: a 160ms crossfade.
+   */
+  async function fileCard(): Promise<void> {
+    if (filing || !faceHeld) {
+      return;
+    }
+    filing = true;
+    lockHeight();
+    await wait(reducedMotion.current ? 0 : tokenMs("--dur-soft", 360));
+    faceHeld = false;
+    filing = false;
     await tick();
     if (!cardEl) {
       return;
     }
-    // UX follow-up 1: the decided face (single check, "Approved") must read
-    // before the receipt. It fades in over --dur-soft, then holds for
-    // FACE_HOLD_MS while fully shown, then the card folds into the receipt.
-    // The card video holds the face for the 16-frame paperize (60fps frames
-    // 613-628) before its fold starts at 629. The video's earlier 6s on the
-    // face is its undo window, which here lives on the receipt (LOOK 8.3), so
-    // it is not spent on the card.
-    if (onsettled) {
-      await wait(tokenMs("--dur-soft", 360) + FACE_HOLD_MS);
-      await onsettled();
-      await tick();
-      if (!cardEl) {
-        return;
-      }
-    }
     scheduleMorph(measureSettled());
   }
+
+  $effect(() => {
+    if (!faceHeld || filing || approval.status === "pending") {
+      return;
+    }
+    const closed = approval.committed || approval.undo_until == null || approval.undo_until <= nowMs;
+    if (closed) {
+      void fileCard();
+    }
+  });
 
   async function onApproveClick(): Promise<void> {
     if (locked || denyOpen || !pending || !decisionAllowed()) {
@@ -857,7 +897,9 @@
       return;
     }
     if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && (event.key === "z" || event.key === "Z")) {
-      if (showUndo && cardEl != null && document.activeElement === cardEl && undoSight(cardEl)) {
+      // SD: only while the card is glass, visible and focused, and passes
+      // undoSight (not hidden, minimized, collapsed or blurred).
+      if (undoAllowed() && document.activeElement === cardEl) {
         event.preventDefault();
         void onUndoClick();
       }
@@ -938,26 +980,51 @@
     void onApproveClick();
   }
 
+  function undoAllowed(): boolean {
+    return (
+      !readonly &&
+      onundo != null &&
+      showUndo &&
+      faceHeld &&
+      !filing &&
+      !sightCut &&
+      cardEl != null &&
+      document.visibilityState === "visible" &&
+      undoSight(cardEl)
+    );
+  }
+
+  /**
+   * INTERACTIONS S5: the face clears, the check (or strike) retracts, Approve
+   * reads "Approve draft" again, and the seen lock re-arms from zero. The
+   * roster dot comes back from the snapshot (pending again). Nothing was
+   * posted, so there is no reverse fold.
+   */
   async function onUndoClick(): Promise<void> {
-    if (!onundo || !showUndo || cardEl == null || !undoSight(cardEl)) {
+    if (!undoAllowed() || !onundo) {
       return;
     }
-    lockHeight();
+    const decided = committing;
     const ok = await onundo();
     if (!ok) {
-      clearMorph();
       return;
     }
+    faceHeld = false;
+    approvedShown = false;
     denyOpen = false;
     reason = "";
-    strike = 0;
-    checkOffset = 1;
     committing = null;
+    holdKind = null;
+    holdSealed = false;
+    // Re-arm the seen lock: a fresh 800ms dwell before any new decision.
+    window.clearTimeout(seenTimer);
+    seenTimer = 0;
+    dwelling = false;
+    seenArmed = false;
+    retract(decided === "deny" ? "deny" : "approve", 1);
     await tick();
-    if (!cardEl) {
-      return;
-    }
-    scheduleMorph(measureSettled());
+    focusCard(true);
+    syncSight();
   }
 </script>
 
@@ -972,7 +1039,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
 <article
   {@attach bindCard}
-  class={destructive ? ["card", "flat"] : ["card", floating ? "glass" : "paper", !pending && "receipt", playRise && "rise"]}
+  class={destructive ? ["card", "flat"] : ["card", floating ? "glass" : "paper", !pending && !faceHeld && !helloOpen && "receipt", playRise && "rise"]}
   style:--arrow-delay={ARROW_DELAY}
   style:--arrow-head-draw={ARROW_HEAD_DRAW}
   style:--reduced-fade={REDUCED_FADE_EASE}
@@ -1010,7 +1077,7 @@
         <p class="cmd">{deniedLine.command}</p>
       </div>
     </div>
-  {:else if pending}
+  {:else if pending || faceHeld || helloOpen}
     {#if effect === "read"}
       <p class="risk-read">Read</p>
     {:else if effect}
@@ -1088,7 +1155,7 @@
         {approval.provider} · {approval.model} · {formatTokens(approval.input_tokens)} in / {formatTokens(approval.output_tokens)} out · {formatUsd(approval.micro_usd)}
       </p>
 
-      {#if denyOpen}
+      {#if denyOpen && !faceHeld}
         <div class="reason">
           <label for={reasonId}>Reason (optional)</label>
           <input
@@ -1109,59 +1176,59 @@
         </div>
       {/if}
 
-      <div class="actions">
-        {#if denyOpen}
+      <div class="actions" {@attach tickUndo}>
+        {#if denyOpen && !faceHeld}
           <button class="deny" type="button" disabled={locked} onclick={back}>Back</button>
           <button class="approve" type="button" disabled={locked} onclick={() => void confirmDeny()}>
             Deny draft
           </button>
         {:else}
+          <!-- CD / INTERACTIONS S5: after Hello the same buttons swap in place
+               (mock 2a swap: fast out, base in) to the decided face for the 6s
+               undo window. Approve reads "Approved" with the drawn check; Deny's
+               slot counts Undo down. -->
           <button
-            class="approve"
+            class={["approve", faceHeld && "decided"]}
             type="button"
-            disabled={busy}
+            disabled={busy && !faceHeld}
+            tabindex={faceHeld ? -1 : undefined}
+            aria-disabled={faceHeld ? "true" : undefined}
             onkeydown={onApproveKeydown}
             onclick={() => void onApproveClick()}
           >
-            {#snippet approveFace()}
-              <span class="face">
-                <span class={["face-idle", approvedShown && "gone"]} aria-hidden={approvedShown}>Approve draft</span>
-                <span class={["face-done", approvedShown && "show"]} aria-hidden={!approvedShown}>
-                  <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
-                    <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
-                  </svg>
-                  Approved
-                </span>
-              </span>
-            {/snippet}
             {@render approveFace()}
-            <!-- UID 3: paper at rest; the hold fills an ink layer clipped to its progress (4a .btn.approve > .ink). -->
-            <span
-              class={["ink", reducedMotion.current && "rm", holdKind === "approve" && "holding"]}
-              aria-hidden="true"
-              style:clip-path={reducedMotion.current ? "none" : `inset(0px ${((1 - inkProgress) * 100).toFixed(3)}% 0px 0px)`}
-              style:opacity={reducedMotion.current ? String(inkProgress) : "1"}
-            >
-              {#if (holdKind === "approve" || checkOffset < 1) && !approvedShown}
-                <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
-                  <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
-                </svg>
-              {/if}
-              {@render approveFace()}
+            {@render approveInk()}
+          </button>
+          <button
+            class={["deny", faceHeld && "undo"]}
+            type="button"
+            disabled={faceHeld ? busy || filing : busy}
+            aria-keyshortcuts={faceHeld ? (macModifier ? "Meta+Z" : "Control+Z") : undefined}
+            onclick={() => (faceHeld ? void onUndoClick() : openDeny())}
+          >
+            <span class="face">
+              <span class={["face-idle", faceHeld && "gone"]} aria-hidden={faceHeld}>Deny draft</span>
+              <span class={["face-done", faceHeld && "show"]} aria-hidden={!faceHeld}>
+                <span class="u">Undo</span><span class="t" aria-hidden="true">{undoSeconds}s</span>
+              </span>
             </span>
           </button>
-          <button class="deny" type="button" disabled={busy} onclick={openDeny}>Deny draft</button>
         {/if}
       </div>
 
       <div class="quiet">
-        <p>Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.</p>
-        {#if helloOpen}
+        {#if faceHeld}
+          <p class="after">
+            {approval.status === "denied"
+              ? "Nothing will post. Undo brings the draft back."
+              : "Posts when undo closes. Nothing is posted yet."}
+          </p>
+          <p class="hold-hint armed">{@render modifier()} Z undoes</p>
+        {:else if helloOpen}
+          <p>Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.</p>
           <p class="hello">Confirm with Windows Hello</p>
         {:else}
-          {#snippet modifier()}
-            <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
-          {/snippet}
+          <p>Hold, then confirm with Windows Hello. Nothing posts until the 6s undo closes.</p>
           {#snippet enterKey()}
             <svg class="key" viewBox="0 0 16 16" role="img" aria-label="Enter">
               <path d={ENTER_KEY_PATH} />
@@ -1213,14 +1280,46 @@
       {#if stamp || decisionShort}
         <p class="stamp">{stamp}{#if stamp && decisionShort}<br />{/if}{decisionShort}</p>
       {/if}
-      {#if showUndo && !readonly}
-        <button class="undo" type="button" onclick={() => void onUndoClick()}>
-          <span class="u">Undo</span><span class="t" aria-hidden="true">{undoSeconds}s</span>
-        </button>
-      {/if}
     </div>
   {/if}
 </article>
+
+{#snippet modifier()}
+  <kbd>{macModifier ? "⌘" : "Ctrl"}</kbd>
+{/snippet}
+
+{#snippet approveFace()}
+  <span class="face">
+    <span class={["face-idle", doneShown && "gone"]} aria-hidden={doneShown}>Approve draft</span>
+    <span class={["face-done", doneShown && "show"]} aria-hidden={!doneShown}>
+      {#if approval.status === "denied"}
+        Denied
+      {:else}
+        <svg class="check inline" viewBox="0 0 24 24" aria-hidden="true">
+          <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset="0" />
+        </svg>
+        Approved
+      {/if}
+    </span>
+  </span>
+{/snippet}
+
+{#snippet approveInk()}
+  <!-- UID 3: paper at rest; the hold fills an ink layer clipped to its progress (4a .btn.approve > .ink). -->
+  <span
+    class={["ink", reducedMotion.current && "rm", holdKind === "approve" && "holding"]}
+    aria-hidden="true"
+    style:clip-path={reducedMotion.current ? "none" : `inset(0px ${((1 - inkProgress) * 100).toFixed(3)}% 0px 0px)`}
+    style:opacity={reducedMotion.current ? String(inkProgress) : "1"}
+  >
+    {#if (holdKind === "approve" || checkOffset < 1) && !approvedShown}
+      <svg class="check" viewBox="0 0 24 24" aria-hidden="true">
+        <path class="pen trace" pathLength="1" d={CHECK_PATH} style:stroke-dashoffset={checkOffset} />
+      </svg>
+    {/if}
+    {@render approveFace()}
+  </span>
+{/snippet}
 
 <style>
   .card {
@@ -1702,19 +1801,35 @@
     align-items: center;
     justify-content: center;
     gap: 8px;
-    transition: opacity var(--dur-soft) var(--ease-in-out);
+    /* Mock 2a swap(): the outgoing label leaves fast, the incoming one
+       arrives on base 40ms later (video: about 10 frames). */
+    transition:
+      opacity var(--dur-base) var(--ease-out) 40ms,
+      transform var(--dur-base) var(--ease-out) 40ms;
   }
 
   .face-done {
     opacity: 0;
+    transform: translateY(3px);
   }
 
   .face-idle.gone {
     opacity: 0;
+    transform: translateY(-3px);
+    transition:
+      opacity var(--dur-fast) var(--ease-exit),
+      transform var(--dur-fast) var(--ease-exit);
   }
 
   .face-done.show {
     opacity: 1;
+    transform: none;
+  }
+
+  .face-done:not(.show) {
+    transition:
+      opacity var(--dur-fast) var(--ease-exit),
+      transform var(--dur-fast) var(--ease-exit);
   }
 
   .quiet {
@@ -1895,42 +2010,18 @@
     white-space: nowrap;
   }
 
-  .undo {
-    display: inline-block;
-    gap: 0;
-    height: auto;
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-    color: var(--accent);
-    font-size: var(--t-meta);
-    line-height: 1;
-    font-weight: var(--w-semibold);
-    text-decoration: none;
-    white-space: nowrap;
-  }
-
-  .undo .u {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-    text-decoration-thickness: 1px;
-  }
-
-  .undo:hover:not(:disabled),
-  .undo:active:not(:disabled) {
-    transform: none;
-    box-shadow: none;
+  /* The decided face holds Approve still; no lift, no dimming. */
+  .approve.decided {
+    cursor: default;
+    pointer-events: none;
   }
 
   .undo .t {
     font-family: var(--font-machine);
     font-weight: var(--w-regular);
     color: var(--ink-3);
-    text-decoration: none;
     display: inline-block;
-    margin-left: 4px;
+    margin-left: 6px;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -1978,9 +2069,13 @@
       box-shadow: var(--highlight-top), var(--shadow-puff);
     }
 
+    /* Mock 2a reduced swap: a 120ms linear crossfade, no lift. */
     .face-idle,
-    .face-done {
-      transition: none;
+    .face-done,
+    .face-idle.gone,
+    .face-done:not(.show) {
+      transform: none;
+      transition: opacity 120ms linear;
     }
   }
 </style>
