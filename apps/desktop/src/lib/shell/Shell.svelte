@@ -1167,10 +1167,13 @@
     opacity: 0;
   }
 
+  /* Mock 4a: the pointer's soft shadow, and the .92 press squeeze about its tip. */
   .cursor svg {
     width: 20px;
     height: 20px;
     overflow: visible;
+    filter: drop-shadow(0 1px 1.5px rgb(var(--shade) / 0.35));
+    transform-origin: 3px 2px;
   }
 
   @media (prefers-reduced-motion: reduce) {

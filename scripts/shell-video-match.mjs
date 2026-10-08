@@ -1,20 +1,25 @@
 /**
- * Frame-matched side-by-side: the 4a shell mock against the app, plus the
- * 03-modes gap clip. SD ruling (Oct 8): CD grades this video, not stills.
+ * Frame-matched side-by-side: the design video (shell-full-companion-pill.mp4)
+ * against the app, plus the 03-modes gap clip. SD ruling (Oct 8): CD grades
+ * this video, not stills. The video has no reduced-motion cut, so reduced
+ * clips use the 4a mock page (?capture&rm), which the video was cut from.
+ * The source videos are never committed; only frames of them are.
  *
  * For each viewport (1440x900, 1280x800) and motion mode (full, reduced):
- * - both pages run at DPR 2 and step their own virtual clocks by DT per
- *   frame; nothing is a screencast;
- * - each panel is stamped with its own clock reading (the app's
- *   __shellCap.now(), the mock's summed Clock.step), not frame * DT;
- * - the first action on each side is detected from pixels (first frame
- *   whose bytes differ from frame 0) and the two timelines are aligned on it;
+ * - the app runs at DPR 2 and steps its virtual clock by DT per frame;
+ *   nothing is a screencast; frames are compared at the video's CSS size;
+ * - each panel is stamped with its own clock (video pts, the app's
+ *   __shellCap.now(), or the mock's summed Clock.step), not frame * DT;
+ * - the first action on each side is detected from pixels (first frame with
+ *   more than CHANGED_PX pixels changed against the frame before, from frame
+ *   2 on, since an encoded frame 0 is a keyframe; frame-diff.py) and
+ *   the two timelines are aligned on it;
  *   the offset is reported, so a late start is visible, not hidden;
- * - pixel duplicates (a side that repeats a frame while its own animations
- *   say it is moving) are counted per side;
+ * - pixel duplicates (a repeated frame while that side is moving) are
+ *   counted per side, including encoder repeats in the video;
  * - per-frame SSIM between the aligned panels, with the worst frames listed;
- * - G07/G12/G22/G25 are re-measured on both sides at each settled form.
- * The modes clip puts 3a-modes on the left and a GAP card on the right
+ * - G07/G12/G22/G25 are re-measured against the 4a mock DOM at each settled form.
+ * The modes clip puts modes-focus-away-review.mp4 on the left and a GAP card on the right
  * (P1 gap "03-modes not built, due by Oct 14").
  *
  * usage: node scripts/shell-video-match.mjs [--look /workspace/dasdevbot-look]
@@ -23,8 +28,7 @@
  */
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, writeFile, readFile, cp, rm, readdir } from "node:fs/promises";
+import { mkdir, writeFile, readFile, cp, rm, readdir, rename } from "node:fs/promises";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
@@ -41,6 +45,8 @@ function arg(name, fallback) {
 const root = fileURLToPath(new URL("..", import.meta.url));
 const desktop = path.join(root, "apps/desktop");
 const look = path.resolve(arg("--look", process.env.DASDEVBOT_LOOK || "/workspace/dasdevbot-look"));
+/** The design video CD grades against (never committed; only frames of it are published). */
+const referenceVideo = path.resolve(arg("--video", "/workspace/vid/shell-full-companion-pill.mp4"));
 const outDir = path.resolve(root, arg("--out", "docs/review/parity/video"));
 const only = arg("--only", "")
   .split(",")
@@ -254,47 +260,12 @@ function compareGaps(mock, app) {
   return verdicts;
 }
 
-async function hashes(dir, prefix) {
-  const names = (await readdir(dir)).filter((name) => name.startsWith(prefix)).sort();
-  const out = [];
-  for (const name of names) {
-    out.push(createHash("sha256").update(await readFile(path.join(dir, name))).digest("hex"));
-  }
-  return out;
-}
-
-function firstAction(list) {
-  for (let i = 1; i < list.length; i += 1) {
-    if (list[i] !== list[0]) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-/** A side repeated its previous frame while its animations said it was moving. */
-function pixelDuplicates(list, moving) {
-  let motion = 0;
-  let rest = 0;
-  const hits = [];
-  for (let i = 1; i < list.length; i += 1) {
-    if (list[i] !== list[i - 1]) {
-      continue;
-    }
-    if (moving[i - 1]) {
-      motion += 1;
-      if (hits.length < 12) {
-        hits.push(i);
-      }
-    } else {
-      rest += 1;
-    }
-  }
-  return { motion, rest, hits };
-}
-
-/** Capture one side, frame-stepped. Returns per-frame clock and motion data. */
-async function captureSide(page, dir, prefix, { start, step, now, done }) {
+/**
+ * Step one page frame by frame. `scale` is the capture scale: DPR for the
+ * app (CDP clip.scale, so the JPEG is real 2x pixels; without a clip CDP
+ * returns CSS-size images even at DPR 2), 0 to only probe (no screenshots).
+ */
+async function captureSide(page, dir, prefix, { start, step, now, done }, { scale = DPR, width, height } = {}) {
   const clock = [];
   const moving = [];
   const gaps = [];
@@ -306,10 +277,15 @@ async function captureSide(page, dir, prefix, { start, step, now, done }) {
       await page.evaluate(step, DT);
     }
     await paintFlush(page);
-    // CDP capture: ~0.4s a frame at DPR 2 on this box, against ~13s through
-    // page.screenshot (which re-waits for fonts and re-lays out per call).
-    const shot = await cdp.send("Page.captureScreenshot", { format: "jpeg", quality: 90, optimizeForSpeed: true });
-    await writeFile(path.join(dir, `${prefix}-${String(frame).padStart(4, "0")}.jpg`), Buffer.from(shot.data, "base64"));
+    if (scale > 0) {
+      const shot = await cdp.send("Page.captureScreenshot", {
+        format: "jpeg",
+        quality: 92,
+        optimizeForSpeed: true,
+        clip: { x: 0, y: 0, width, height, scale },
+      });
+      await writeFile(path.join(dir, `${prefix}-${String(frame).padStart(4, "0")}.jpg`), Buffer.from(shot.data, "base64"));
+    }
     clock.push(await page.evaluate(now));
     const isMoving = await page.evaluate(movingProbe);
     moving.push(isMoving);
@@ -327,6 +303,56 @@ async function captureSide(page, dir, prefix, { start, step, now, done }) {
   return { clock, moving, gaps };
 }
 
+/** Reference frames from the design video (1440x900, 60fps), top-left crop for smaller viewports. */
+async function extractVideo(dir, width, height) {
+  await run("ffmpeg", ["-y", "-i", referenceVideo, "-vf", `crop=${width}:${height}:0:0`, "-vsync", "0", "-q:v", "2", path.join(dir, "ref-%04d.jpg")]);
+  const names = (await readdir(dir)).filter((name) => name.startsWith("ref-")).sort();
+  // ffmpeg numbers from 1; renumber from 0 to match the app side.
+  for (let i = 0; i < names.length; i += 1) {
+    await rename(path.join(dir, names[i]), path.join(dir, `ref-${String(i).padStart(4, "0")}.jpg`));
+  }
+  return names.length;
+}
+
+/** Pixel change per frame (numpy helper), at the reference's CSS size. */
+async function frameChanges(dir, prefix, width, height) {
+  const { out } = await run("python3", [path.join(root, "scripts/frame-diff.py"), dir, prefix, String(width), String(height)]);
+  return JSON.parse(out);
+}
+
+/** Noise floor: a frame "changed" if more than this many CSS pixels moved. */
+const CHANGED_PX = 24;
+
+/**
+ * First frame that moves against the frame before it. Frame 1 is skipped: an
+ * encoded video's frame 0 is a keyframe and 0->1 differs by encoder noise
+ * alone (~335 px on the design video), which read as a first action at f1.
+ */
+function firstChange(prev) {
+  return prev.findIndex((count, i) => i >= 2 && count > CHANGED_PX);
+}
+
+/** Repeats of the previous frame while that side was moving. */
+function repeats(prev, moving) {
+  let motion = 0;
+  let rest = 0;
+  const hits = [];
+  for (let i = 1; i < prev.length; i += 1) {
+    if (prev[i] > CHANGED_PX) {
+      continue;
+    }
+    if (moving(i)) {
+      motion += 1;
+      if (hits.length < 16) {
+        hits.push(i);
+      }
+    } else {
+      rest += 1;
+    }
+  }
+  return { motion, rest, hits };
+}
+
 /** sendcmd script that rewrites each panel's stamp from its own clock. */
 function stampCommands(target, frames, label) {
   return frames
@@ -338,35 +364,38 @@ function stampCommands(target, frames, label) {
     .join("\n");
 }
 
-async function encodePair(dir, mockFrames, appFrames, offsets, labels, video) {
+async function encodePair(dir, refPrefix, refStamps, appStamps, offsets, labels, size, video) {
   // Align on the detected first action by trimming the earlier side's lead-in.
-  const lead = Math.max(offsets.mock, offsets.app);
-  const trimMock = lead - offsets.mock;
+  const lead = Math.max(offsets.ref, offsets.app);
+  const trimRef = lead - offsets.ref;
   const trimApp = lead - offsets.app;
-  const count = Math.min(mockFrames.length - trimMock, appFrames.length - trimApp);
+  const count = Math.min(refStamps.length - trimRef, appStamps.length - trimApp);
   const cmdFile = path.join(dir, "stamps.cmd");
   await writeFile(
     cmdFile,
-    `${stampCommands("drawtext@l", mockFrames.slice(trimMock, trimMock + count), labels[0])}\n${stampCommands("drawtext@r", appFrames.slice(trimApp, trimApp + count), labels[1])}\n`,
+    `${stampCommands("drawtext@l", refStamps.slice(trimRef, trimRef + count), labels[0])}\n${stampCommands("drawtext@r", appStamps.slice(trimApp, trimApp + count), labels[1])}\n`,
   );
   const draw = (name) =>
-    `drawtext@${name}=fontfile=${FONT}:text='':x=24:y=24:fontsize=40:fontcolor=0x2B2723:box=1:boxcolor=0xFBF9F5@0.92:boxborderw=12`;
-  await run("ffmpeg", [
-    "-y",
-    "-framerate", "60", "-start_number", String(trimMock), "-i", path.join(dir, "mock-%04d.jpg"),
+    `drawtext@${name}=fontfile=${FONT}:text='':x=16:y=16:fontsize=22:fontcolor=0x2B2723:box=1:boxcolor=0xFBF9F5@0.92:boxborderw=8`;
+  // The app is captured at DPR 2; both panels are shown and compared at the
+  // reference's CSS size (the design video is 1x).
+  const inputs = [
+    "-framerate", "60", "-start_number", String(trimRef), "-i", path.join(dir, `${refPrefix}-%04d.jpg`),
     "-framerate", "60", "-start_number", String(trimApp), "-i", path.join(dir, "app-%04d.jpg"),
+  ];
+  const fit = `scale=${size.width}:${size.height}:flags=area`;
+  await run("ffmpeg", [
+    "-y", ...inputs,
     "-filter_complex",
-    `[0:v]sendcmd=f=${cmdFile},${draw("l")}[left];[1:v]sendcmd=f=${cmdFile},${draw("r")}[right];[left][right]hstack=inputs=2,scale=iw/2:-2`,
+    `[0:v]${fit},sendcmd=f=${cmdFile},${draw("l")}[left];[1:v]${fit},sendcmd=f=${cmdFile},${draw("r")}[right];[left][right]hstack=inputs=2`,
     "-frames:v", String(count),
-    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
     video,
   ]);
-  // Per-frame SSIM between the aligned, unstamped panels.
   const ssimFile = path.join(dir, "ssim.log");
   await run("ffmpeg", [
-    "-framerate", "60", "-start_number", String(trimMock), "-i", path.join(dir, "mock-%04d.jpg"),
-    "-framerate", "60", "-start_number", String(trimApp), "-i", path.join(dir, "app-%04d.jpg"),
-    "-lavfi", `[0:v][1:v]ssim=stats_file=${ssimFile}`,
+    ...inputs,
+    "-lavfi", `[0:v]${fit}[a];[1:v]${fit}[b];[a][b]ssim=stats_file=${ssimFile}`,
     "-frames:v", String(count),
     "-f", "null", "-",
   ]);
@@ -374,7 +403,7 @@ async function encodePair(dir, mockFrames, appFrames, offsets, labels, video) {
     .trim()
     .split("\n")
     .map((line) => Number((line.match(/All:([0-9.]+)/) ?? [])[1]));
-  return { count, trimMock, trimApp, ssim };
+  return { count, trimRef, trimApp, ssim };
 }
 
 function summarise(ssim) {
@@ -393,54 +422,78 @@ async function captureClip(browser, origin, mockOrigin, clip) {
   const dir = path.join(work, clip.id);
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
+  const size = { width: clip.width, height: clip.height };
   const contextOpts = {
-    viewport: { width: clip.width, height: clip.height },
+    viewport: size,
     deviceScaleFactor: DPR,
     timezoneId: "America/New_York",
     reducedMotion: clip.reduced ? "reduce" : "no-preference",
   };
-  const mockCtx = await browser.newContext(contextOpts);
+  // The mock page always runs: it is the reference for reduced motion (the
+  // design video has no reduced cut) and the DOM for the gap probes.
+  const mockCtx = await browser.newContext({ ...contextOpts, deviceScaleFactor: 1 });
   const appCtx = await browser.newContext(contextOpts);
   try {
     const mockPage = await mockCtx.newPage();
     const appPage = await appCtx.newPage();
     await mockPage.goto(`${mockOrigin}/mocks/4a-shell-morph.html?${clip.reduced ? "capture&rm" : "capture"}`, { waitUntil: "load", timeout: 180_000 });
     await appPage.goto(`${origin}/?shellCapture=1`, { waitUntil: "load", timeout: 180_000 });
-    await appPage.locator(".wordmark").waitFor();
+    await appPage.locator(".wordmark").waitFor({ timeout: 180_000 });
     await mockPage.waitForFunction(() => typeof window.__cap?.start === "function");
     await appPage.waitForFunction(() => typeof window.__shellCap?.start === "function");
     await mockPage.evaluate(() => document.fonts.ready);
     await appPage.evaluate(() => document.fonts.ready);
-    // The mock exposes only step(); its clock reading is the sum of steps.
     await mockPage.evaluate(() => {
       window.__matchClock = 0;
     });
-    const mock = await captureSide(mockPage, dir, "mock", {
-      start: () => window.__cap.start(),
-      step: (dt) => {
-        window.__matchClock += dt;
-        return window.__cap.step(dt);
+    const mock = await captureSide(
+      mockPage,
+      dir,
+      "mock",
+      {
+        start: () => window.__cap.start(),
+        step: (dt) => {
+          window.__matchClock += dt;
+          return window.__cap.step(dt);
+        },
+        now: () => window.__matchClock,
+        done: () => window.__cap.done,
       },
-      now: () => window.__matchClock,
-      done: () => window.__cap.done,
-    });
-    const app = await captureSide(appPage, dir, "app", {
-      start: () => window.__shellCap.start(),
-      step: (dt) => window.__shellCap.step(dt),
-      now: () => window.__shellCap.now(),
-      done: () => !window.__shellCap.running() && window.__shellCap.pending() === 0,
-    });
-    const mockHashes = await hashes(dir, "mock-");
-    const appHashes = await hashes(dir, "app-");
-    const offsets = { mock: firstAction(mockHashes), app: firstAction(appHashes) };
-    if (offsets.mock < 0 || offsets.app < 0) {
+      { scale: clip.reduced ? 1 : 0, ...size },
+    );
+    const app = await captureSide(
+      appPage,
+      dir,
+      "app",
+      {
+        start: () => window.__shellCap.start(),
+        step: (dt) => window.__shellCap.step(dt),
+        now: () => window.__shellCap.now(),
+        done: () => !window.__shellCap.running() && window.__shellCap.pending() === 0,
+      },
+      { scale: DPR, ...size },
+    );
+    let refPrefix = "mock";
+    let refStamps = mock.clock;
+    let refLabel = "Mock 4a (reduced; the video has no reduced cut)";
+    if (!clip.reduced) {
+      const n = await extractVideo(dir, clip.width, clip.height);
+      refPrefix = "ref";
+      refStamps = Array.from({ length: n }, (_, i) => (i * 1000) / 60);
+      refLabel = `Video ${path.basename(referenceVideo)}${clip.width < 1440 ? " (top-left crop)" : ""}`;
+    }
+    const refChange = await frameChanges(dir, refPrefix, clip.width, clip.height);
+    const appChange = await frameChanges(dir, "app", clip.width, clip.height);
+    const offsets = { ref: firstChange(refChange.prev), app: firstChange(appChange.prev) };
+    if (offsets.ref < 0 || offsets.app < 0) {
       throw new Error(`${clip.id}: no first action detected ${JSON.stringify(offsets)}`);
     }
-    // The app stamp must be its own clock and must advance one DT per frame.
     const drift = app.clock.reduce((worst, ms, i) => Math.max(worst, Math.abs(ms - app.clock[0] - i * DT)), 0);
     await mkdir(outDir, { recursive: true });
     const video = path.join(outDir, `shell-${clip.id}.mp4`);
-    const encoded = await encodePair(dir, mock.clock, app.clock, offsets, ["Mock 4a", "App"], video);
+    const encoded = await encodePair(dir, refPrefix, refStamps, app.clock, offsets, [refLabel, "App (DPR 2)"], size, video);
+    // A reference frame is "moving" if either neighbour changed; the app knows from its animations.
+    const refMoving = (i) => (refChange.prev[i - 1] ?? 0) > CHANGED_PX || (refChange.prev[i + 1] ?? 0) > CHANGED_PX;
     const gapRows = [];
     for (const mockGap of mock.gaps) {
       const appGap = app.gaps.find((item) => item.form === mockGap.form);
@@ -448,13 +501,26 @@ async function captureClip(browser, origin, mockOrigin, clip) {
         gapRows.push({ form: mockGap.form, mockFrame: mockGap.frame, appFrame: appGap.frame, mock: mockGap, app: appGap, pass: compareGaps(mockGap, appGap) });
       }
     }
+    // Publish a few aligned stills (reference | app) at the worst-SSIM frames.
+    const stills = [];
+    const worst = summarise(encoded.ssim).worst.slice(0, 3);
+    for (const { frame } of worst) {
+      const still = path.join(outDir, `shell-${clip.id}-f${frame}.png`);
+      await run("ffmpeg", ["-y", "-i", video, "-vf", `select=eq(n\\,${frame})`, "-frames:v", "1", still]);
+      stills.push(path.relative(root, still));
+    }
     return {
       clip: clip.id,
+      reference: clip.reduced ? "mock 4a-shell-morph.html ?capture&rm" : path.basename(referenceVideo),
       video: path.relative(root, video),
-      frames: { mock: mockHashes.length, app: appHashes.length, encoded: encoded.count },
-      firstAction: { ...offsets, alignedBy: { trimMock: encoded.trimMock, trimApp: encoded.trimApp } },
+      stills,
+      frames: { reference: refStamps.length, app: app.clock.length, encoded: encoded.count },
+      firstAction: { ...offsets, alignedBy: { trimRef: encoded.trimRef, trimApp: encoded.trimApp } },
       appClockDriftMs: Math.round(drift * 1000) / 1000,
-      duplicates: { mock: pixelDuplicates(mockHashes, mock.moving), app: pixelDuplicates(appHashes, app.moving) },
+      duplicates: {
+        reference: repeats(refChange.prev, refMoving),
+        app: repeats(appChange.prev, (i) => app.moving[i - 1]),
+      },
       ssim: summarise(encoded.ssim),
       gaps: gapRows,
     };
@@ -464,47 +530,31 @@ async function captureClip(browser, origin, mockOrigin, clip) {
   }
 }
 
-/** 03-modes: mock on the left, the declared gap on the right. */
-async function captureModes(browser, mockOrigin) {
+/** 03-modes: the design video on the left, the declared gap on the right. */
+async function captureModes() {
   const dir = path.join(work, "modes");
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
-  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: DPR, timezoneId: "America/New_York" });
-  try {
-    const page = await ctx.newPage();
-    await page.goto(`${mockOrigin}/mocks/3a-modes.html?capture`, { waitUntil: "load", timeout: 180_000 });
-    await page.waitForFunction(() => typeof window.__cap?.start === "function");
-    await page.evaluate(() => {
-      window.__matchClock = 0;
-    });
-    const side = await captureSide(page, dir, "mock", {
-      start: () => window.__cap.start(),
-      step: (dt) => {
-        window.__matchClock += dt;
-        return window.__cap.step(dt);
-      },
-      now: () => window.__matchClock,
-      done: () => window.__cap.done,
-    });
-    const cmdFile = path.join(dir, "stamps.cmd");
-    await writeFile(cmdFile, `${stampCommands("drawtext@l", side.clock, "Mock 3a modes")}\n`);
-    const video = path.join(outDir, "modes-gap.mp4");
-    const gapText = "GAP P1  03-modes not built (due by Oct 14)";
-    await run("ffmpeg", [
-      "-y",
-      "-framerate", "60", "-i", path.join(dir, "mock-%04d.jpg"),
-      "-f", "lavfi", "-i", `color=c=0xF6F2EB:s=${1440 * DPR}x${900 * DPR}:r=60`,
-      "-filter_complex",
-      `[0:v]sendcmd=f=${cmdFile},drawtext@l=fontfile=${FONT}:text='':x=24:y=24:fontsize=40:fontcolor=0x2B2723:box=1:boxcolor=0xFBF9F5@0.92:boxborderw=12[left];` +
-        `[1:v]drawtext=fontfile=${FONT}:text='${gapText}':x=(w-tw)/2:y=(h-th)/2:fontsize=64:fontcolor=0x2B2723[right];[left][right]hstack=inputs=2:shortest=1,scale=iw/2:-2`,
-      "-frames:v", String(side.clock.length),
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
-      video,
-    ]);
-    return { clip: "modes", video: path.relative(root, video), frames: side.clock.length, gap: "03-modes not built, due by Oct 14" };
-  } finally {
-    await ctx.close();
-  }
+  const source = path.resolve(arg("--modes-video", "/workspace/vid/modes-focus-away-review.mp4"));
+  const { out } = await run("ffprobe", ["-v", "error", "-select_streams", "v", "-count_frames", "-show_entries", "stream=nb_read_frames,width,height", "-of", "csv=p=0", source]);
+  const [width, height, frames] = out.trim().split(",").map(Number);
+  const cmdFile = path.join(dir, "stamps.cmd");
+  await writeFile(cmdFile, `${stampCommands("drawtext@l", Array.from({ length: frames }, (_, i) => (i * 1000) / 60), `Video ${path.basename(source)}`)}\n`);
+  await mkdir(outDir, { recursive: true });
+  const video = path.join(outDir, "modes-gap.mp4");
+  const gapText = "GAP P1  03-modes not built (due by Oct 14)";
+  await run("ffmpeg", [
+    "-y",
+    "-i", source,
+    "-f", "lavfi", "-i", `color=c=0xF6F2EB:s=${width}x${height}:r=60`,
+    "-filter_complex",
+    `[0:v]sendcmd=f=${cmdFile},drawtext@l=fontfile=${FONT}:text='':x=16:y=16:fontsize=22:fontcolor=0x2B2723:box=1:boxcolor=0xFBF9F5@0.92:boxborderw=8[left];` +
+      `[1:v]drawtext=fontfile=${FONT}:text='${gapText}':x=(w-tw)/2:y=(h-th)/2:fontsize=36:fontcolor=0x2B2723[right];[left][right]hstack=inputs=2:shortest=1`,
+    "-frames:v", String(frames),
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
+    video,
+  ]);
+  return { clip: "modes", reference: path.basename(source), video: path.relative(root, video), frames, gap: "03-modes not built, due by Oct 14" };
 }
 
 const viteBin = path.join(desktop, "node_modules/vite/bin/vite.js");
@@ -545,7 +595,7 @@ try {
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   }
   if (withModes) {
-    keep(await captureModes(browser, mockOrigin));
+    keep(await captureModes());
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   }
   console.log(`wrote ${path.relative(root, outDir)}/match-report.json`);

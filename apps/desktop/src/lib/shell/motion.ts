@@ -647,6 +647,9 @@ export function createShellMotion(
     nodes.cursor.style.transform = `translate(${at.x - 3}px, ${at.y - 2}px)`;
   }
 
+  /** The mock's cursor arc (4a moveTo `arc = .08`): a hand, not a ruler. */
+  const CURSOR_ARC = 0.08;
+
   function moveCursor(x: number, y: number, ms: number, gen: number): Promise<void> {
     if (options.reduced()) {
       return sleep(ms, gen).then(() => {
@@ -655,6 +658,8 @@ export function createShellMotion(
     }
     const x0 = cursor.x;
     const y0 = cursor.y;
+    const dx = x - x0;
+    const dy = y - y0;
     const ease = tokenEase("--ease-in-out");
     return new Promise((resolve, reject) => {
       const t0 = clock.now();
@@ -663,8 +668,14 @@ export function createShellMotion(
           reject(STOPPED);
           return;
         }
-        const p = ms <= 0 ? 1 : Math.min(1, (clock.now() - t0) / ms);
-        placeCursor(x0 + (x - x0) * p, y0 + (y - y0) * p);
+        const p = ease(ms <= 0 ? 1 : Math.min(1, (clock.now() - t0) / ms));
+        // The mock's moveTo: eased progress along a shallow arc, bowed
+        // perpendicular to the path by sin(pi * p) * CURSOR_ARC.
+        const bow = Math.sin(Math.PI * p) * CURSOR_ARC;
+        placeCursor(x0 + dx * p - dy * bow, y0 + dy * p + dx * bow);
+        if (p >= 1) {
+          placeCursor(x, y);
+        }
         if (p < 1) {
           clock.raf(frame);
         } else {
@@ -684,15 +695,24 @@ export function createShellMotion(
     };
   }
 
+  /** The cursor's glyph. It is an <svg>, so not an HTMLElement. */
+  function cursorGlyph(): SVGElement | HTMLElement | null {
+    const glyph = nodes.cursor?.firstElementChild;
+    return glyph instanceof SVGElement || glyph instanceof HTMLElement ? glyph : null;
+  }
+
   async function press(el: HTMLElement, ms: number, gen: number): Promise<void> {
     el.classList.add("is-press");
-    if (nodes.cursor?.firstElementChild instanceof HTMLElement && !options.reduced()) {
-      nodes.cursor.firstElementChild.style.scale = "0.92";
+    // The mock's pressVisual squeezes the pointer to .92 about its tip. The
+    // old HTMLElement check never matched the <svg>, so the squeeze never ran.
+    const glyph = cursorGlyph();
+    if (glyph && !options.reduced()) {
+      glyph.style.scale = "0.92";
     }
     await sleep(ms, gen);
     el.classList.remove("is-press");
-    if (nodes.cursor?.firstElementChild instanceof HTMLElement) {
-      nodes.cursor.firstElementChild.style.scale = "";
+    if (glyph) {
+      glyph.style.scale = "";
     }
   }
 
