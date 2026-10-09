@@ -56,7 +56,7 @@ Status: draft for Security Director review. Scope: the desktop app (Tauri shell 
   - The Hello prompt is shown in front of the card.
   - A stop during Hello wins, and a Hello result that arrives later is discarded (D-SD-007).
   - Nothing above read auto-approves (`Policy::phase1`).
-  - Routing never approves spending, messages to non-users, credentials, destructive actions or offensive tools.
+  - Kernel floor (policy): routing never approves spending, messages to non-users, credential use, destructive actions or offensive tools. Enforced in code today: nothing auto-approves, every approval needs the card plus Windows Hello, destructive effects are denied, and the external tier is off. A test that enforces all five at the routing layer is tracked in #55.
 - **CSP.** One policy with no `*` source. It is byte-identical in the shell config and in daemon responses, and enforced by a test.
 - **External tier off.** `EXTERNAL_TIER_ENABLED = false`: external effects are hard-denied in Phase 1 until the Windows Hello hardware test and SD sign-off. Destructive effects are denied by policy (C1).
 - **Dev-only demo triggers.** The scripted force-push (`FORCED_DEMO_ALLOWED`) exists only in debug builds. It is pinned by a test and never widened to the demo installer.
