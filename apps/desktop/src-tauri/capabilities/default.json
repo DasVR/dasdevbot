@@ -1,12 +1,11 @@
 {
   "identifier": "default",
-  "description": "Main window: the session bearer, the shell forms, and showing the card window. No decision capability.",
+  "description": "Main window: the shell forms, showing the card window, and the daemon snapshot and demo emit (the shell attaches the bearer; the page never sees it). No decision capability.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "allow-session-token",
     "allow-open-card-window",
     "allow-prepare-shell-form",
     "allow-shell-metrics",

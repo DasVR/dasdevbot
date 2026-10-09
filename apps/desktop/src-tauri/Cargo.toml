@@ -27,13 +27,17 @@ serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
-# Snap Layouts overlay on the drawn maximize button (src/snap.rs). Already in
+# Snap Layouts overlay on the drawn maximize button (src/snap.rs) and the
+# demo daemon's kill-on-close Job Object (src/daemon_child.rs). Already in
 # Tauri's own dependency tree on Windows; MIT OR Apache-2.0.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

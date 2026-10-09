@@ -22,6 +22,23 @@ default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; f
 
 `window.label()` is used only inside the shell process, to choose which per-launch secret file to read: `<data>.window-card`, `<data>.window-main`, or `<data>.window-settings` (mode 0600). The JSON body does not contain a `window` field. The daemon maps `window_secret` back to the label.
 
+## Loopback HTTP from the shell (#36 H1, M2)
+
+The main window reads the snapshot and sends the dev demo events only through `daemon_snapshot` and `daemon_emit_demo`. The card window gets `daemon_snapshot` only. The shell makes the HTTP call to `127.0.0.1:8787` and attaches the bearer itself. No command returns the bearer, and no script puts it in a page.
+
+Each call is authenticated both ways:
+
+1. **Bundled daemon running.** In the demo build the spawn result is kept. A failed spawn, or a child that has exited, refuses every call with an error the page shows in its banner. The shell never falls back to whatever else answers on the port.
+2. **The daemon proves itself first.** The shell sends `GET /v1/health` with `X-Dasdevbot-Challenge: <64 hex>` and no bearer. The daemon answers with `X-Dasdevbot-Proof`:
+   - The proof is a keyed blake3 hash. The key is `derive_key("dasdevbot 2026-10-08 loopback http daemon proof v1", bearer)`.
+   - The hash covers the challenge, `"<METHOD> <path>"`, the status and the exact body (`crates/daemon/src/http_proof.rs`).
+   - If the proof doesn't verify, the shell sends nothing more.
+3. **The bearer goes on every call**, the snapshot included, with a fresh challenge. The response is used only if its proof verifies, error statuses included.
+
+A process under another account that grabbed the port while the daemon was down can't read `<data>.token` (mode 0600, owner-only DACL on Windows). So it can't forge a proof and never receives the bearer. A same-user process is out of scope, as on the socket.
+
+In the demo build on Windows, the daemon child is in a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (#36 M3). When the app exits, crashes or is killed, the child dies with it.
+
 ## Socket
 
 Unix: `<data>.shell.sock`, mode 0600. The daemon reads `SO_PEERCRED` and refuses a peer whose uid is not the daemon's euid. A failed `getsockopt` fails closed.

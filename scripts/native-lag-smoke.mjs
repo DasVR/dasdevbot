@@ -122,9 +122,6 @@ async function run(browser, lag) {
             setTimeout(() => window.__resize(args.width, args.height), lag);
             return Promise.resolve(null);
           }
-          if (command === "session_token") {
-            return Promise.resolve("");
-          }
           return Promise.resolve(null);
         },
       };

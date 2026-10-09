@@ -3,40 +3,44 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
-function escapeAttr(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+/**
+ * The daemon writes this beside the default sqlite file. It is not an API.
+ * #36 H1: dev only, and only on the server side of the proxy. The bearer is
+ * attached to the proxied `/v1` request and never reaches HTML or the page.
+ */
+const tokenPath = path.resolve(root, "../../data/dasdevbot.sqlite.token");
+
+function devBearer(): string {
+  try {
+    return fs.readFileSync(tokenPath, "utf8").trim();
+  } catch {
+    return "";
+  }
 }
 
-/** The daemon writes this beside the default sqlite file. It is not an API. */
-function sessionTokenPlugin(): Plugin {
-  const tokenPath = path.resolve(root, "../../data/dasdevbot.sqlite.token");
-  return {
-    name: "dasdevbot-session-token",
-    apply: "serve",
-    transformIndexHtml(html: string): string {
-      let token = "";
-      try {
-        token = fs.readFileSync(tokenPath, "utf8").trim();
-      } catch {
-        token = "";
-      }
-      const meta = `<meta name="dasdevbot-token" content="${escapeAttr(token)}" />`;
-      return html.replace("<head>", `<head>\n    ${meta}`);
-    },
-  };
+/**
+ * Only the dev page itself gets the bearer attached. A cross-site page that
+ * posts to localhost:5173 (CSRF) is forwarded without it, so the daemon
+ * answers 401.
+ */
+function fromDevPage(headers: Record<string, string | string[] | undefined>): boolean {
+  const site = headers["sec-fetch-site"];
+  if (site !== undefined && site !== "same-origin") {
+    return false;
+  }
+  const origin = headers.origin;
+  if (origin !== undefined && !/^http:\/\/(localhost|127\.0\.0\.1):5173$/.test(String(origin))) {
+    return false;
+  }
+  return true;
 }
 
 export default defineConfig({
-  plugins: [svelte(), sessionTokenPlugin()],
+  plugins: [svelte()],
   build: {
     rollupOptions: {
       input: {
@@ -55,8 +59,14 @@ export default defineConfig({
         // sends localhost:5173, so the proxy rewrites Host to the target.
         changeOrigin: true,
         configure(proxy) {
-          proxy.on("proxyReq", (proxyReq) => {
+          proxy.on("proxyReq", (proxyReq, req) => {
+            const fromPage = fromDevPage(req.headers);
             proxyReq.removeHeader("origin");
+            proxyReq.removeHeader("authorization");
+            const bearer = fromPage ? devBearer() : "";
+            if (bearer) {
+              proxyReq.setHeader("Authorization", `Bearer ${bearer}`);
+            }
           });
         },
       },
