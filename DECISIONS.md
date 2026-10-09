@@ -167,6 +167,12 @@ Affects: TODAY-FLOWS §7.3, §7.5, §12 (SD-10 closed).
 Source: Security Director's review of #46 at `9265841`, 2026-10-08 (relayed by the parent agent).
 Affects: #46, #36, #49, #50.
 
+### D-SD-013 · 2026-10-08 · SD · Pipe-path ready() is a G1 blocker; kernel floor stated as policy
+(1) daemon_child::ready() on the pipe path is a G1 blocker in the M2 class, fixed in #56, while the server PID/SID check stays on #54, gated with #49. (3) The threat model states the kernel floor as policy and lists only what code enforces today; the routing-layer test is tracked in #55, gating EXTERNAL_TIER_ENABLED and any build beyond Arriq's machine.
+Citation check: "a stop during Hello wins" is D-SD-007 (not D-SD-008), and `docs/THREAT-MODEL.md` (#53) cites D-SD-007.
+Source: Security Director's rulings, 2026-10-08 22:23 ET (relayed by the parent agent).
+Affects: #53, #54, #55, #56, #36, #49.
+
 ## Review rules
 
 Published by Studio Director (plan v2, §Team and review rules). They apply from the next PR.
