@@ -162,6 +162,11 @@ There is no Skip on the handover. Closing or dismissing it leaves the task pause
 Source: SD message to UX, 2026-10-08 20:40 ET (relayed by the parent agent).
 Affects: TODAY-FLOWS §7.3, §7.5, §12 (SD-10 closed).
 
+### D-SD-012 · 2026-10-08 · SD · #46 (#36 H1/M2/M3) cleared for G1
+#46 is cleared for G1 on three changes (child check() after the probe verifies and before the bearer request; HTTP /undo 403 assert; vite fromDevPage requires sec-fetch-site same-origin). Residual 1 (bearer on the wire, TOCTOU) and residual 2 (pre-job window) are tracked as issues #49 and #50 and gate any release beyond Arriq's own machine. Residual 3 (same-user token-file read) is outside the threat model.
+Source: Security Director's review of #46 at `9265841`, 2026-10-08 (relayed by the parent agent).
+Affects: #46, #36, #49, #50.
+
 ## Review rules
 
 Published by Studio Director (plan v2, §Team and review rules). They apply from the next PR.
