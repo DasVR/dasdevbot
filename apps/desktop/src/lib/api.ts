@@ -270,55 +270,17 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return target.closest(".composer") !== null;
 }
 
-function shellToken(): string {
-  const shell = globalThis as typeof globalThis & { __DASDEVBOT_TOKEN?: unknown };
-  const value = shell.__DASDEVBOT_TOKEN;
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function metaToken(): string {
-  if (typeof document === "undefined") {
-    return "";
-  }
-  return (
-    document.querySelector('meta[name="dasdevbot-token"]')?.getAttribute("content")?.trim() ?? ""
-  );
-}
-
 function tauriInternals(): TauriInternals | null {
   const host = globalThis as typeof globalThis & { __TAURI_INTERNALS__?: TauriInternals };
   return host.__TAURI_INTERNALS__ ?? null;
 }
 
-async function sessionToken(): Promise<string> {
-  const fromShell = shellToken();
-  if (fromShell) {
-    return fromShell;
-  }
-  const fromMeta = metaToken();
-  if (fromMeta) {
-    return fromMeta;
-  }
-  const invoke = tauriInternals()?.invoke;
-  if (!invoke) {
-    return "";
-  }
-  try {
-    const value = await invoke("session_token");
-    return typeof value === "string" ? value.trim() : "";
-  } catch {
-    return "";
-  }
-}
-
-async function jsonHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const token = await sessionToken();
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  return headers;
-}
+/**
+ * #36 H1: the page never holds the session bearer. In Tauri every daemon call
+ * is a shell command that attaches it in Rust. In plain-browser dev the vite
+ * proxy attaches it server-side (vite.config.ts), so these requests carry none.
+ */
+const JSON_HEADERS: Record<string, string> = { "Content-Type": "application/json" };
 
 /** The Tauri window this page runs in, or null in a plain browser. */
 export function tauriWindowLabel(): string | null {
@@ -404,7 +366,7 @@ export async function emitDeniedForcePush(): Promise<void> {
   }
   const response = await fetch("/v1/events", {
     method: "POST",
-    headers: await jsonHeaders(),
+    headers: JSON_HEADERS,
     body: JSON.stringify({
       source: "demo",
       kind: "repo.force_push",
@@ -425,7 +387,7 @@ export async function emitPush(): Promise<void> {
   }
   const response = await fetch("/v1/events", {
     method: "POST",
-    headers: await jsonHeaders(),
+    headers: JSON_HEADERS,
     body: JSON.stringify({
       source: "demo",
       kind: "repo.push",

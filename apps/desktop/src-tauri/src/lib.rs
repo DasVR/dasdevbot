@@ -1,4 +1,6 @@
-//! Session bearer for the webview, card-window decisions, and settings-window secret entry.
+//! Card-window decisions and settings-window secret entry. The session bearer
+//! never reaches the webview (#36 H1): the shell reads it and attaches it to
+//! its own daemon calls (daemon_http, the shell socket).
 //! The Tauri window label only selects which per-launch secret to send.
 //! The daemon derives the window from that secret. The shell does not open
 //! SQLite. Every command is a line on the daemon's local socket.
@@ -9,6 +11,7 @@
 //! window can ask to show it (`open_card_window`) but holds no decision
 //! capability.
 
+mod daemon_child;
 mod daemon_http;
 mod geometry;
 mod native_sight;
@@ -239,12 +242,8 @@ fn open_shell() -> ShellState {
     }
 }
 
-/// Session bearer for the webview. The daemon never embeds this in HTML.
-#[tauri::command]
-async fn session_token() -> Result<String, String> {
-    daemon_http::off_main(read_session_token).await
-}
-
+/// The session bearer, for the shell's own daemon calls only. No command
+/// returns it and no script puts it in a page (#36 H1).
 pub(crate) fn read_session_token() -> Result<String, String> {
     if let Ok(token) = std::env::var("DASDEVBOT_TOKEN") {
         let token = token.trim().to_string();
@@ -267,21 +266,6 @@ fn token_file() -> PathBuf {
         return PathBuf::from(path);
     }
     dasdevbotd::session_token_path(&daemon_data())
-}
-
-/// Runs before the page parses. Assigns `window` because Tauri wraps the script in a function.
-fn session_init_script() -> String {
-    let literal = match read_session_token() {
-        Ok(token) => serde_json::to_string(&token).unwrap_or_else(|_| "\"\"".to_string()),
-        Err(_) => "\"\"".to_string(),
-    };
-    format!("window.__DASDEVBOT_TOKEN = {literal};")
-}
-
-fn session_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    tauri::plugin::Builder::new("dasdevbot-session")
-        .js_init_script(session_init_script())
-        .build()
 }
 
 /// The label of the only window that may sign or undo a decision.
@@ -324,9 +308,6 @@ fn keep_card_window(window: &tauri::Window, event: &tauri::WindowEvent) {
 mod demo {
     use std::path::PathBuf;
     use std::process::{Child, Command};
-    use std::sync::Mutex;
-
-    pub struct Daemon(pub Mutex<Option<Child>>);
 
     /// `%LOCALAPPDATA%\net.dasdev.dasdevbot\dasdevbot.sqlite`, which the
     /// uninstaller's opt-in "Also delete my data" box removes.
@@ -393,10 +374,8 @@ mod demo {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
-        .plugin(session_plugin())
         .manage(open_shell())
         .invoke_handler(tauri::generate_handler![
-            session_token,
             sign_decision,
             undo_decision,
             set_secret,
@@ -414,11 +393,13 @@ pub fn run() {
         .on_window_event(keep_card_window)
         .setup(|app| {
             use tauri::Manager;
+            // #36 M2/M3: keep the spawn result. A failed or exited daemon
+            // is an error state the page shows; nothing else on the port is
+            // used. On Windows the child is in a kill-on-close Job Object.
             #[cfg(feature = "demo-daemon")]
-            {
-                let child = demo::start(&daemon_data()).ok();
-                app.manage(demo::Daemon(std::sync::Mutex::new(child)));
-            }
+            daemon_child::install(daemon_child::Supervisor::from_spawn(demo::start(
+                &daemon_data(),
+            )));
             if let Some(window) = app.get_webview_window("main") {
                 shell_form::apply_full_chrome(&window);
             }
@@ -429,12 +410,8 @@ pub fn run() {
     app.run(|_app, _event| {
         #[cfg(feature = "demo-daemon")]
         if let tauri::RunEvent::Exit = _event {
-            use tauri::Manager;
-            if let Some(state) = _app.try_state::<demo::Daemon>() {
-                if let Some(mut child) = state.0.lock().expect("daemon").take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+            if let Some(supervisor) = daemon_child::installed() {
+                supervisor.shutdown();
             }
         }
     });
@@ -533,7 +510,6 @@ mod tests {
             "sign_decision",
             "undo_decision",
             "set_secret",
-            "session_token",
         ] {
             let sync = [format!("fn {name}("), format!("pub(crate) fn {name}(")];
             let lines: Vec<&str> = source.lines().collect();
@@ -555,6 +531,99 @@ mod tests {
                 "{name} must be an async command"
             );
         }
+    }
+
+    /// #36 H1: no command hands the bearer to a page, no init script writes
+    /// it into one, and no window is granted the old permission.
+    #[test]
+    fn the_session_bearer_never_reaches_a_webview() {
+        let dir = format!("{}/src", env!("CARGO_MANIFEST_DIR"));
+        let mut source = String::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                source.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+        let banned = [
+            ["fn session", "_token("].concat(),
+            ["js_init", "_script("].concat(),
+            ["__DASDEVBOT", "_TOKEN"].concat(),
+            ["initialization", "_script("].concat(),
+        ];
+        for needle in &banned {
+            assert!(
+                !source.contains(needle.as_str()),
+                "{needle} is back in src-tauri"
+            );
+        }
+        for window in ["main", "card", "settings", "voice"] {
+            assert!(
+                !permissions_for(window)
+                    .iter()
+                    .any(|p| p == "allow-session-token"),
+                "{window}"
+            );
+        }
+        let permissions = format!("{}/permissions", env!("CARGO_MANIFEST_DIR"));
+        for entry in std::fs::read_dir(permissions).unwrap() {
+            let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            assert!(!text.contains("session_token"), "{text}");
+        }
+        let api = format!("{}/../src/lib/api.ts", env!("CARGO_MANIFEST_DIR"));
+        let api = std::fs::read_to_string(api).unwrap();
+        for needle in [
+            ["__DASDEVBOT", "_TOKEN"].concat(),
+            ["dasdevbot", "-token"].concat(),
+            ["session", "_token"].concat(),
+            "Authorization".to_string(),
+            "Bearer".to_string(),
+        ] {
+            assert!(!api.contains(needle.as_str()), "api.ts still has {needle}");
+        }
+    }
+
+    /// The daemon commands are the main window's (and the card's snapshot),
+    /// never the voice or settings window's.
+    #[test]
+    fn the_daemon_http_commands_are_scoped_to_main_and_card() {
+        assert!(permissions_for("main")
+            .iter()
+            .any(|p| p == "allow-daemon-snapshot"));
+        assert!(permissions_for("main")
+            .iter()
+            .any(|p| p == "allow-daemon-emit-demo"));
+        assert!(permissions_for("card")
+            .iter()
+            .any(|p| p == "allow-daemon-snapshot"));
+        assert!(!permissions_for("card")
+            .iter()
+            .any(|p| p == "allow-daemon-emit-demo"));
+        for window in ["settings", "voice"] {
+            let granted = permissions_for(window);
+            assert!(
+                !granted.iter().any(|p| p.starts_with("allow-daemon-")),
+                "{window}"
+            );
+        }
+    }
+
+    /// The shell's CSP is byte-identical to the daemon's (server.rs).
+    #[test]
+    fn the_csp_is_byte_identical_to_the_daemons() {
+        let path = format!("{}/tauri.conf.json", env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let csp = conf["app"]["security"]["csp"].as_str().unwrap();
+        let server = include_str!("../../../../crates/daemon/src/server.rs");
+        let line = server
+            .lines()
+            .find(|line| line.starts_with("const CONTENT_SECURITY_POLICY: &str = "))
+            .unwrap();
+        let daemon = line
+            .trim_start_matches("const CONTENT_SECURITY_POLICY: &str = \"")
+            .trim_end_matches("\";");
+        assert_eq!(csp, daemon);
     }
 
     #[test]

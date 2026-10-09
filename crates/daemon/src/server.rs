@@ -45,6 +45,51 @@ pub fn serve_incoming(app: Arc<App>, server: Server) {
 }
 
 pub fn handle(app: &App, request: &mut Request, port: u16) -> Response<Cursor<Vec<u8>>> {
+    let challenge = proof_challenge(request);
+    let request_line = format!(
+        "{} {}",
+        request.method(),
+        request.url().split('?').next().unwrap_or("/")
+    );
+    let response = respond(app, request, port);
+    match challenge {
+        Some(challenge) => with_proof(response, &app.token, &challenge, &request_line),
+        None => response,
+    }
+}
+
+/// The shell's challenge (#36 M2), when it sent a well-formed one.
+fn proof_challenge(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(crate::http_proof::CHALLENGE_HEADER))
+        .map(|header| header.value.as_str().trim().to_string())
+        .filter(|value| crate::http_proof::valid_challenge(value))
+}
+
+/// Re-emit the response with `X-Dasdevbot-Proof` over its exact status and body.
+fn with_proof(
+    response: Response<Cursor<Vec<u8>>>,
+    token: &str,
+    challenge: &str,
+    request_line: &str,
+) -> Response<Cursor<Vec<u8>>> {
+    let status = response.status_code();
+    let headers = response.headers().to_vec();
+    let body = response.into_reader().into_inner();
+    let proof = crate::http_proof::proof(token, challenge, request_line, status.0, &body);
+    let mut out = Response::from_data(body).with_status_code(status);
+    for kept in headers {
+        if kept.field.equiv("Content-Length") {
+            continue;
+        }
+        out.add_header(kept);
+    }
+    out.with_header(header(crate::http_proof::PROOF_HEADER, &proof))
+}
+
+fn respond(app: &App, request: &mut Request, port: u16) -> Response<Cursor<Vec<u8>>> {
     match dispatch(app, request, port) {
         Ok(response) => response,
         Err(err) => {
@@ -926,6 +971,106 @@ mod tests {
         let served = Arc::clone(&app);
         std::thread::spawn(move || serve_incoming(served, server));
         (app, addr)
+    }
+
+    /// #36 M2: the daemon proves it holds the bearer, over the exact status
+    /// and body, only when the shell sends a well-formed challenge.
+    #[test]
+    fn the_daemon_proves_itself_on_a_challenge_without_revealing_the_bearer() {
+        use crate::http_proof::{new_challenge, verify, CHALLENGE_HEADER, PROOF_HEADER};
+        let dir = std::env::temp_dir().join(format!("dasdevbot-proof-{}", uuid::Uuid::new_v4()));
+        let (_app, addr) = demo_daemon(dir.join("db.sqlite"));
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let read = |response: ureq::Response| {
+            let status = response.status();
+            let proof = response.header(PROOF_HEADER).map(str::to_string);
+            let mut body = Vec::new();
+            response.into_reader().read_to_end(&mut body).unwrap();
+            (status, proof, body)
+        };
+
+        let challenge = new_challenge();
+        let (status, proof, body) = read(
+            agent
+                .get(&format!("http://{addr}/v1/health"))
+                .set(CHALLENGE_HEADER, &challenge)
+                .call()
+                .unwrap(),
+        );
+        assert_eq!(status, 200);
+        let proof = proof.expect("proof header");
+        assert!(!proof.contains(STRONG_TOKEN));
+        assert!(!String::from_utf8_lossy(&body).contains(STRONG_TOKEN));
+        assert!(verify(
+            STRONG_TOKEN,
+            &challenge,
+            "GET /v1/health",
+            200,
+            &body,
+            Some(&proof)
+        ));
+        assert!(!verify(
+            "ffffffffffffffffffffffffffffffff",
+            &challenge,
+            "GET /v1/health",
+            200,
+            &body,
+            Some(&proof)
+        ));
+
+        // The snapshot with the bearer, and an error status, are covered too.
+        let challenge = new_challenge();
+        let (status, proof, body) = read(
+            agent
+                .get(&format!("http://{addr}/v1/snapshot"))
+                .set("Authorization", &format!("Bearer {STRONG_TOKEN}"))
+                .set(CHALLENGE_HEADER, &challenge)
+                .call()
+                .unwrap(),
+        );
+        assert_eq!(status, 200);
+        assert!(verify(
+            STRONG_TOKEN,
+            &challenge,
+            "GET /v1/snapshot",
+            200,
+            &body,
+            proof.as_deref()
+        ));
+
+        let challenge = new_challenge();
+        let refused = agent
+            .post(&format!("http://{addr}/v1/approvals/ap_x/decision"))
+            .set("Authorization", &format!("Bearer {STRONG_TOKEN}"))
+            .set(CHALLENGE_HEADER, &challenge)
+            .send_string("{}");
+        let (status, proof, body) = match refused {
+            Err(ureq::Error::Status(_, response)) => read(response),
+            other => panic!("decide must stay 403, got {other:?}"),
+        };
+        assert_eq!(status, 403);
+        assert!(verify(
+            STRONG_TOKEN,
+            &challenge,
+            "POST /v1/approvals/ap_x/decision",
+            403,
+            &body,
+            proof.as_deref()
+        ));
+
+        // No challenge or a malformed one: no proof header at all.
+        let plain = agent
+            .get(&format!("http://{addr}/v1/health"))
+            .call()
+            .unwrap();
+        assert!(plain.header(PROOF_HEADER).is_none());
+        let bad = agent
+            .get(&format!("http://{addr}/v1/health"))
+            .set(CHALLENGE_HEADER, "not-hex")
+            .call()
+            .unwrap();
+        assert!(bad.header(PROOF_HEADER).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn emit(agent: &ureq::Agent, addr: &str, kind: &str, key: &str, payload: serde_json::Value) {
