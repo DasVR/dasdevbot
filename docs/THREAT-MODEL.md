@@ -29,7 +29,7 @@ Status: draft for Security Director review. Scope: the desktop app (Tauri shell 
 
 **In scope:**
 - Hostile page content: XSS, a compromised dependency in the webview, a malicious site in the user's browser.
-- Another OS user, or another process under a different account, on the same machine, including one that takes port 8787 while the daemon is down.
+- Another OS user, or another process under a different account, on the same machine. That includes one that takes port 8787, or creates the daemon's named pipe, while the daemon is down.
 - Network attackers. The daemon binds loopback only; `--allow-remote` is refused.
 - Model output and teammate input trying to cause an effect without an approval.
 
@@ -51,6 +51,12 @@ Status: draft for Security Director review. Scope: the desktop app (Tauri shell 
   - Decisions are signed card-window Tauri IPC over the same-user socket, with constant-time token checks and per-window secrets.
   - HTTP `POST /v1/approvals/{id}/decision` and `/undo` return 403.
   - Mutating HTTP calls need the bearer in the `Authorization` header only (a bearer in the URL is rejected), a loopback `Host`, and an allowed `Origin`.
+- **Approval gate.**
+  - Approving or undoing a card needs user verification (`verify_user`). In production this is Windows Hello; other targets refuse, so no decision can be signed without it.
+  - The Hello prompt is shown in front of the card.
+  - A stop during Hello wins, and a Hello result that arrives later is discarded (D-SD-007).
+  - Nothing above read auto-approves (`Policy::phase1`).
+  - Routing never approves spending, messages to non-users, credentials, destructive actions or offensive tools.
 - **CSP.** One policy with no `*` source. It is byte-identical in the shell config and in daemon responses, and enforced by a test.
 - **External tier off.** `EXTERNAL_TIER_ENABLED = false`: external effects are hard-denied in Phase 1 until the Windows Hello hardware test and SD sign-off. Destructive effects are denied by policy (C1).
 - **Dev-only demo triggers.** The scripted force-push (`FORCED_DEMO_ALLOWED`) exists only in debug builds. It is pinned by a test and never widened to the demo installer.
@@ -61,10 +67,10 @@ Status: draft for Security Director review. Scope: the desktop app (Tauri shell 
 | Gap | Tracking | Gates |
 |---|---|---|
 | The bearer still crosses the loopback wire. A port takeover between the probe and the bearer request (TOCTOU) would see it | #49: per-request MAC auth mode | Any build beyond Arriq's machine; any fixed `--token` use |
+| **Cross-user named-pipe squatting (in scope).** The pipe name can be derived from the data path. While the daemon is down, another OS user can create the pipe first. The client doesn't verify the server, and it sends the bearer and window secret on every line. The pipe path also skips the bundled-daemon `ready()` check that HTTP has | #54: verify the server PID or user SID before writing, and add `ready()` | Any build beyond Arriq's machine |
 | The daemon child runs briefly before it is put in the Job Object | #50: create the child suspended or directly in the job | Real providers that spawn children outside the demo |
 | The internal-tier approval key is in the same user's keyring, so its signature proves only "same uid" | `docs/phase1.md`; revisit in Phase 2 | Phase 2 |
 | A decision signed just before a crash can commit on the next start without being shown again | #36 (undo window) | Pre-release |
-| On Windows the shell doesn't verify the named-pipe server's identity | `docs/shell-ipc.md` | Same-user only; outside the threat model |
 | A Windows CI test timeout is under investigation; no merge on a rerun pass | #52 | Every merge |
 
 ## Related rulings
@@ -72,5 +78,6 @@ Status: draft for Security Director review. Scope: the desktop app (Tauri shell 
 - [D-SD-001](../DECISIONS.md): CSP and signed-IPC Highs closed; decisions are IPC only.
 - [D-SD-002](../DECISIONS.md): #36 H1, M2 and M3 gate G1.
 - [D-SD-003](../DECISIONS.md): handover text and URLs come from fixed templates; masked key entry.
+- [D-SD-007](../DECISIONS.md): a stop wins over the undo window and over Windows Hello.
 - [D-SD-009](../DECISIONS.md) and [D-SD-010](../DECISIONS.md): process-tree kill and stop authority.
 - [D-SD-012](../DECISIONS.md): #46 cleared for G1; residuals #49 and #50; same-user processes out of scope.
