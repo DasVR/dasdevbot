@@ -35,6 +35,9 @@ The #24 deviations declared in D-CD-002 stand:
 - Drawn Windows caption buttons at native metrics, OS chrome, Windows-only Phase 1.
 - Builder sub: lease ids are kept out of the DOM (UI Designer #24 item 7), so the lease segment is dropped.
 
+### D-CD-005 · retired
+Retired: lost in a rewrite; re-added as D-CD-008.
+
 ### D-CD-006 · 2026-10-08 · CD · UX conflicts C-3 to C-12 and the stop card
 - C-3 YES: no warning color on a plan older than 12h. The reason goes only in the expanded step-line detail.
 - C-5 YES: the handover row reads "Open sign-in →" and opens the sign-in panel in that task's thread.
@@ -74,6 +77,27 @@ Spec: `/workspace/plan/today-lobe/SPEC.md`.
 - The count counts only rows waiting on Arriq. With M4 out it reads **"Review 2"** where the mock shows "Review 3". Same type and position, digit roll per (a).
 - Also: motion lives in a new `motion.css` (`tokens.css` stays locked), and the hold token is named `--dur-hold` (D-CD-003 family). The other DE Oct 19 items are to be ruled by Oct 16.
 - [rows corrected 2026-10-08 per DE: Away=M4, Review sheet=M6, titlebar=M7] By screen: the Away screen is M4 (f470), with no lease segment and the sub "1h52m · 0 / 40000 tok". The Review sheet is M6 (f577), with the flat, uncounted C1 destructive row. The titlebar "Review 2" link is M7. CD's "M4" and "M6" labels above are swapped; the rulings themselves are unchanged.
+
+### D-CD-010 · 2026-10-08 · CD · 03-modes switcher OPEN-1 to OPEN-19 (`/workspace/plan/modes/MODES-SPEC.md`)
+- 1 YES: the switcher is centred in the 46px titlebar and the title moves left (03 video). Declared DEVIATION vs the 4a video and #24.
+- 2 Companion: hidden. 3 Pill: no switcher, no strip.
+- 4 YES: roving focus, arrow keys, manual activation with Enter/Space, Esc to the stream. When the sheet is open, Esc closes it first.
+- 5 Here and Focus get no first-use line (render nothing; no new copy before parity). Away uses the SCREENS line as the second strip line, `--ink-2`, `--t-meta`. It shows once.
+- 6 Toast "Review" opens the card and stays in Focus.
+- 7 "<Action> expires soon." is ratified.
+- 8 YES: Away holds toasts with the same gate as Focus.
+- 9 Drop the zero clause. If both counts are 0: "Welcome back. Nothing waiting on you."
+- 10 After Focus: "Focus ended. N waiting on you. M done during focus." (same zero rules).
+- 11 A reopen shows the plain on-demand view.
+- 12 YES: the roster recedes with the thread.
+- 13 Centred on the window (mock).
+- 14 "N held until focus ends" is ratified.
+- 15 Held = suppressed toasts plus waiting approvals that arrived since Focus began.
+- 16 Default data source is accepted. 40000 is demo data.
+- 17 Stub. If there are no Done rows, the Done section is absent, with no empty state. The receipts feed is a Liaison ticket.
+- 18 YES: the sheet carries `--shadow-float` (video wins). Rows inside stay flat hairline.
+- 19 Keep both. They agree: nothing external acts until you're back, and teammates keep working up to each approval.
+- Correction: the C1 delete row is out of the toast stack and stage, but STAYS in the Review sheet as the flat C1 row (dash, no dot, not counted), per D-CD-009.
 
 ## Security (settler: Security Director)
 
