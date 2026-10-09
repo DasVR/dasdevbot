@@ -189,11 +189,27 @@ fn daemon_data() -> PathBuf {
     PathBuf::from("data/dasdevbot.sqlite")
 }
 
-fn transact(data: &Path, mut body: Value) -> Result<Value, String> {
+/// Every shell-socket line (decide, undo, prepare, hello-enroll, secret)
+/// goes through here.
+fn transact(data: &Path, body: Value) -> Result<Value, String> {
+    transact_gated(data, body, &daemon_child::ready, &exchange)
+}
+
+/// #54 / #36 (M2 class): a failed or exited bundled daemon fails closed. The
+/// gate runs before the bearer is read and before the pipe or socket is
+/// opened, so nothing is written to whatever else holds the pipe name. The
+/// server PID/SID check stays on #54.
+fn transact_gated(
+    data: &Path,
+    mut body: Value,
+    ready: &dyn Fn() -> Result<(), String>,
+    send: &dyn Fn(&Path, &Value) -> Result<Value, String>,
+) -> Result<Value, String> {
+    ready()?;
     let token = std::fs::read_to_string(dasdevbotd::session_token_path(data))
         .map_err(|err| err.to_string())?;
     body["token"] = Value::String(token.trim().to_string());
-    exchange(data, &body)
+    send(data, &body)
 }
 
 fn exchange(data: &Path, body: &Value) -> Result<Value, String> {
@@ -624,6 +640,117 @@ mod tests {
             .trim_start_matches("const CONTENT_SECURITY_POLICY: &str = \"")
             .trim_end_matches("\";");
         assert_eq!(csp, daemon);
+    }
+
+    /// #54 / #36: with a failed or exited bundled daemon, no decision, undo
+    /// or secret line is sent. The pipe/socket is never opened, nothing is
+    /// written, and the bearer and window secret are never put on a line.
+    #[test]
+    fn a_failed_or_exited_daemon_sends_no_pipe_line() {
+        use serde_json::{json, Value};
+        use std::cell::Cell;
+        use std::path::Path;
+        let dir = std::env::temp_dir().join(format!("dasdevbot-pipe-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("db.sqlite");
+        std::fs::write(
+            dasdevbotd::session_token_path(&data),
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        for label in ["card", "settings"] {
+            std::fs::write(
+                dasdevbotd::window_secret_path(&data, label),
+                "window-secret-for-test",
+            )
+            .unwrap();
+        }
+
+        #[cfg(unix)]
+        let listener = {
+            let path = dasdevbotd::shell_socket_path(&data);
+            let _ = std::fs::remove_file(&path);
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            listener
+        };
+
+        let failed = crate::daemon_child::Supervisor::from_spawn(Err("no such file".into()));
+        let exited = {
+            #[cfg(unix)]
+            let child = std::process::Command::new("sh")
+                .args(["-c", "exit 1"])
+                .spawn()
+                .unwrap();
+            #[cfg(windows)]
+            let child = std::process::Command::new("cmd")
+                .args(["/C", "exit 1"])
+                .spawn()
+                .unwrap();
+            let supervisor = crate::daemon_child::Supervisor::from_spawn(Ok(child));
+            let start = std::time::Instant::now();
+            while supervisor.check().is_ok() {
+                assert!(start.elapsed() < std::time::Duration::from_secs(5));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            supervisor
+        };
+        let supervisors = [&failed, &exited];
+
+        let lines = [
+            (
+                "card",
+                json!({"op": "decide", "approval_id": "ap_x", "decision": "approve", "reason": null}),
+            ),
+            ("card", json!({"op": "undo", "approval_id": "ap_x"})),
+            (
+                "settings",
+                json!({"op": "secret", "name": "ollama", "value": "not-a-real-key"}),
+            ),
+        ];
+        for supervisor in supervisors {
+            for (label, body) in &lines {
+                let opened = Cell::new(0);
+                let ready = || supervisor.check();
+                let send = |_: &Path, _: &Value| -> Result<Value, String> {
+                    opened.set(opened.get() + 1);
+                    Err("the pipe must not be opened".into())
+                };
+                // The same path the commands take: signed_body adds the window
+                // secret, then transact adds the bearer and opens the pipe.
+                let mut line = body.clone();
+                line["window_secret"] = Value::String(super::window_secret(&data, label).unwrap());
+                let refused = super::transact_gated(&data, line, &ready, &send).unwrap_err();
+                assert!(refused.contains("bundled daemon"), "{refused}");
+                assert_eq!(opened.get(), 0, "{} opened the pipe", body["op"]);
+                // And the real exchange is never reached: no connection on the socket.
+                #[cfg(unix)]
+                assert!(matches!(
+                    listener.accept(),
+                    Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock
+                ));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every shell-socket line passes the gate: `exchange` is called only
+    /// through `transact_gated`, and the commands all reach it via `transact`.
+    #[test]
+    fn every_pipe_caller_goes_through_the_gate() {
+        let source = include_str!("lib.rs").replace("\r\n", "\n");
+        let body = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert_eq!(
+            body.matches("exchange(").count(),
+            1,
+            "only the fn definition"
+        );
+        assert!(body.contains("transact_gated(data, body, &daemon_child::ready, &exchange)"));
+        let gated = body.split("fn transact_gated(").nth(1).unwrap();
+        let ready = gated.find("ready()?;").unwrap();
+        let send = gated.find("send(data, &body)").unwrap();
+        let token = gated.find("session_token_path").unwrap();
+        assert!(ready < token && token < send);
     }
 
     #[test]
