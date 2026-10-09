@@ -122,13 +122,13 @@ Source: SD message to UX, 2026-10-08 20:36 ET (relayed by the parent agent).
 Affects: TODAY-FLOWS §7.5; MECHANICS-SPEC §1.
 
 ### D-SD-005 · 2026-10-08 · SD · Re-auth with a wider scope or a new account
-A re-auth that asks for a wider scope, or that uses a different account, goes through the approval card, the hold and Windows Hello. The daemon compares the granted scopes against the previous grant. The daemon compares the scopes, never the model. A same-or-narrower re-auth needs no card.
+A re-auth that asks for a wider scope, or that uses a different account, goes through the approval card, the hold and Windows Hello. The daemon compares the scopes, never the model. A same-or-narrower re-auth needs no card.
 _Wording corrected by SD 2026-10-08 20:40 ET._
 Source: SD message to UX, 2026-10-08 20:36 ET (relayed by the parent agent).
 Affects: TODAY-FLOWS §7.4, §7.7.
 
-### D-SD-006 · 2026-10-08 · SD · Pocket is out of G2
-Pocket ingest is not in G2. It stays Phase 2 behind the R6 consent flow and needs SD review before any ingest.
+### D-SD-006 · 2026-10-08 · SD · Pocket ingest: consent and SD review first
+Pocket ingest is Phase 2 behind the R6 consent flow. No ingest runs until the R6 consent flow is built, Arriq's consent is recorded through it, and SD has reviewed that ingest path. If all three land before G2, Studio Director may schedule Pocket into G2. Until then, G2 is calendar-only.
 _Wording corrected by SD 2026-10-08 20:40 ET._
 Source: SD message to UX, 2026-10-08 20:36 ET (relayed by the parent agent).
 Affects: TODAY-FLOWS §1, §3; SPEC.md §1 (G2 row), §6.1, §6.2.
