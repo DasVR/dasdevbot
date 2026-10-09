@@ -23,13 +23,14 @@ function devBearer(): string {
 }
 
 /**
- * Only the dev page itself gets the bearer attached. A cross-site page that
- * posts to localhost:5173 (CSRF) is forwarded without it, so the daemon
- * answers 401.
+ * Only the dev page itself gets the bearer attached. The browser must say
+ * `Sec-Fetch-Site: same-origin` (SD on #46). A cross-site page posting to the
+ * dev server (CSRF), and any headerless local client (curl, a script, or
+ * anything hitting `vite preview`, which inherits this proxy), is forwarded
+ * without the bearer, so the daemon answers 401.
  */
 function fromDevPage(headers: Record<string, string | string[] | undefined>): boolean {
-  const site = headers["sec-fetch-site"];
-  if (site !== undefined && site !== "same-origin") {
+  if (headers["sec-fetch-site"] !== "same-origin") {
     return false;
   }
   const origin = headers.origin;

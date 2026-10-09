@@ -110,15 +110,38 @@ fn call(
 ) -> Result<serde_json::Value, String> {
     crate::daemon_child::ready()?;
     let token = crate::read_session_token()?;
-    call_at(DAEMON, &token, method, path, json)
+    call_checked(
+        DAEMON,
+        &token,
+        method,
+        path,
+        json,
+        &crate::daemon_child::ready,
+    )
 }
 
+/// Tests: the same call with no bundled child to re-check.
+#[cfg(test)]
 fn call_at(
     base: &str,
     token: &str,
     method: &str,
     path: &str,
     json: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    call_checked(base, token, method, path, json, &|| Ok(()))
+}
+
+/// `recheck` runs after the daemon's proof verifies and before the bearer
+/// request goes out (SD, #46): if the bundled child exited in between, the
+/// bearer is never sent.
+fn call_checked(
+    base: &str,
+    token: &str,
+    method: &str,
+    path: &str,
+    json: Option<serde_json::Value>,
+    recheck: &dyn Fn() -> Result<(), String>,
 ) -> Result<serde_json::Value, String> {
     let token = token.to_string();
     let agent = agent();
@@ -132,6 +155,7 @@ fn call_at(
         None,
     )?;
     trusted(&token, &challenge, "GET /v1/health", hello)?;
+    recheck()?;
 
     // 2. The call itself, with the bearer and a fresh challenge.
     let challenge = http_proof::new_challenge();
@@ -307,6 +331,38 @@ mod tests {
         assert!(!seen[0].to_ascii_lowercase().contains("authorization"));
     }
 
+    /// SD on #46: the child is checked again after the probe verifies. If it
+    /// has stopped by then, the bearer request never goes out.
+    #[test]
+    fn a_child_that_stops_after_the_probe_never_gets_the_bearer_request() {
+        let (base, seen) = fake_daemon(Some(TOKEN), 200, "{}");
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let stopped = || {
+            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("The bundled daemon stopped (exit code: 1).".to_string())
+        };
+        assert_eq!(
+            super::call_checked(&base, TOKEN, "GET", "/v1/snapshot", None, &stopped),
+            Err("The bundled daemon stopped (exit code: 1).".to_string())
+        );
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "only the probe went out");
+        assert!(seen[0].starts_with("GET /v1/health "));
+        assert!(!seen[0].contains(TOKEN));
+
+        // And the real gate: a failed supervisor refuses at the re-check too.
+        let failed = crate::daemon_child::Supervisor::from_spawn(Err("gone".into()));
+        let (base, seen) = fake_daemon(Some(TOKEN), 200, "{}");
+        let recheck = || failed.check();
+        assert!(super::call_checked(&base, TOKEN, "GET", "/v1/snapshot", None, &recheck).is_err());
+        assert!(!seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains(TOKEN)));
+    }
+
     #[test]
     fn a_proof_made_with_another_token_is_refused() {
         let (base, seen) = fake_daemon(Some("ffffffffffffffffffffffffffffffff"), 200, "{}");
@@ -429,6 +485,16 @@ mod tests {
                 TOKEN,
                 "POST",
                 "/v1/approvals/ap_x/decision",
+                Some(serde_json::json!({}))
+            ),
+            Err("approval decisions are Tauri IPC only".to_string())
+        );
+        assert_eq!(
+            super::call_at(
+                &base,
+                TOKEN,
+                "POST",
+                "/v1/approvals/ap_x/undo",
                 Some(serde_json::json!({}))
             ),
             Err("approval decisions are Tauri IPC only".to_string())
