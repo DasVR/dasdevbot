@@ -21,25 +21,19 @@ Source: `02-approval/approval-hold-undo-file.mp4`, plus LOOK §8.3 and INTERACTI
 ### D-CD-003 · 2026-09-30 · CD · Standing look rules (carried forward)
 For shipped screens, the mock videos outrank the HTML mocks, and the Security Phase 1 waivers (C1, C4, C6) outrank both. For the Today lobe, the CD spec is the reference, and the security waivers still outrank it. Detailed rulings stay in the local look reference set (DASDEVBOT-LOOK.md, INTERACTIONS.md, SCREENS.md, tokens.css).
 
-### D-CD-004 · 2026-10-08 · CD · Today lobe spec v0 rulings (`/workspace/plan/today-lobe/SPEC.md`)
-- Type: Figtree + JetBrains Mono per `tokens.css`. Plus Jakarta Sans was NIL only.
-- Empty day: "Empty is a receipt". The empty line names what was checked, e.g. "Checked 3 Pocket recordings and your calendar at 11:02 PM." All three sections stay visible when empty.
-- Calendar free span as a plan row: NO. A "Next on your calendar: Fri 9:00" line on an empty day: YES.
-- Section headings: plain heading plus mono count ("Your plan 5"). Sentence headings: NO, because they read as filler.
-- "Held by the floor" folds to one summary line unless a row in it is waiting on Arriq: YES.
-- A "now" line in the plan that steps each minute with no animation: YES.
-- One-tap "done" stays parked (not free). The M4 "who was right?" slot is reserved as flat rows.
-- No greeting or mascot in the lobe v0. Arriq gets asked separately whether Curl's daily greeting moves here.
-- Approvals stay under "Held by the floor" until the Oct 12–14 digest test. After that, a move to "Needs you" is a filter change only.
+### D-CD-004 · 2026-10-08 · CD · #24 passed at `a7662f9`; the remaining nits are tickets
+CD PASSed #24 at `a7662f9`. UI Designer's reduced-motion fail and the remaining nits are filed as tickets, not as a fix round (rule 4), all labeled `parity-nit`:
+- #37: deny layout (Deny reads "Denied", Approve carries the Undo countdown; mock 2a `commit()` :780–781)
+- #38: reduced-motion filing drops the card in one frame (fade over 160ms)
+- #39: "Undo 0s" at 45% opacity for a frame while filing (hold "Undo 1s")
+- #40: +2.44px height bump on the first paperize frame
+- #41: Ctrl/⌘+Z ink retract timing (160ms; instant under reduced motion)
+- #42: Snap Layouts flyout, pending Arriq's Windows check
+- #43: 03-modes switcher (P1 gap, due Oct 14)
 
-### D-CD-005 · 2026-10-08 · CD · UX Today-flow calls
-- The Today spec is `/workspace/plan/today-lobe/SPEC.md`. The digest layout (your plan / needs you / held by the floor) is the spec layout, so TODAY-FLOWS aligns to the spec.
-- Changed times: a time, number or id is one token. It swaps instantly with no motion and gets a static note ("moved from 9:00"). Only the surrounding words animate.
-- No greeting or Curl in the lobe v0 (pending Arriq).
-- Login/2FA handover is a flat hairline row with an amber dot (needs Arriq). No glass, no puff. It opens the desktop handover.
-- The M4 "who was right?" row offers three choices, "Laya" / "What ran" / "Can't tell", with no dot. This supersedes "Rules" in SPEC v0.
-- Task plans say "steps". The word "plan" is reserved for the Today plan.
-- Docs: LOOK §8.5 and INTERACTIONS #9 now show the undo on the glass card, per D-CD-001.
+The #24 deviations declared in D-CD-002 stand:
+- Drawn Windows caption buttons at native metrics, OS chrome, Windows-only Phase 1.
+- Builder sub: lease ids are kept out of the DOM (UI Designer #24 item 7), so the lease segment is dropped.
 
 ### D-CD-006 · 2026-10-08 · CD · UX conflicts C-3 to C-12 and the stop card
 - C-3 YES: no warning color on a plan older than 12h. The reason goes only in the expanded step-line detail.
@@ -53,20 +47,33 @@ For shipped screens, the mock videos outrank the HTML mocks, and the Security Ph
 - C-12 YES: `plan.*` carries `scope: today|task`, and "defer" becomes `plan.delta`.
 - Stop card (D-SD-007): the check retracts over 160ms, then the card shows a single line, "The stop cancelled this post. Nothing was posted.", with no buttons and no dot. It then runs the normal S3 fold to a receipt with a dash and "Stopped" in ink. Reduced motion: instant swap, then a 160ms crossfade. "Cancelled" is rejected as the receipt word because the event is logged as stopped.
 
-### D-CD-007 · 2026-10-08 · CD · #24 passed at `a7662f9`; the remaining nits are tickets
-CD PASSed #24 at `a7662f9`. UI Designer's reduced-motion fail and the remaining nits are filed as tickets, not as a fix round (rule 4), all labeled `parity-nit`:
-- #37: deny layout (Deny reads "Denied", Approve carries the Undo countdown; mock 2a `commit()` :780–781)
-- #38: reduced-motion filing drops the card in one frame (fade over 160ms)
-- #39: "Undo 0s" at 45% opacity for a frame while filing (hold "Undo 1s")
-- #40: +2.44px height bump on the first paperize frame
-- #41: Ctrl/⌘+Z ink retract timing (160ms; instant under reduced motion)
-- #42: Snap Layouts flyout, pending Arriq's Windows check
-- #43: 03-modes switcher (P1 gap, due Oct 14)
+### D-CD-007 · 2026-10-08 · CD · Today lobe spec v0 rulings (re-added; was the first D-CD-004, lost in the 20:40 rewrite)
+Spec: `/workspace/plan/today-lobe/SPEC.md`.
+- Type: Figtree + JetBrains Mono per `tokens.css`. Plus Jakarta Sans was NIL only.
+- Empty day: "Empty is a receipt". The empty line names what was checked, e.g. "Checked your calendar at 11:02 PM." (Pocket joins later, per D-SD-006.) All three sections stay visible when empty.
+- Calendar free span as a plan row: NO. A "Next on your calendar: Fri 9:00" line on an empty day: YES.
+- Section headings: plain heading plus mono count ("Your plan 5"). Sentence headings: NO.
+- "Held by the floor" folds to one summary line unless a row in it is waiting on Arriq: YES (see D-CD-006 C-8 for the folded copy).
+- A "now" line in the plan that steps each minute with no animation: YES.
+- One-tap "done" stays parked (not free). The M4 "who was right?" slot is reserved as flat rows.
+- Approvals stay under "Held by the floor" until the Oct 12–14 digest test. After that, a move to "Needs you" is a filter change only.
 
-The #24 deviations declared in D-CD-002 stand:
-- Drawn Windows caption buttons at native metrics, OS chrome, Windows-only Phase 1.
-- Builder sub: lease ids are kept out of the DOM (UI Designer #24 item 7), so the lease segment is dropped.
-_Numbered D-CD-004 in PR #44; renumbered D-CD-007 on 2026-10-08 because CD had already logged D-CD-004 and D-CD-005 (Today lobe). Text unchanged._
+### D-CD-008 · 2026-10-08 · CD · UX Today-flow calls (re-added; was D-CD-005, lost in the 20:40 rewrite)
+- The digest layout (your plan / needs you / held by the floor) is the SPEC layout. TODAY-FLOWS aligns to SPEC.md.
+- Changed times: a time, number or id is one token. It swaps instantly with no motion and gets a static note ("moved from 9:00"). Only the surrounding words animate.
+- No greeting or Curl in the lobe v0 (pending Arriq).
+- Login/2FA handover is a flat hairline row with an amber dot. No glass, no puff. Copy and target per D-CD-006 C-5.
+- The M4 "who was right?" row offers three choices, "Laya" / "What ran" / "Can't tell", with no dot. Values per D-CD-006 C-10.
+- Task plans say "steps". The word "plan" is reserved for the Today plan.
+- Docs: LOOK §8.5 and INTERACTIONS #9 now show the undo on the glass card (D-CD-001).
+
+### D-CD-009 · 2026-10-08 · CD · Digit roll-out and the 03-modes deviations
+- (a) The normal-motion digit roll-out is **120ms** `--ease-exit`, 5px (INTERACTIONS #9). It's a micro exit, so it's exempt from the 240ms leave rule. 03-modes inherits it.
+- (b) M4 DEVIATION (C1, SD co-sign): the mock's "Delete branch spike/lease-v0" ask row becomes the flat C1 row in the Review sheet. It has a dash and no dot, and reads "Builder wanted to delete spike/lease-v0. Destructive actions are off in this build." with the mono command under it. It's informational and **not counted**.
+- (b) M6 DEVIATION (lease out of the DOM): the sub drops the lease segment and reads "1h52m · 0 / 40000 tok", mirroring D-CD-002.
+- The count counts only rows waiting on Arriq. With M4 out it reads **"Review 2"** where the mock shows "Review 3". Same type and position, digit roll per (a).
+- Also: motion lives in a new `motion.css` (`tokens.css` stays locked), and the hold token is named `--dur-hold` (D-CD-003 family). The other DE Oct 19 items are to be ruled by Oct 16.
+- [rows corrected 2026-10-08 per DE: Away=M4, Review sheet=M6, titlebar=M7] By screen: the Away screen is M4 (f470), with no lease segment and the sub "1h52m · 0 / 40000 tok". The Review sheet is M6 (f577), with the flat, uncounted C1 destructive row. The titlebar "Review 2" link is M7. CD's "M4" and "M6" labels above are swapped; the rulings themselves are unchanged.
 
 ## Security (settler: Security Director)
 
