@@ -188,12 +188,12 @@ export function clampHoldMs(ms: number): number {
   return Math.min(HOLD_MS_MAX, Math.max(HOLD_MS_MIN, Math.round(ms)));
 }
 
-export function holdDurationMs(effect: EffectClass | null, setting?: number): number {
-  const base = setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
-  if (effect === "destructive") {
-    return clampHoldMs(Math.max(base, tokenMs("--dur-hold-destructive", HOLD_MS_MAX)));
-  }
-  return base;
+/**
+ * Every hold is --dur-hold. Destructive has no hold at all: it is denied by
+ * policy and renders only as the flat ink row (C1), so there is no 1200ms path.
+ */
+export function holdDurationMs(_effect: EffectClass | null, setting?: number): number {
+  return setting == null ? tokenMs("--dur-hold", HOLD_MS_MIN) : clampHoldMs(setting);
 }
 
 export function formatUsd(micro: number): string {
@@ -270,10 +270,6 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return target.closest(".composer") !== null;
 }
 
-type TauriInternals = {
-  invoke?: (cmd: string) => Promise<unknown>;
-};
-
 function shellToken(): string {
   const shell = globalThis as typeof globalThis & { __DASDEVBOT_TOKEN?: unknown };
   const value = shell.__DASDEVBOT_TOKEN;
@@ -324,7 +320,25 @@ async function jsonHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
+/** The Tauri window this page runs in, or null in a plain browser. */
+export function tauriWindowLabel(): string | null {
+  const host = globalThis as typeof globalThis & {
+    __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
+  };
+  return host.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? null;
+}
+
+/** Show the card window. Only the card window can sign or undo a decision. */
+export async function openCardWindow(): Promise<void> {
+  await tauriInvoke()("open_card_window");
+}
+
 export async function getSnapshot(): Promise<Snapshot> {
+  // A bundled webview is on the Tauri origin and the daemon sends no CORS
+  // headers, so the shell reads the snapshot over loopback for it.
+  if (tauriInternals()) {
+    return (await tauriInvoke()("daemon_snapshot")) as Snapshot;
+  }
   const response = await fetch("/v1/snapshot");
   if (!response.ok) {
     throw new Error(await readError(response));
@@ -332,8 +346,83 @@ export async function getSnapshot(): Promise<Snapshot> {
   return (await response.json()) as Snapshot;
 }
 
-/** Demo `repo.push`. `forced` asks for a destructive force-push instead of a PR comment. */
-export async function emitPush(forced = false): Promise<void> {
+/**
+ * A card that waits on a person. Destructive work is denied by policy and is
+ * only ever the flat C1 row: it never takes the waiting dot, the pill count or
+ * the card window (UX re-walk nit), even if a row ever arrives as pending.
+ */
+export function waitsOnHuman(approval: Approval): boolean {
+  return approval.status === "pending" && approval.effect_class !== "destructive";
+}
+
+/**
+ * The stream event a filed approval sits under: the request for a card that
+ * was asked, the gate denial for destructive work (the daemon writes only
+ * `gate-denied:<id>` for those, never `approval-requested:<id>`).
+ */
+export function receiptKeys(approval: Approval): string[] {
+  const keys = [`approval-requested:${approval.id}`];
+  if (approval.effect_class === "destructive") {
+    keys.push(`gate-denied:${approval.id}`);
+  }
+  return keys;
+}
+
+/**
+ * C1 copy for a denied destructive action (DASDEVBOT-LOOK Phase 1 overrides):
+ * "Builder wanted to delete spike/lease-v0." plus the mono command.
+ */
+export function destructiveCopy(approval: Pick<Approval, "agent_name" | "action" | "evidence" | "draft">): {
+  wanted: string;
+  command: string;
+} {
+  const who = approval.agent_name || "An agent";
+  const target = approval.evidence?.ref ?? "";
+  if (approval.action === "force_push") {
+    const remote = approval.evidence?.repo ? `origin` : "";
+    return {
+      wanted: `${who} wanted to force-push ${target || "a branch"}.`,
+      command: ["git push --force", remote, target].filter(Boolean).join(" "),
+    };
+  }
+  const verb = approval.action.replace(/_/g, "-") || "run a destructive action";
+  return {
+    wanted: `${who} wanted to ${verb}${target ? ` ${target}` : ""}.`,
+    command: approval.draft || approval.action,
+  };
+}
+
+/**
+ * Dev-only C1 trigger (CD ruling c, UX 2): files a `repo.force_push`, which the
+ * daemon denies by policy and the shell shows only as the flat ink row. No
+ * visible control calls this; the hidden hotkey in App.svelte does.
+ */
+export async function emitDeniedForcePush(): Promise<void> {
+  if (tauriInternals()) {
+    await tauriInvoke()("daemon_emit_demo", { forced: true });
+    return;
+  }
+  const response = await fetch("/v1/events", {
+    method: "POST",
+    headers: await jsonHeaders(),
+    body: JSON.stringify({
+      source: "demo",
+      kind: "repo.force_push",
+      payload: { repo: "DasVR/NIL", ref: "phase0", subject: "simulated force-push" },
+      idempotency_key: `ui-${crypto.randomUUID()}`,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+}
+
+/** Dev-only demo `repo.push` (Ctrl+Alt+Shift+P in App.svelte; no visible control, CD ruling c). */
+export async function emitPush(): Promise<void> {
+  if (tauriInternals()) {
+    await tauriInvoke()("daemon_emit_demo", { forced: false });
+    return;
+  }
   const response = await fetch("/v1/events", {
     method: "POST",
     headers: await jsonHeaders(),
@@ -345,7 +434,7 @@ export async function emitPush(forced = false): Promise<void> {
         ref: "phase0",
         subject: "simulated push",
         note: "phase 0 attaches no diff",
-        forced,
+        forced: false,
       },
       idempotency_key: `ui-${crypto.randomUUID()}`,
     }),
@@ -356,15 +445,20 @@ export async function emitPush(forced = false): Promise<void> {
 }
 
 type TauriInternals = {
-  invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+  invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 };
 
-function tauriInvoke(): TauriInternals["invoke"] {
+function tauriInvoke(): NonNullable<TauriInternals["invoke"]> {
   const internals = (globalThis as { __TAURI_INTERNALS__?: TauriInternals }).__TAURI_INTERNALS__;
   if (!internals?.invoke) {
     throw new Error("approval decisions are Tauri IPC only");
   }
   return internals.invoke.bind(internals);
+}
+
+/** The OS Hello prompt was cancelled or refused. The card goes back to waiting quietly. */
+export function isHelloCancel(message: string): boolean {
+  return /hello consent was denied|cancel/i.test(message);
 }
 
 export async function decide(id: string, decision: Decision, reason?: string): Promise<void> {

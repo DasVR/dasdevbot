@@ -7,37 +7,48 @@
   import SecretEntry from "./lib/SecretEntry.svelte";
   import { tokenEase, tokenMs } from "./lib/cssTokens";
   import { QUIET_LINE_PATH } from "./lib/pen";
+  import { startPolling } from "./lib/poll";
+  import { shellSearch } from "./lib/shell/geometry";
+  import type { ReviewerChrome } from "./lib/shell/roster";
+  import Shell from "./lib/shell/Shell.svelte";
+  import StageThread from "./lib/shell/StageThread.svelte";
+  import WaitingStep from "./lib/shell/WaitingStep.svelte";
   import {
-    decide,
+    emitDeniedForcePush,
     emitPush,
     formatStreamTime,
     formatUsd,
     getSnapshot,
     hlcMillis,
-    isTextEntry,
+    openCardWindow,
+    receiptKeys,
     shortEventId,
-    undo,
+    tauriWindowLabel,
+    waitsOnHuman,
     type Approval,
-    type Decision,
     type Snapshot,
   } from "./lib/api";
 
   /** Flat rows and the roster. tokens.css has no zero radius. */
   const FLAT_RADIUS = "0";
+  /** The shell mock's phase label. The snapshot names a project, not a phase. */
+  const PHASE = "phase0";
+  const shell = typeof window === "undefined" ? { stage: false, capture: false } : shellSearch();
   /** Reduced-motion fades. tokens.css has no linear easing token. */
   const REDUCED_FADE_EASE = linear;
 
   let snapshot = $state<Snapshot | null>(null);
   let settingsOpen = $state(false);
   let error = $state<string | null>(null);
-  let busy = $state(false);
-  let deciding = $state(false);
+  /** When this window first saw each teammate running. The snapshot has no start time. */
+  let runningSince = $state<Record<string, number>>({});
   let primed = $state(false);
   let now = $state(Date.now());
 
+  const STREAM_ROWS = 40;
   const reviewer = $derived(snapshot?.agents.find((agent) => agent.id === "reviewer") ?? null);
   const pending = $derived.by(() => {
-    const rows = snapshot?.approvals.filter((approval) => approval.status === "pending") ?? [];
+    const rows = snapshot?.approvals.filter(waitsOnHuman) ?? [];
     return rows.reduce<Approval | null>((oldest, approval) => {
       if (!oldest || approval.created_at < oldest.created_at) {
         return approval;
@@ -51,14 +62,19 @@
       if (approval.status === "pending") {
         continue;
       }
-      map[`approval-requested:${approval.id}`] = approval;
+      for (const key of receiptKeys(approval)) {
+        map[key] = approval;
+      }
     }
     return map;
   });
   const stream = $derived.by(() => {
     const events = snapshot?.events ?? [];
     const pendingKey = pending ? `approval-requested:${pending.id}` : "";
-    return [...events].reverse().map((event) => {
+    // The daemon keeps every event. The stream renders the newest
+    // STREAM_ROWS so the DOM, and each receipt card's observers, stay bounded
+    // however long the demo runs.
+    return [...events].reverse().slice(-STREAM_ROWS).map((event) => {
       const source = event.source.trim();
       const shortId = shortEventId(event.id);
       const millis = hlcMillis(event.hlc);
@@ -77,27 +93,10 @@
   });
   const pendingAnchored = $derived(stream.some((row) => row.pendingHere));
   const anyReceipt = $derived(stream.some((row) => row.receipt !== null));
-  const undoable = $derived.by(() => {
-    const rows =
-      snapshot?.approvals.filter((approval) => {
-        return (
-          (approval.status === "approved" || approval.status === "denied") &&
-          !approval.committed &&
-          approval.undo_until != null &&
-          approval.undo_until > now
-        );
-      }) ?? [];
-    return rows.reduce<Approval | null>((latest, approval) => {
-      if (!latest || (approval.decided_at ?? 0) > (latest.decided_at ?? 0)) {
-        return approval;
-      }
-      return latest;
-    }, null);
-  });
   // Pending is waiting on a human. A decided, uncommitted approval is filing: ink-3, no dot.
   const waitingOnHuman = $derived(
     (snapshot?.approvals ?? []).some(
-      (approval) => approval.agent_id === reviewer?.id && approval.status === "pending",
+      (approval) => approval.agent_id === reviewer?.id && waitsOnHuman(approval),
     ),
   );
   const filingUndo = $derived.by(() => {
@@ -124,10 +123,50 @@
       ? 0
       : Math.max(0, Math.ceil((filingUndo.undo_until - now) / 1000)),
   );
+  const reviewerChrome = $derived.by((): ReviewerChrome | null => {
+    if (reviewer == null) {
+      return null;
+    }
+    let filing: string | null = null;
+    if (filingUndo && filingSeconds > 0) {
+      filing = `${filingUndo.status === "denied" ? "denied" : "approved"} · undo ${filingSeconds}s`;
+    }
+    return {
+      waiting: waitingOnHuman,
+      filing,
+      working: reviewer.status === "working",
+    };
+  });
+  const rosterAgents = $derived(
+    (snapshot?.agents ?? []).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      status: agent.status,
+      runningMs: runningSince[agent.id] == null ? null : Math.max(0, now - runningSince[agent.id]),
+      tokensSpent: agent.tokens_spent,
+      tokenCap: agent.token_cap,
+    })),
+  );
+  const openReviews = $derived(
+    (snapshot?.approvals ?? [])
+      .filter(waitsOnHuman)
+      .map((approval) => ({
+        id: approval.id,
+        agent: approval.agent_name,
+        title: approval.purpose || approval.action,
+      })),
+  );
 
   async function refresh(): Promise<void> {
     try {
       snapshot = await getSnapshot();
+      const since: Record<string, number> = {};
+      for (const agent of snapshot.agents) {
+        if (agent.status === "working") {
+          since[agent.id] = runningSince[agent.id] ?? Date.now();
+        }
+      }
+      runningSince = since;
       error = null;
       if (!primed) {
         await tick();
@@ -138,65 +177,24 @@
     }
   }
 
-  async function simulate(forced = false): Promise<void> {
-    busy = true;
-    try {
-      await emitPush(forced);
-      await refresh();
-    } catch (err) {
-      error = err instanceof Error ? err.message : "The event was not accepted.";
-    } finally {
-      busy = false;
-    }
-  }
+  // One decision point: the card window. The main window never runs a seen
+  // lock or a hold. Its waiting step only brings up the card window (Tauri),
+  // or the card page in a second browser window in plain browser dev.
+  const inTauri = tauriWindowLabel() !== null;
 
-  async function ondecide(id: string, decision: Decision, reason?: string): Promise<boolean> {
-    deciding = true;
+  async function reviewCard(): Promise<void> {
+    if (shell.stage) {
+      return;
+    }
     try {
-      await decide(id, decision, reason);
-      await refresh();
-      return true;
+      if (inTauri) {
+        await openCardWindow();
+      } else {
+        window.open("?window=card", "dasdevbot-card", "popup,width=560,height=760");
+      }
     } catch (err) {
-      error = err instanceof Error ? err.message : "The decision was not recorded.";
-      return false;
-    } finally {
-      deciding = false;
+      error = err instanceof Error ? err.message : "The card window did not open.";
     }
-  }
-
-  async function onundo(id: string): Promise<boolean> {
-    deciding = true;
-    try {
-      await undo(id);
-      await refresh();
-      return true;
-    } catch (err) {
-      error = err instanceof Error ? err.message : "The decision could not be undone.";
-      return false;
-    } finally {
-      deciding = false;
-    }
-  }
-
-  function onWindowKey(event: KeyboardEvent): void {
-    if (event.repeat || isTextEntry(event.target)) {
-      return;
-    }
-    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
-      return;
-    }
-    if (event.key !== "z" && event.key !== "Z") {
-      return;
-    }
-    const target = undoable;
-    if (!target || target.undo_until == null || target.undo_until <= Date.now()) {
-      return;
-    }
-    event.preventDefault();
-    if (stream.some((row) => row.receipt?.id === target.id)) {
-      return;
-    }
-    void onundo(target.id);
   }
 
   function prefersReducedMotion(): boolean {
@@ -342,95 +340,80 @@
     syncSettings();
     const onHash = () => syncSettings();
     globalThis.addEventListener("hashchange", onHash);
-    void refresh();
+    const stopPolling = startPolling(refresh, 1000);
+    // CD ruling c / UX 2: no demo trigger is a visible control ("Simulate
+    // repo.push" is gone from the UI). In dev builds only (`vite`,
+    // import.meta.env.DEV), Ctrl+Alt+Shift+P files a repo.push that wakes
+    // Reviewer, and Ctrl+Alt+Shift+F files a force-push the daemon denies, so
+    // the flat ink C1 row can be shown on cue. `vite build` compiles this
+    // block out; scripts/demo-trigger-gate.mjs checks dist.
+    let onC1Key: ((event: KeyboardEvent) => void) | null = null;
+    if (import.meta.env.DEV) {
+      onC1Key = (event: KeyboardEvent) => {
+        if (shell.stage || !event.ctrlKey || !event.altKey || !event.shiftKey) {
+          return;
+        }
+        const emit = event.code === "KeyF" ? emitDeniedForcePush : event.code === "KeyP" ? emitPush : null;
+        if (!emit) {
+          return;
+        }
+        event.preventDefault();
+        void emit()
+          .then(() => refresh())
+          .catch((err: unknown) => {
+            error = err instanceof Error ? err.message : "The event was not accepted.";
+          });
+      };
+      globalThis.addEventListener("keydown", onC1Key);
+    }
     const clock = setInterval(() => {
       now = Date.now();
     }, 200);
-    const timer = setInterval(() => {
-      void refresh();
-    }, 1000);
     return () => {
       globalThis.removeEventListener("hashchange", onHash);
+      if (onC1Key) {
+        globalThis.removeEventListener("keydown", onC1Key);
+      }
       clearInterval(clock);
-      clearInterval(timer);
+      stopPolling();
     };
   });
 </script>
 
-<svelte:window onkeydown={onWindowKey} />
-
 {#snippet approvalSlot(approval: Approval)}
-  <div class={["slot", approval.status === "pending" && "over"]} {@attach flipSlot}>
+  <div class="slot" {@attach flipSlot}>
     {#key approval.id}
-      <ApprovalCard
-        approval={approval}
-        busy={deciding}
-        shortcutTarget={approval.status === "pending"}
-        ondecide={(decision, reason) => ondecide(approval.id, decision, reason)}
-        onundo={() => onundo(approval.id)}
-      />
+      {#if approval.status === "pending" && approval.effect_class !== "destructive"}
+        <WaitingStep
+          id={approval.id}
+          say={approval.purpose || approval.action}
+          meta={`${shortEventId(approval.evidence.event_id)} · ${approval.effect_class}`}
+        />
+      {:else}
+        <ApprovalCard approval={approval} readonly />
+      {/if}
     {/key}
   </div>
 {/snippet}
 
-<div class="well" style:--flat-radius={FLAT_RADIUS}>
-  <div class="shell">
-    <header class="titlebar">
-      <div class="wordmark">
-        <span class="dots" aria-hidden="true"></span>
-        <strong>dasdevbot</strong>
-      </div>
-      <p class="status">
-        {#if snapshot}
-          {snapshot.role} · protocol {snapshot.protocol} · {snapshot.provider_detail} · sync {snapshot.sync}
-        {:else}
-          connecting
-        {/if}
-      </p>
-    </header>
+<Shell
+  agents={rosterAgents}
+  project={reviewer?.project ?? "DasVR/NIL"}
+  phase={PHASE}
+  reviewer={reviewerChrome}
+  pending={openReviews}
+  stage={shell.stage}
+  capture={shell.capture}
+  onwaiting={() => void reviewCard()}
+>
+  {#if shell.stage && snapshot == null}
+    <StageThread />
+  {:else}
+  {#if error && !shell.stage}
+    <p class="banner" role="alert">{error}</p>
+  {/if}
 
-    {#if error}
-      <p class="banner" role="alert">{error}</p>
-    {/if}
-
-    <div class="body">
-      <aside>
-        <p class="section">Agents</p>
-        {#if reviewer}
-          <div class="agent" data-status={reviewer.status}>
-            <div class="agent-row">
-              <h2>{reviewer.name}</h2>
-              {#if reviewer.status === "working"}
-                <span class="agent-status">{reviewer.status}</span>
-              {:else if filingUndo && filingSeconds > 0}
-                <span class="agent-status">filing · undo {filingSeconds}s</span>
-              {:else if reviewer.status === "blocked" && !filingUndo}
-                <span class="agent-status need">
-                  <span class="need-dot" aria-hidden="true"></span>
-                  {reviewer.status}
-                </span>
-              {/if}
-            </div>
-            <p class="project">{reviewer.project}</p>
-            <p class="budget">{reviewer.tokens_spent} / {reviewer.token_cap} tok</p>
-            <p class="persona">{reviewer.persona.trim()}</p>
-          </div>
-        {:else}
-          <p class="muted">No agents stored.</p>
-        {/if}
-
-        <div class="sim-row">
-          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(false)}>
-            {busy ? "Waking Reviewer" : "Simulate repo.push"}
-          </button>
-          <button class="simulate" type="button" disabled={busy} onclick={() => void simulate(true)}>
-            {busy ? "Waking Reviewer" : "Simulate force push"}
-          </button>
-        </div>
-        <p class="hint">Reviewer is a stored row. It runs only when this event wakes it.</p>
-      </aside>
-
-      <main>
+  <main style:--flat-radius={FLAT_RADIUS}>
         <p class="section">Stream</p>
         <div class="stage" {@attach pinOverlay}>
           <ol class="stream">
@@ -480,91 +463,26 @@
           <p class="muted">No spend yet. Idle agents do not call a provider.</p>
         {/if}
 
-      </main>
-    </div>
-  </div>
+  </main>
+  {/if}
   {#if settingsOpen}
     <SecretEntry />
   {/if}
-</div>
+</Shell>
 
 <style>
-  .well {
-    min-height: 100%;
-    padding: var(--s-5);
-    background: var(--paper-base);
-  }
-
-  .shell {
-    max-width: 1120px;
-    margin: 0 auto;
-    background: var(--paper-raised);
-    border: 1px solid var(--hairline);
-    border-radius: var(--flat-radius);
-    overflow: hidden;
-  }
-
-  .titlebar {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--s-4);
-    align-items: center;
-    padding: var(--s-3) var(--s-4);
-    border-bottom: 1px solid var(--hairline);
-  }
-
-  .wordmark {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
-    font-weight: var(--w-semibold);
-    letter-spacing: var(--track-tight);
-  }
-
-  .dots {
-    width: 42px;
-    height: 10px;
-    background:
-      radial-gradient(circle at 5px 5px, var(--ink-3) 4px, transparent 4.5px),
-      radial-gradient(circle at 21px 5px, var(--ink-3) 4px, transparent 4.5px),
-      radial-gradient(circle at 37px 5px, var(--ink-3) 4px, transparent 4.5px);
-  }
-
-  .status,
-  .budget,
-  .ledger,
-  .project {
-    font-family: var(--font-machine);
-  }
-
-  .status {
-    color: var(--ink-2);
-    font-size: var(--t-micro);
-    text-align: right;
-  }
-
   .banner {
-    margin: var(--s-3) var(--s-4) 0;
+    margin: 0 0 var(--s-3);
     padding: var(--s-2) var(--s-3);
     border-radius: var(--r-sm);
     color: var(--ink-1);
     background: var(--paper-sunken);
   }
 
-  .body {
-    display: grid;
-    grid-template-columns: 280px 1fr;
-    min-height: 640px;
-  }
-
-  aside {
-    padding: var(--s-4);
-    border-right: 1px solid var(--hairline);
-  }
-
   main {
     padding: var(--s-4);
-    background: var(--paper-base);
+    padding-bottom: 96px;
+    background: transparent;
   }
 
   .section {
@@ -573,101 +491,6 @@
     line-height: var(--lh-meta);
     font-weight: var(--w-semibold);
     margin-bottom: var(--s-3);
-  }
-
-  .agent {
-    position: relative;
-    overflow: hidden;
-    padding: var(--s-3);
-    border: 1px solid var(--hairline);
-    border-radius: var(--flat-radius);
-    background: var(--paper-raised);
-  }
-
-  .agent-row {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--s-2);
-    align-items: baseline;
-  }
-
-  h2 {
-    font-size: var(--t-lead);
-    line-height: var(--lh-lead);
-    font-weight: var(--w-semibold);
-    letter-spacing: var(--track-tight);
-  }
-
-  .project,
-  .budget,
-  .hint,
-  .muted,
-  .persona {
-    color: var(--ink-2);
-    font-size: var(--t-meta);
-  }
-
-  .agent-status {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s-2);
-    color: var(--ink-3);
-    font-size: var(--t-meta);
-  }
-
-  .need-dot {
-    width: 7px;
-    height: 7px;
-    flex: none;
-    border-radius: var(--r-pill);
-    background: var(--risk-external);
-  }
-
-  .persona {
-    margin-top: var(--s-2);
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-
-  .budget {
-    margin-top: var(--s-2);
-    color: var(--ink-1);
-  }
-
-  .sim-row {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s-2);
-    margin-top: var(--s-4);
-  }
-
-  .simulate {
-    width: 100%;
-    height: 40px;
-    border-radius: var(--r-md);
-    border: 1.5px solid var(--ink-1);
-    background: var(--paper-raised);
-    color: var(--ink-1);
-    font-size: var(--t-meta);
-    font-weight: var(--w-semibold);
-    cursor: pointer;
-  }
-
-  .simulate:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .simulate:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-
-  .hint {
-    margin-top: var(--s-2);
   }
 
   .stage {
@@ -689,6 +512,7 @@
     border-radius: var(--flat-radius);
     background: none;
     box-shadow: none;
+    min-width: 0;
   }
 
   .row {
@@ -744,6 +568,9 @@
     color: var(--ink-1);
     font-size: var(--t-body);
     line-height: var(--lh-body);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .detail {
@@ -752,7 +579,9 @@
     font-size: var(--t-micro);
     line-height: var(--lh-micro);
     color: var(--ink-3);
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* Filed receipt sits in the row's copy column. Same tracks as .row, without a hairline rule. */
@@ -769,30 +598,22 @@
   .slot-row .slot {
     grid-column: 3;
     margin-top: 0;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .slot-row .slot :global(article.card) {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  :global(.win[data-shell-form="companion"]) main {
+    padding: 0;
   }
 
   .slot {
     margin-top: 14px;
     scroll-margin-bottom: 16px;
-  }
-
-  .slot.over {
-    position: fixed;
-    z-index: 4;
-    left: var(--overlay-left, 0px);
-    width: var(--overlay-width, 100%);
-    bottom: 16px;
-    display: flex;
-    justify-content: center;
-    margin-top: 0;
-    padding: 0 28px;
-    pointer-events: none;
-    box-sizing: border-box;
-  }
-
-  .slot.over :global(article.card) {
-    width: min(520px, 100%);
-    pointer-events: auto;
   }
 
   .quiet-empty {
@@ -841,6 +662,11 @@
   .muted {
     margin-top: var(--s-2);
     color: var(--ink-2);
+    font-size: var(--t-meta);
+  }
+
+  .ledger {
+    font-family: var(--font-machine);
   }
 
   .ledger-head {
@@ -862,29 +688,5 @@
     display: block;
     color: var(--ink-2);
     font-size: var(--t-micro);
-  }
-
-  @media (max-width: 860px) {
-    .well {
-      padding: var(--s-2);
-    }
-
-    .body {
-      grid-template-columns: 1fr;
-    }
-
-    aside {
-      border-right: 0;
-      border-bottom: 1px solid var(--hairline);
-    }
-
-    .titlebar {
-      flex-direction: column;
-      align-items: flex-start;
-    }
-
-    .status {
-      text-align: left;
-    }
   }
 </style>

@@ -1,0 +1,1437 @@
+{
+  "dpr": 2,
+  "dtMs": 16.667,
+  "clips": [
+    {
+      "clip": "1440-full",
+      "reference": "shell-full-companion-pill.mp4",
+      "video": "docs/review/parity/video/shell-1440-full.mp4",
+      "stills": [
+        "docs/review/parity/video/shell-1440-full-f431.png",
+        "docs/review/parity/video/shell-1440-full-f85.png",
+        "docs/review/parity/video/shell-1440-full-f86.png"
+      ],
+      "frames": {
+        "reference": 539,
+        "app": 509,
+        "encoded": 508
+      },
+      "firstAction": {
+        "ref": 18,
+        "app": 19,
+        "alignedBy": {
+          "trimRef": 0,
+          "trimApp": 1
+        }
+      },
+      "appClockDriftMs": 0,
+      "duplicates": {
+        "reference": {
+          "motion": 28,
+          "rest": 257,
+          "hits": [
+            2,
+            17,
+            23,
+            42,
+            77,
+            83,
+            115,
+            117,
+            119,
+            170,
+            172,
+            198,
+            207,
+            251,
+            282,
+            289
+          ]
+        },
+        "app": {
+          "motion": 31,
+          "rest": 238,
+          "hits": [
+            24,
+            25,
+            26,
+            27,
+            28,
+            78,
+            79,
+            84,
+            85,
+            114,
+            115,
+            116,
+            118,
+            201,
+            202,
+            203
+          ]
+        }
+      },
+      "ssim": {
+        "mean": 0.9312,
+        "min": 0.8409,
+        "worst": [
+          {
+            "frame": 431,
+            "ssim": 0.8409
+          },
+          {
+            "frame": 85,
+            "ssim": 0.8586
+          },
+          {
+            "frame": 86,
+            "ssim": 0.8592
+          },
+          {
+            "frame": 87,
+            "ssim": 0.8677
+          },
+          {
+            "frame": 88,
+            "ssim": 0.8782
+          },
+          {
+            "frame": 425,
+            "ssim": 0.8824
+          },
+          {
+            "frame": 89,
+            "ssim": 0.8888
+          },
+          {
+            "frame": 432,
+            "ssim": 0.8895
+          }
+        ]
+      },
+      "gaps": [
+        {
+          "form": "full",
+          "mockFrame": 0,
+          "appFrame": 0,
+          "mock": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "companion",
+          "mockFrame": 118,
+          "appFrame": 118,
+          "mock": {
+            "frame": 118,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 118,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "pill",
+          "mockFrame": 243,
+          "appFrame": 243,
+          "mock": {
+            "frame": 243,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "app": {
+            "frame": 243,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "full",
+          "mockFrame": 451,
+          "appFrame": 0,
+          "mock": {
+            "frame": 451,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        }
+      ],
+      "wallSeconds": 337,
+      "commit": ""
+    },
+    {
+      "clip": "1440-reduced",
+      "reference": "mock 4a-shell-morph.html ?capture&rm",
+      "video": "docs/review/parity/video/shell-1440-reduced.mp4",
+      "stills": [
+        "docs/review/parity/video/shell-1440-reduced-f378.png",
+        "docs/review/parity/video/shell-1440-reduced-f379.png",
+        "docs/review/parity/video/shell-1440-reduced-f380.png"
+      ],
+      "frames": {
+        "reference": 441,
+        "app": 441,
+        "encoded": 441
+      },
+      "firstAction": {
+        "ref": 19,
+        "app": 19,
+        "alignedBy": {
+          "trimRef": 0,
+          "trimApp": 0
+        }
+      },
+      "appClockDriftMs": 0,
+      "duplicates": {
+        "reference": {
+          "motion": 24,
+          "rest": 365,
+          "hits": [
+            18,
+            23,
+            76,
+            78,
+            85,
+            97,
+            177,
+            179,
+            186,
+            197,
+            228,
+            230,
+            237,
+            239,
+            353,
+            355
+          ]
+        },
+        "app": {
+          "motion": 15,
+          "rest": 376,
+          "hits": [
+            23,
+            24,
+            25,
+            26,
+            94,
+            95,
+            195,
+            196,
+            239,
+            240,
+            241,
+            246,
+            383,
+            384,
+            415
+          ]
+        }
+      },
+      "ssim": {
+        "mean": 0.928,
+        "min": 0.7552,
+        "worst": [
+          {
+            "frame": 378,
+            "ssim": 0.7552
+          },
+          {
+            "frame": 379,
+            "ssim": 0.7572
+          },
+          {
+            "frame": 380,
+            "ssim": 0.7654
+          },
+          {
+            "frame": 377,
+            "ssim": 0.7656
+          },
+          {
+            "frame": 86,
+            "ssim": 0.7816
+          },
+          {
+            "frame": 381,
+            "ssim": 0.7821
+          },
+          {
+            "frame": 376,
+            "ssim": 0.7862
+          },
+          {
+            "frame": 87,
+            "ssim": 0.8308
+          }
+        ]
+      },
+      "gaps": [
+        {
+          "form": "full",
+          "mockFrame": 0,
+          "appFrame": 0,
+          "mock": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "companion",
+          "mockFrame": 99,
+          "appFrame": 95,
+          "mock": {
+            "frame": 99,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 95,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "pill",
+          "mockFrame": 200,
+          "appFrame": 196,
+          "mock": {
+            "frame": 200,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "app": {
+            "frame": 196,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "full",
+          "mockFrame": 387,
+          "appFrame": 0,
+          "mock": {
+            "frame": 387,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        }
+      ],
+      "wallSeconds": 304,
+      "commit": ""
+    },
+    {
+      "clip": "1280-full",
+      "reference": "shell-full-companion-pill.mp4",
+      "video": "docs/review/parity/video/shell-1280-full.mp4",
+      "stills": [
+        "docs/review/parity/video/shell-1280-full-f431.png",
+        "docs/review/parity/video/shell-1280-full-f85.png",
+        "docs/review/parity/video/shell-1280-full-f86.png"
+      ],
+      "frames": {
+        "reference": 539,
+        "app": 509,
+        "encoded": 508
+      },
+      "firstAction": {
+        "ref": 18,
+        "app": 19,
+        "alignedBy": {
+          "trimRef": 0,
+          "trimApp": 1
+        }
+      },
+      "appClockDriftMs": 0,
+      "duplicates": {
+        "reference": {
+          "motion": 23,
+          "rest": 341,
+          "hits": [
+            2,
+            17,
+            23,
+            42,
+            62,
+            84,
+            115,
+            117,
+            119,
+            185,
+            187,
+            207,
+            222,
+            223,
+            251,
+            359
+          ]
+        },
+        "app": {
+          "motion": 51,
+          "rest": 293,
+          "hits": [
+            24,
+            25,
+            26,
+            27,
+            28,
+            78,
+            79,
+            80,
+            81,
+            82,
+            83,
+            84,
+            85,
+            114,
+            115,
+            116
+          ]
+        }
+      },
+      "ssim": {
+        "mean": 0.933,
+        "min": 0.8267,
+        "worst": [
+          {
+            "frame": 431,
+            "ssim": 0.8267
+          },
+          {
+            "frame": 85,
+            "ssim": 0.8463
+          },
+          {
+            "frame": 86,
+            "ssim": 0.8475
+          },
+          {
+            "frame": 87,
+            "ssim": 0.8566
+          },
+          {
+            "frame": 88,
+            "ssim": 0.8699
+          },
+          {
+            "frame": 425,
+            "ssim": 0.8733
+          },
+          {
+            "frame": 89,
+            "ssim": 0.8811
+          },
+          {
+            "frame": 430,
+            "ssim": 0.8828
+          }
+        ]
+      },
+      "gaps": [
+        {
+          "form": "full",
+          "mockFrame": 0,
+          "appFrame": 0,
+          "mock": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "companion",
+          "mockFrame": 118,
+          "appFrame": 118,
+          "mock": {
+            "frame": 118,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 118,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "pill",
+          "mockFrame": 243,
+          "appFrame": 243,
+          "mock": {
+            "frame": 243,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "app": {
+            "frame": 243,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "full",
+          "mockFrame": 451,
+          "appFrame": 0,
+          "mock": {
+            "frame": 451,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        }
+      ],
+      "wallSeconds": 252,
+      "commit": ""
+    },
+    {
+      "clip": "1280-reduced",
+      "reference": "mock 4a-shell-morph.html ?capture&rm",
+      "video": "docs/review/parity/video/shell-1280-reduced.mp4",
+      "stills": [
+        "docs/review/parity/video/shell-1280-reduced-f378.png",
+        "docs/review/parity/video/shell-1280-reduced-f379.png",
+        "docs/review/parity/video/shell-1280-reduced-f380.png"
+      ],
+      "frames": {
+        "reference": 441,
+        "app": 441,
+        "encoded": 441
+      },
+      "firstAction": {
+        "ref": 19,
+        "app": 19,
+        "alignedBy": {
+          "trimRef": 0,
+          "trimApp": 0
+        }
+      },
+      "appClockDriftMs": 0,
+      "duplicates": {
+        "reference": {
+          "motion": 18,
+          "rest": 378,
+          "hits": [
+            18,
+            23,
+            76,
+            78,
+            85,
+            97,
+            186,
+            193,
+            228,
+            230,
+            353,
+            355,
+            373,
+            385,
+            409,
+            411
+          ]
+        },
+        "app": {
+          "motion": 30,
+          "rest": 377,
+          "hits": [
+            23,
+            24,
+            25,
+            26,
+            94,
+            95,
+            188,
+            189,
+            190,
+            191,
+            192,
+            193,
+            194,
+            195,
+            196,
+            239
+          ]
+        }
+      },
+      "ssim": {
+        "mean": 0.933,
+        "min": 0.7445,
+        "worst": [
+          {
+            "frame": 378,
+            "ssim": 0.7445
+          },
+          {
+            "frame": 379,
+            "ssim": 0.7473
+          },
+          {
+            "frame": 380,
+            "ssim": 0.7536
+          },
+          {
+            "frame": 377,
+            "ssim": 0.7583
+          },
+          {
+            "frame": 381,
+            "ssim": 0.7721
+          },
+          {
+            "frame": 376,
+            "ssim": 0.7804
+          },
+          {
+            "frame": 86,
+            "ssim": 0.7834
+          },
+          {
+            "frame": 87,
+            "ssim": 0.8379
+          }
+        ]
+      },
+      "gaps": [
+        {
+          "form": "full",
+          "mockFrame": 0,
+          "appFrame": 0,
+          "mock": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "companion",
+          "mockFrame": 99,
+          "appFrame": 95,
+          "mock": {
+            "frame": 99,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 95,
+            "form": "companion",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 1000,
+                "y": 72,
+                "w": 400,
+                "h": 790
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "pill",
+          "mockFrame": 200,
+          "appFrame": 196,
+          "mock": {
+            "frame": 200,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "app": {
+            "frame": 196,
+            "form": "pill",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 520,
+                "y": 800,
+                "w": 400,
+                "h": 52
+              },
+              "radius": "26px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "16px",
+              "paddingRight": "20px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        },
+        {
+          "form": "full",
+          "mockFrame": 387,
+          "appFrame": 0,
+          "mock": {
+            "frame": 387,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "app": {
+            "frame": 0,
+            "form": "full",
+            "G07": {
+              "background": "rgba(248, 243, 234, 0.78)",
+              "backdrop": "blur(24px) saturate(1.5)"
+            },
+            "G12": {
+              "rect": {
+                "x": 40,
+                "y": 52,
+                "w": 1360,
+                "h": 828
+              },
+              "radius": "14px"
+            },
+            "G22": {
+              "background": "rgba(237, 231, 221, 0.55)",
+              "paddingBottom": "0px"
+            },
+            "G25": {
+              "paddingLeft": "10px",
+              "paddingRight": "10px"
+            }
+          },
+          "pass": {
+            "G07": true,
+            "G12": true,
+            "G22": true,
+            "G25": true
+          }
+        }
+      ],
+      "wallSeconds": 252,
+      "commit": ""
+    },
+    {
+      "clip": "modes",
+      "reference": "modes-focus-away-review.mp4",
+      "video": "docs/review/parity/video/modes-gap.mp4",
+      "frames": 882,
+      "gap": "03-modes not built, due by Oct 14"
+    }
+  ],
+  "generatedAt": "2026-10-08T21:30:49.100Z"
+}

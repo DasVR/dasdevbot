@@ -50,6 +50,10 @@ export default defineConfig({
     proxy: {
       "/v1": {
         target: "http://127.0.0.1:8787",
+        // Dev only. The daemon rejects any Host but its own loopback address
+        // (DNS-rebinding guard, server.rs host_is_loopback) and the browser
+        // sends localhost:5173, so the proxy rewrites Host to the target.
+        changeOrigin: true,
         configure(proxy) {
           proxy.on("proxyReq", (proxyReq) => {
             proxyReq.removeHeader("origin");

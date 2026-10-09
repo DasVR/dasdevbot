@@ -1,6 +1,21 @@
 {
   "identifier": "default",
-  "description": "Main window can ask the shell for the session bearer.",
-  "windows": ["main"],
-  "permissions": ["core:default", "allow-session-token"]
+  "description": "Main window: the session bearer, the shell forms, and showing the card window. No decision capability.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-session-token",
+    "allow-open-card-window",
+    "allow-prepare-shell-form",
+    "allow-shell-metrics",
+    "allow-set-shell-bounds",
+    "allow-window-minimize",
+    "allow-window-toggle-maximize",
+    "allow-window-close",
+    "allow-snap-maximize-rect",
+    "allow-daemon-snapshot",
+    "allow-daemon-emit-demo"
+  ]
 }

@@ -49,7 +49,7 @@ With the daemon running, start the Vite dev server and use that page for the cli
 cd apps/desktop && npm run dev
 ```
 
-Open <http://127.0.0.1:5173>. Click **Simulate repo.push**. Reviewer wakes, drafts a review, and the approval card appears. **Approve** or **Deny**. The event log gains `approval.decided`. Nothing is sent to GitHub or anywhere else. The dev server injects the bearer into the page it serves. `npm run build` does not.
+Open <http://127.0.0.1:5173>. Press **Ctrl+Alt+Shift+P** (dev builds only; there is no visible demo control) to file a `repo.push`. Reviewer wakes, drafts a review, and the approval card appears. **Approve** or **Deny**. The event log gains `approval.decided`. Nothing is sent to GitHub or anywhere else. The dev server injects the bearer into the page it serves. `npm run build` does not.
 
 From another shell, against a running daemon:
 

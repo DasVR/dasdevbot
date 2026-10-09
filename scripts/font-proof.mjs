@@ -355,11 +355,18 @@ try {
     ["receipt", receiptSnapshot(), async () => page.locator("article.card .receipt").waitFor()],
   ];
 
+  // One decision point: a waiting card renders only in the card window
+  // (?window=card in a plain browser). The main window shows a waiting step.
+  const inCardWindow = new Set(["waiting", "waiting-armed"]);
   const audits = [];
   for (const [name, next, ready] of states) {
     fixture = next;
-    await page.goto(origin, { waitUntil: "networkidle" });
-    await page.locator(".wordmark").waitFor();
+    if (inCardWindow.has(name)) {
+      await page.goto(`${origin}/?window=card`, { waitUntil: "networkidle" });
+    } else {
+      await page.goto(origin, { waitUntil: "networkidle" });
+      await page.locator(".wordmark").waitFor();
+    }
     await ready();
     audits.push(await auditState(page, session, name));
   }

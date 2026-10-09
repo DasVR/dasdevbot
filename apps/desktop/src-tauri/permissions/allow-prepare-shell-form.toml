@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-prepare-shell-form"
+description = "Read where a shell form sits on the current monitor."
+commands.allow = ["prepare_shell_form"]

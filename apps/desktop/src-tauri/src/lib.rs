@@ -3,6 +3,17 @@
 //! The daemon derives the window from that secret. The shell does not open
 //! SQLite. Every command is a line on the daemon's local socket.
 //! See docs/shell-ipc.md.
+//!
+//! The shell forms (full, companion, pill) live in `shell_form` and
+//! `geometry`. Approval cards are decided only in the `card` window: the main
+//! window can ask to show it (`open_card_window`) but holds no decision
+//! capability.
+
+mod daemon_http;
+mod geometry;
+mod native_sight;
+mod shell_form;
+mod snap;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +25,7 @@ struct ShellState {
 }
 
 #[tauri::command]
-fn sign_decision(
+async fn sign_decision(
     window: tauri::Window,
     state: tauri::State<'_, ShellState>,
     id: String,
@@ -22,52 +33,64 @@ fn sign_decision(
     reason: Option<String>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    finish_signed(
-        &state.data,
-        &label,
-        json!({
-            "op": "decide",
-            "approval_id": id,
-            "decision": decision,
-            "reason": reason,
-        }),
-    )
+    let data = state.data.clone();
+    daemon_http::off_main(move || {
+        finish_signed(
+            &data,
+            &label,
+            json!({
+                "op": "decide",
+                "approval_id": id,
+                "decision": decision,
+                "reason": reason,
+            }),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-fn undo_decision(
+async fn undo_decision(
     window: tauri::Window,
     state: tauri::State<'_, ShellState>,
     id: String,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    finish_signed(
-        &state.data,
-        &label,
-        json!({
-            "op": "undo",
-            "approval_id": id,
-        }),
-    )
+    let data = state.data.clone();
+    daemon_http::off_main(move || {
+        finish_signed(
+            &data,
+            &label,
+            json!({
+                "op": "undo",
+                "approval_id": id,
+            }),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
-fn set_secret(
+async fn set_secret(
     window: tauri::Window,
     state: tauri::State<'_, ShellState>,
     handle: String,
     value: String,
 ) -> Result<SecretStored, String> {
     let label = window.label().to_string();
-    let response = signed_body(
-        &state.data,
-        &label,
-        json!({
-            "op": "secret",
-            "name": handle,
-            "value": value,
-        }),
-    )?;
+    let data = state.data.clone();
+    let response = daemon_http::off_main(move || {
+        signed_body(
+            &data,
+            &label,
+            json!({
+                "op": "secret",
+                "name": handle,
+                "value": value,
+            }),
+        )
+    })
+    .await?;
     let last4 = response["result"]["last4"]
         .as_str()
         .unwrap_or_default()
@@ -153,9 +176,14 @@ fn complete_hello(_data: &Path, _label: &str, _body: &Value) -> Result<(), Strin
 }
 
 fn daemon_data() -> PathBuf {
-    std::env::var("DASDEVBOT_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data/dasdevbot.sqlite"))
+    if let Ok(path) = std::env::var("DASDEVBOT_DATA") {
+        return PathBuf::from(path);
+    }
+    #[cfg(feature = "demo-daemon")]
+    if let Some(path) = demo::data_path() {
+        return path;
+    }
+    PathBuf::from("data/dasdevbot.sqlite")
 }
 
 fn transact(data: &Path, mut body: Value) -> Result<Value, String> {
@@ -213,11 +241,11 @@ fn open_shell() -> ShellState {
 
 /// Session bearer for the webview. The daemon never embeds this in HTML.
 #[tauri::command]
-fn session_token() -> Result<String, String> {
-    read_session_token()
+async fn session_token() -> Result<String, String> {
+    daemon_http::off_main(read_session_token).await
 }
 
-fn read_session_token() -> Result<String, String> {
+pub(crate) fn read_session_token() -> Result<String, String> {
     if let Ok(token) = std::env::var("DASDEVBOT_TOKEN") {
         let token = token.trim().to_string();
         if !token.is_empty() {
@@ -238,7 +266,7 @@ fn token_file() -> PathBuf {
     if let Ok(path) = std::env::var("DASDEVBOT_TOKEN_FILE") {
         return PathBuf::from(path);
     }
-    PathBuf::from("data/dasdevbot.sqlite.token")
+    dasdevbotd::session_token_path(&daemon_data())
 }
 
 /// Runs before the page parses. Assigns `window` because Tauri wraps the script in a function.
@@ -256,19 +284,160 @@ fn session_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .build()
 }
 
+/// The label of the only window that may sign or undo a decision.
+const CARD_WINDOW: &str = "card";
+
+/// Show and focus the card window. Showing it decides nothing: the card window
+/// still needs the evidence on screen, the hold, and its own IPC capability.
+#[tauri::command]
+fn open_card_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let card = app
+        .get_webview_window(CARD_WINDOW)
+        .ok_or_else(|| "card window is missing".to_string())?;
+    card.show().map_err(|err| err.to_string())?;
+    card.unminimize().map_err(|err| err.to_string())?;
+    card.set_focus().map_err(|err| err.to_string())
+}
+
+/// Forwards sight changes to the page, and the card window hides instead of
+/// closing, so it can be shown again.
+fn keep_card_window(window: &tauri::Window, event: &tauri::WindowEvent) {
+    native_sight::forward(window, event);
+    if window.label() != CARD_WINDOW {
+        return;
+    }
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        api.prevent_close();
+        let _ = window.hide();
+    }
+}
+
+/// The demo installer's daemon. Built only with `--features demo-daemon`.
+///
+/// Studio Director's demo ruling: the sidecar is `dasdevbotd` built with
+/// `--no-default-features` (no iroh UDP bind), started as
+/// `serve --role executor --provider mock` on 127.0.0.1:8787. No
+/// `--allow-remote`, no `--web`, no `--dev-env-secrets`, and no secret is
+/// bundled. It runs only while the app runs: no service and no startup entry.
+#[cfg(feature = "demo-daemon")]
+mod demo {
+    use std::path::PathBuf;
+    use std::process::{Child, Command};
+    use std::sync::Mutex;
+
+    pub struct Daemon(pub Mutex<Option<Child>>);
+
+    /// `%LOCALAPPDATA%\net.dasdev.dasdevbot\dasdevbot.sqlite`, which the
+    /// uninstaller's opt-in "Also delete my data" box removes.
+    pub fn data_path() -> Option<PathBuf> {
+        let base = std::env::var_os("LOCALAPPDATA")?;
+        Some(
+            PathBuf::from(base)
+                .join("net.dasdev.dasdevbot")
+                .join("dasdevbot.sqlite"),
+        )
+    }
+
+    pub fn args(data: &std::path::Path) -> Vec<String> {
+        vec![
+            "serve".into(),
+            "--role".into(),
+            "executor".into(),
+            "--provider".into(),
+            "mock".into(),
+            "--bind".into(),
+            "127.0.0.1:8787".into(),
+            "--data".into(),
+            data.display().to_string(),
+        ]
+    }
+
+    pub fn start(data: &std::path::Path) -> Result<Child, String> {
+        let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+        let dir = exe
+            .parent()
+            .ok_or_else(|| "app directory is missing".to_string())?;
+        let name = if cfg!(windows) {
+            "dasdevbotd.exe"
+        } else {
+            "dasdevbotd"
+        };
+        if let Some(parent) = data.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        let mut command = Command::new(dir.join(name));
+        command.args(args(data)).env_clear();
+        for keep in [
+            "SystemRoot",
+            "LOCALAPPDATA",
+            "APPDATA",
+            "USERPROFILE",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Some(value) = std::env::var_os(keep) {
+                command.env(keep, value);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        command.spawn().map_err(|err| err.to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(session_plugin())
         .manage(open_shell())
         .invoke_handler(tauri::generate_handler![
             session_token,
             sign_decision,
             undo_decision,
-            set_secret
+            set_secret,
+            open_card_window,
+            daemon_http::daemon_snapshot,
+            daemon_http::daemon_emit_demo,
+            shell_form::prepare_shell_form,
+            shell_form::shell_metrics,
+            shell_form::set_shell_bounds,
+            shell_form::window_minimize,
+            shell_form::window_toggle_maximize,
+            shell_form::window_close,
+            snap::snap_maximize_rect
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running dasdevbot");
+        .on_window_event(keep_card_window)
+        .setup(|app| {
+            use tauri::Manager;
+            #[cfg(feature = "demo-daemon")]
+            {
+                let child = demo::start(&daemon_data()).ok();
+                app.manage(demo::Daemon(std::sync::Mutex::new(child)));
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                shell_form::apply_full_chrome(&window);
+            }
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building dasdevbot");
+    app.run(|_app, _event| {
+        #[cfg(feature = "demo-daemon")]
+        if let tauri::RunEvent::Exit = _event {
+            use tauri::Manager;
+            if let Some(state) = _app.try_state::<demo::Daemon>() {
+                if let Some(mut child) = state.0.lock().expect("daemon").take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -284,7 +453,161 @@ mod tests {
         assert_handler(tauri::generate_handler![
             super::sign_decision,
             super::undo_decision,
-            super::set_secret
+            super::set_secret,
+            super::open_card_window,
+            super::daemon_http::daemon_snapshot,
+            super::daemon_http::daemon_emit_demo,
+            super::shell_form::prepare_shell_form,
+            super::shell_form::shell_metrics,
+            super::shell_form::set_shell_bounds,
+            super::shell_form::window_minimize,
+            super::shell_form::window_toggle_maximize,
+            super::shell_form::window_close,
+            super::snap::snap_maximize_rect
         ]);
+    }
+
+    fn capability(name: &str) -> serde_json::Value {
+        let path = format!("{}/capabilities/{name}.json", env!("CARGO_MANIFEST_DIR"));
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn permissions_for(window: &str) -> Vec<String> {
+        let dir = format!("{}/capabilities", env!("CARGO_MANIFEST_DIR"));
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().path();
+            let stem = name.file_stem().unwrap().to_string_lossy().to_string();
+            let cap = capability(&stem);
+            let windows: Vec<&str> = cap["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            if windows.contains(&window) || windows.contains(&"*") {
+                for permission in cap["permissions"].as_array().unwrap() {
+                    out.push(permission.as_str().unwrap().to_string());
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "demo-daemon")]
+    #[test]
+    fn the_demo_daemon_is_loopback_mock_executor() {
+        let args = super::demo::args(std::path::Path::new("d/dasdevbot.sqlite"));
+        assert_eq!(
+            args,
+            [
+                "serve",
+                "--role",
+                "executor",
+                "--provider",
+                "mock",
+                "--bind",
+                "127.0.0.1:8787",
+                "--data",
+                "d/dasdevbot.sqlite"
+            ]
+        );
+        for banned in ["--allow-remote", "--web", "--dev-env-secrets", "--token"] {
+            assert!(!args.iter().any(|arg| arg == banned), "{banned}");
+        }
+    }
+
+    /// A sync `#[tauri::command]` runs on the main thread in Tauri 2. Every
+    /// command that touches the daemon (HTTP, the shell socket, Windows Hello)
+    /// or the disk must be async and run its blocking work off the main thread.
+    #[test]
+    fn daemon_commands_never_block_the_main_thread() {
+        let dir = format!("{}/src", env!("CARGO_MANIFEST_DIR"));
+        let mut source = String::new();
+        for file in ["lib.rs", "daemon_http.rs"] {
+            source.push_str(&std::fs::read_to_string(format!("{dir}/{file}")).unwrap());
+        }
+        for name in [
+            "daemon_snapshot",
+            "daemon_emit_demo",
+            "sign_decision",
+            "undo_decision",
+            "set_secret",
+            "session_token",
+        ] {
+            let sync = [format!("fn {name}("), format!("pub(crate) fn {name}(")];
+            let lines: Vec<&str> = source.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                if sync
+                    .iter()
+                    .any(|needle| trimmed.starts_with(needle.as_str()))
+                {
+                    let above = lines[..index].iter().rev().find(|l| !l.trim().is_empty());
+                    assert!(
+                        above.is_none_or(|l| !l.contains("#[tauri::command]")),
+                        "{name} is a sync tauri command and would block the main thread"
+                    );
+                }
+            }
+            assert!(
+                source.contains(&format!("async fn {name}(")),
+                "{name} must be an async command"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_card_window_can_decide() {
+        for window in ["main", "settings", "voice"] {
+            let granted = permissions_for(window);
+            assert!(
+                !granted.iter().any(|p| p == "allow-sign-decision"),
+                "{window}"
+            );
+            assert!(
+                !granted.iter().any(|p| p == "allow-undo-decision"),
+                "{window}"
+            );
+        }
+        let card = permissions_for("card");
+        assert!(card.iter().any(|p| p == "allow-sign-decision"));
+        assert!(card.iter().any(|p| p == "allow-undo-decision"));
+        assert!(!card.iter().any(|p| p.starts_with("allow-set-shell")));
+        assert!(permissions_for("main")
+            .iter()
+            .any(|p| p == "allow-open-card-window"));
+    }
+
+    #[test]
+    fn the_csp_is_mains_and_bundling_is_per_user_nsis() {
+        let path = format!("{}/tauri.conf.json", env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let csp = conf["app"]["security"]["csp"].as_str().unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(!csp.contains('*'));
+        let bundle = &conf["bundle"];
+        assert_eq!(bundle["targets"], serde_json::json!(["nsis"]));
+        assert_eq!(bundle["createUpdaterArtifacts"], false);
+        assert_eq!(bundle["windows"]["nsis"]["installMode"], "currentUser");
+        assert!(conf["plugins"].as_object().is_none_or(|p| p.is_empty()));
+        let labels: Vec<&str> = conf["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels, ["main", "card", "settings", "voice"]);
+        let main = &conf["app"]["windows"][0];
+        assert_eq!(
+            main["minWidth"].as_f64(),
+            Some(crate::shell_form::FULL_MIN_WIDTH)
+        );
+        assert_eq!(
+            main["minHeight"].as_f64(),
+            Some(crate::shell_form::FULL_MIN_HEIGHT)
+        );
     }
 }

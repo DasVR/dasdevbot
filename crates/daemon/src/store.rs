@@ -25,6 +25,12 @@ You cannot post the review yourself. A human approves any external effect.
 Do not invent a diff you were not given.
 ";
 
+const BUILDER_PERSONA: &str = "\
+You are Builder, a demo teammate for the DasVR/NIL repository.
+You exist only while the mock provider runs the scripted demo.
+Phase 1 denies every destructive action you ask for.
+";
+
 pub struct Store {
     conn: Connection,
     clock: HybridClock,
@@ -675,20 +681,47 @@ impl Store {
         Ok(out)
     }
 
-    /// Demo-only route: `workspace.write` goes to the reviewer only while the
-    /// mock provider runs. Any other provider removes the row, so a database
-    /// that once ran the demo keeps the real routing. The row names a kind and
-    /// an agent; it carries no tier. `classify` still sets the tier.
+    /// Demo-only routes, seeded only while the mock provider runs:
+    /// `workspace.write` goes to the reviewer, and the scripted force-push goes
+    /// to a Builder teammate instead of the reviewer, so the denied C1 row names
+    /// the agent that wanted it. Any other provider removes these rows and puts
+    /// main's `repo.force_push -> reviewer` route back, so a database that once
+    /// ran the demo keeps the real routing. Builder's agent row is dropped too
+    /// unless a job or an approval still names it. The rows name a kind and an
+    /// agent; they carry no tier. `classify` still sets the tier.
     pub fn set_demo_routing(&mut self, enabled: bool) -> Result<()> {
         if enabled {
             self.conn.execute(
                 "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES (?1, 'workspace.write', 'reviewer')",
                 [DEMO_WORKSPACE_WRITE_RULE],
             )?;
-        } else {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO agents (id, name, persona, project, token_cap, tokens_spent)
+                 VALUES (?1, 'Builder', ?2, 'DasVR/NIL', 8000, 0)",
+                params![DEMO_BUILDER_AGENT, BUILDER_PERSONA],
+            )?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES (?1, 'repo.force_push', ?2)",
+                params![DEMO_FORCE_PUSH_RULE, DEMO_BUILDER_AGENT],
+            )?;
             self.conn.execute(
                 "DELETE FROM rules WHERE id = ?1",
-                [DEMO_WORKSPACE_WRITE_RULE],
+                [MAIN_FORCE_PUSH_RULE],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM rules WHERE id IN (?1, ?2)",
+                [DEMO_WORKSPACE_WRITE_RULE, DEMO_FORCE_PUSH_RULE],
+            )?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES (?1, 'repo.force_push', 'reviewer')",
+                [MAIN_FORCE_PUSH_RULE],
+            )?;
+            self.conn.execute(
+                "DELETE FROM agents WHERE id = ?1
+                 AND NOT EXISTS (SELECT 1 FROM jobs WHERE agent_id = ?1)
+                 AND NOT EXISTS (SELECT 1 FROM approvals WHERE agent_id = ?1)",
+                [DEMO_BUILDER_AGENT],
             )?;
         }
         Ok(())
@@ -1803,6 +1836,12 @@ fn ensure_node_id(conn: &Connection) -> Result<String> {
 
 /// Rule id for the demo-only `workspace.write` route. See [`Store::set_demo_routing`].
 pub(crate) const DEMO_WORKSPACE_WRITE_RULE: &str = "rule-demo-workspace-write-reviewer";
+/// Rule id for the demo-only `repo.force_push -> builder` route.
+pub(crate) const DEMO_FORCE_PUSH_RULE: &str = "rule-demo-force-push-builder";
+/// Main's force-push route. The demo swaps it out and a real provider puts it back.
+const MAIN_FORCE_PUSH_RULE: &str = "rule-force-push-reviewer";
+/// The demo-only teammate that wants the scripted force-push.
+pub(crate) const DEMO_BUILDER_AGENT: &str = "builder";
 
 fn seed(conn: &Connection) -> Result<()> {
     conn.execute(
@@ -1815,8 +1854,8 @@ fn seed(conn: &Connection) -> Result<()> {
         [],
     )?;
     conn.execute(
-        "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES ('rule-force-push-reviewer', 'repo.force_push', 'reviewer')",
-        [],
+        "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES (?1, 'repo.force_push', 'reviewer')",
+        [MAIN_FORCE_PUSH_RULE],
     )?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

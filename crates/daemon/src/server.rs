@@ -150,6 +150,29 @@ fn health(app: &App) -> Health {
     }
 }
 
+/// Decided, committed approvals the snapshot carries, newest first. Pending
+/// and still-undoable rows are always included. The UI polls the snapshot every
+/// second, so an unbounded list (and its three event lookups per row) made
+/// every poll slower the longer the daemon ran.
+pub(crate) const SNAPSHOT_FILED: usize = 50;
+/// Ledger rows the snapshot carries, newest first.
+pub(crate) const SNAPSHOT_LEDGER: usize = 200;
+
+/// Keep every pending or undoable row and the newest `SNAPSHOT_FILED` filed rows.
+/// `rows` is newest first.
+fn bounded_approvals(rows: Vec<crate::store::ApprovalRow>) -> Vec<crate::store::ApprovalRow> {
+    let mut filed = 0usize;
+    rows.into_iter()
+        .filter(|row| {
+            if row.status == "pending" || row.committed == 0 {
+                return true;
+            }
+            filed += 1;
+            filed <= SNAPSHOT_FILED
+        })
+        .collect()
+}
+
 fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
     let agents = store
         .agents()?
@@ -169,7 +192,7 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
             }
         })
         .collect();
-    let approval_rows = store.approvals()?;
+    let approval_rows = bounded_approvals(store.approvals()?);
     let events = referenced_events(store, &approval_rows)?
         .into_iter()
         .map(event_view)
@@ -216,6 +239,7 @@ fn snapshot(app: &App, store: &crate::store::Store) -> Result<Snapshot> {
     let ledger = store
         .ledger()?
         .into_iter()
+        .take(SNAPSHOT_LEDGER)
         .map(|row| LedgerView {
             id: row.id,
             agent_id: row.agent_id,
@@ -271,10 +295,16 @@ fn referenced_events(
         if let Some(id) = row.decision_event_id.as_deref() {
             remember(store, &mut seen, &mut extra, id)?;
         }
-        let key = format!("approval-requested:{}", row.id);
-        if let Some(event) = store.event_by_key(&key)? {
-            if seen.insert(event.id.clone()) {
-                extra.push(event);
+        // A card was asked for; destructive work was denied at the gate and
+        // has only the denial event. The shell keys its rows to these.
+        for key in [
+            format!("approval-requested:{}", row.id),
+            format!("gate-denied:{}", row.id),
+        ] {
+            if let Some(event) = store.event_by_key(&key)? {
+                if seen.insert(event.id.clone()) {
+                    extra.push(event);
+                }
             }
         }
     }
@@ -827,6 +857,54 @@ mod tests {
             .unwrap();
         assert_eq!(after["approvals"][0]["status"], "denied");
         assert_eq!(after["approvals"][0]["effect_class"], "destructive");
+    }
+
+    #[test]
+    fn the_snapshot_carries_open_rows_and_only_the_newest_filed_ones() {
+        let row = |n: usize, status: &str, committed: i64| crate::store::ApprovalRow {
+            id: format!("ap_{n}"),
+            job_id: String::new(),
+            agent_id: "reviewer".into(),
+            agent_name: "Reviewer".into(),
+            thread_id: String::new(),
+            effect_class: "external".into(),
+            action: String::new(),
+            purpose: String::new(),
+            draft: String::new(),
+            evidence: String::new(),
+            evidence_repo: String::new(),
+            evidence_ref: String::new(),
+            evidence_event_id: String::new(),
+            evidence_kind: String::new(),
+            status: status.into(),
+            provider: "mock".into(),
+            model: String::new(),
+            usage_kind: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            micro_usd: 0,
+            created_at: 10_000 - n as i64,
+            expires_at: None,
+            decided_at: None,
+            decision_event_id: None,
+            reason: None,
+            commit_due_ms: None,
+            committed,
+        };
+        // Newest first: one pending, one still undoable, then 200 filed.
+        let mut rows = vec![row(0, "pending", 0), row(1, "approved", 0)];
+        rows.extend((2..202).map(|n| row(n, "denied", 1)));
+        rows.push(row(500, "pending", 0));
+        let kept = bounded_approvals(rows);
+        assert_eq!(kept.len(), SNAPSHOT_FILED + 3);
+        assert_eq!(kept[0].id, "ap_0");
+        assert_eq!(kept[1].id, "ap_1");
+        assert_eq!(kept[2].id, "ap_2");
+        assert_eq!(
+            kept[SNAPSHOT_FILED + 1].id,
+            format!("ap_{}", SNAPSHOT_FILED + 1)
+        );
+        assert_eq!(kept.last().unwrap().id, "ap_500");
     }
 
     /// A demo daemon (`serve --provider mock` on the executor role, which

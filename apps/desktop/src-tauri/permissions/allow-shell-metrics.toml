@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-shell-metrics"
+description = "Read the main window's outer bounds."
+commands.allow = ["shell_metrics"]

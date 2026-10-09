@@ -1,5 +1,12 @@
 {
   "identifier": "card-window",
-  "windows": ["card"],
-  "permissions": ["allow-sign-decision", "allow-undo-decision"]
+  "description": "Card window: read the snapshot and sign or undo a decision. Nothing else.",
+  "windows": [
+    "card"
+  ],
+  "permissions": [
+    "allow-daemon-snapshot",
+    "allow-sign-decision",
+    "allow-undo-decision"
+  ]
 }

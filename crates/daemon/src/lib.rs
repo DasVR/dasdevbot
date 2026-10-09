@@ -514,6 +514,13 @@ mod tests {
         ]
     }
 
+    fn agent_ids(data: &Path) -> Vec<String> {
+        let store = Store::open(data).unwrap();
+        let mut ids: Vec<String> = store.agents().unwrap().into_iter().map(|a| a.id).collect();
+        ids.sort();
+        ids
+    }
+
     #[test]
     fn only_the_mock_provider_seeds_the_workspace_write_route() {
         let dir = std::env::temp_dir().join(format!("dasdevbot-route-{}", uuid::Uuid::new_v4()));
@@ -538,13 +545,17 @@ mod tests {
             routes_after_start(&data, "device", Box::new(MockProvider::new()));
         assert_eq!(write, reviewer);
         assert_eq!(push, reviewer);
-        assert_eq!(force, reviewer);
+        // The scripted force-push is Builder's, so the denied row names Builder.
+        assert_eq!(force, vec!["builder".to_string()]);
+        assert_eq!(agent_ids(&data), ["builder", "reviewer"]);
 
-        // The same database started with a real provider drops the demo route.
+        // The same database started with a real provider drops the demo routes
+        // and Builder, and main's force-push route comes back.
         let [write, push, force] = routes_after_start(&data, "device", real("ollama"));
         assert!(write.is_empty(), "the demo route outlived the demo");
         assert_eq!(push, reviewer);
         assert_eq!(force, reviewer);
+        assert_eq!(agent_ids(&data), ["reviewer"]);
 
         // The server role refuses the mock; it never gets the route either.
         let [write, _, _] = routes_after_start(

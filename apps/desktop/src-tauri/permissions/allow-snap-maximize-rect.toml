@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-snap-maximize-rect"
+description = "Place the Windows Snap Layouts hit-test overlay over the drawn maximize button."
+commands.allow = ["snap_maximize_rect"]
