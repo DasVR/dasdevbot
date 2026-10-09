@@ -704,10 +704,8 @@ impl Store {
                 "INSERT OR IGNORE INTO rules (id, kind, agent_id) VALUES (?1, 'repo.force_push', ?2)",
                 params![DEMO_FORCE_PUSH_RULE, DEMO_BUILDER_AGENT],
             )?;
-            self.conn.execute(
-                "DELETE FROM rules WHERE id = ?1",
-                [MAIN_FORCE_PUSH_RULE],
-            )?;
+            self.conn
+                .execute("DELETE FROM rules WHERE id = ?1", [MAIN_FORCE_PUSH_RULE])?;
         } else {
             self.conn.execute(
                 "DELETE FROM rules WHERE id IN (?1, ?2)",

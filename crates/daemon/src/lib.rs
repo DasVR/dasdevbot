@@ -4,6 +4,7 @@ mod audit_log;
 mod caps;
 mod harness;
 mod hello_key;
+pub mod http_proof;
 pub mod ipc;
 mod ownership_store;
 mod provider;
