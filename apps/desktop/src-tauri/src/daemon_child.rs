@@ -294,7 +294,8 @@ mod tests {
     /// contained.
     #[test]
     fn the_windows_path_uses_a_kill_on_close_job_and_fails_closed() {
-        let source = include_str!("daemon_child.rs");
+        // A Windows checkout may have CRLF line endings.
+        let source = include_str!("daemon_child.rs").replace("\r\n", "\n");
         assert!(source.contains(
             "info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"
         ));
